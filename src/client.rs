@@ -398,15 +398,15 @@ impl Client {
                 http: &Http
             ) -> Result<Status, Error> {
                 // Calculate hash of the target block.
-                let hash = target_block.hash()?;
+                let target_block_hash = target_block.hash()?;
 
                 // Read local blockchain validators.
-                let mut validators = storage.get_validators_after_block(&hash)
+                let mut validators = storage.get_validators_after_block(&target_block_hash)
                     .map_err(|err| Error::Storage(err.to_string()))?;
 
                 // Then request history known to the shard after our last block.
                 let response = http.get(format!("{shard_address}/api/v1/sync"))
-                    .query(&[("after", hash.to_base64())])
+                    .query(&[("after", target_block_hash.to_base64())])
                     .send().await?;
 
                 // If shard knows our block and it's a valid part of the
@@ -433,7 +433,7 @@ impl Client {
 
                     // Verify the blocks of received history.
                     let mut history_valid = true;
-                    let mut prev_hash = hash;
+                    let mut prev_hash = target_block_hash;
 
                     for block in &history {
                         // Skip history synchronization if blocks in the
@@ -508,9 +508,62 @@ impl Client {
                     // c) approved by enough other validators,
                     // d) and all these signs are valid.
                     //
-                    // Now we can merge received history with our local
-                    // storage.
+                    // Now we can compare received history with our locally
+                    // stored one and merge them together.
 
+                    // Try to read next local block from the target one.
+                    let next_block = storage.read_next_block(&target_block_hash)
+                        .map_err(|err| Error::Storage(err.to_string()))?;
+
+                    // If there's any - it means that received history is
+                    // attempting to replace our local one. Before doing so
+                    // we must verify that it's actually prevalent to our own.
+                    if let Some(next_block) = next_block {
+                        let new_next_block = &history[0];
+
+                        /// Count amount of validators for a block with given hash.
+                        fn count_validators(block: &Block, hash: Hash) -> Result<usize, Error> {
+                            let mut validators = HashSet::new();
+
+                            let (valid, validator) = block.sign().verify(hash)?;
+
+                            if valid {
+                                validators.insert(validator.to_bytes());
+                            }
+
+                            for approval in block.approvals() {
+                                let (valid, validator) = approval.verify(hash)?;
+
+                                if valid {
+                                    validators.insert(validator.to_bytes());
+                                }
+                            }
+
+                            Ok(validators.len())
+                        }
+
+                        let next_block_hash = next_block.hash()?;
+                        let new_next_block_hash = new_next_block.hash()?;
+
+                        let curr_validators = count_validators(&next_block, next_block_hash)?;
+                        let new_validators = count_validators(new_next_block, new_next_block_hash)?;
+
+                        // If we have more approves than received history's block
+                        // then we just skip it and keep our own copy.
+                        if curr_validators > new_validators {
+                            return Ok(Status::InvalidShard);
+                        }
+
+                        // If we have equal amount of approves but our block's
+                        // hash is lower or equal to the received block's hash
+                        // then we just keep our own and that's it.
+                        if curr_validators == new_validators && next_block_hash <= new_next_block_hash {
+                            return Ok(Status::InvalidShard);
+                        }
+                    }
+
+                    // Merge the history into our local blockchain after all the
+                    // verifications were passed successfully.
                     for block in history.drain(..) {
                         storage.write_block(&block)
                             .map_err(|err| Error::Storage(err.to_string()))?;

@@ -20,7 +20,7 @@ pub fn base64_decode(
     BASE64_ENGINE.decode(data)
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Hash(pub [u8; 32]);
 
 impl Hash {
