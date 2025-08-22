@@ -9,8 +9,8 @@ edition = "2024"
 _http = ["dep:tokio", "dep:futures", "dep:reqwest"]
 
 client = ["_http"]
-shard = ["_http"]
-validator = ["_http"]
+shard = ["_http", "client"]
+validator = ["_http", "client"]
 
 default = ["client", "shard", "validator"]
 
