@@ -47,13 +47,13 @@ impl Block {
     }
 
     #[inline(always)]
-    pub fn previous(&self) -> Hash {
-        self.previous
+    pub fn previous(&self) -> &Hash {
+        &self.previous
     }
 
     #[inline(always)]
-    pub fn timestamp(&self) -> UtcDateTime {
-        self.timestamp
+    pub fn timestamp(&self) -> &UtcDateTime {
+        &self.timestamp
     }
 
     #[inline(always)]
