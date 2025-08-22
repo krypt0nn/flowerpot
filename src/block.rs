@@ -2,6 +2,7 @@ use std::io::{Read, Cursor};
 
 use time::UtcDateTime;
 use varint_rs::{VarintReader, VarintWriter};
+use serde_json::{json, Value as Json};
 
 use crate::crypto::*;
 use crate::transaction::*;
@@ -121,12 +122,14 @@ impl Block {
 
         block.extend(content); // Content
 
+        let block = zstd::encode_all(Cursor::new(block), 20)?;
+
         Ok(block.into_boxed_slice())
     }
 
     /// Decode block from bytes representation.
     pub fn from_bytes(block: impl AsRef<[u8]>) -> std::io::Result<Self> {
-        let block = block.as_ref();
+        let block = zstd::decode_all(block.as_ref())?;
 
         if block.is_empty() {
             return Err(std::io::Error::other("invalid block length"));
@@ -178,6 +181,66 @@ impl Block {
             content: BlockContent::from_bytes(content)?,
             sign,
             approvals
+        })
+    }
+
+    /// Get standard JSON representation of the block.
+    pub fn to_json(&self) -> std::io::Result<Json> {
+        Ok(json!({
+            "format": 0,
+            "previous": self.previous.to_base64(),
+            "timestamp": self.timestamp.unix_timestamp(),
+            "content": self.content.to_json()?,
+            "sign": self.sign.to_base64(),
+            "approvals": self.approvals.iter()
+                .map(|approval| approval.to_base64())
+                .collect::<Vec<_>>()
+        }))
+    }
+
+    /// Decode standard JSON representation of the block.
+    pub fn from_json(json: &Json) -> std::io::Result<Self> {
+        let Some(format) = json.get("format").and_then(Json::as_u64) else {
+            return Err(std::io::Error::other("missing block format"));
+        };
+
+        if format != 0 {
+            return Err(std::io::Error::other("unknown block format"));
+        }
+
+        Ok(Self {
+            previous: json.get("previous")
+                .and_then(Json::as_str)
+                .and_then(Hash::from_base64)
+                .ok_or_else(|| std::io::Error::other("missing previous block hash"))?,
+
+            timestamp: json.get("timestamp")
+                .and_then(Json::as_i64)
+                .map(UtcDateTime::from_unix_timestamp)
+                .transpose()
+                .map_err(|_| std::io::Error::other("invalid block timestamp"))?
+                .ok_or_else(|| std::io::Error::other("missing block timestamp"))?,
+
+            content: json.get("content")
+                .map(BlockContent::from_json)
+                .ok_or_else(|| std::io::Error::other("missing block's content"))??,
+
+            sign: json.get("sign")
+                .and_then(Json::as_str)
+                .and_then(Signature::from_base64)
+                .ok_or_else(|| std::io::Error::other("missing block signature"))?,
+
+            approvals: json.get("approvals")
+                .and_then(Json::as_array)
+                .and_then(|approvals| {
+                    approvals.iter()
+                        .map(Json::as_str)
+                        .map(|approval| {
+                            approval.and_then(Signature::from_base64)
+                        })
+                        .collect::<Option<Vec<Signature>>>()
+                })
+                .ok_or_else(|| std::io::Error::other("invalid block approvals"))?
         })
     }
 }
@@ -286,6 +349,71 @@ impl BlockContent {
             }
 
             _ => Err(std::io::Error::other("unknown block content format"))
+        }
+    }
+
+    /// Get standard JSON representation of the block's content.
+    pub fn to_json(&self) -> std::io::Result<Json> {
+        match self {
+            Self::Validators(validators) => {
+                Ok(json!({
+                    "format": 0, // validators v1 format
+                    "content": validators.iter()
+                        .map(|validator| validator.to_base64())
+                        .collect::<Vec<_>>()
+                }))
+            }
+
+            Self::Transactions(transactions) => {
+                Ok(json!({
+                    "format": 1, // transactions v1 format
+                    "content": transactions.iter()
+                        .map(|transactions| transactions.to_json())
+                        .collect::<Result<Vec<_>, _>>()?
+                }))
+            }
+        }
+    }
+
+    /// Decode standard JSON representation of the block's content.
+    pub fn from_json(json: &Json) -> std::io::Result<Self> {
+        let Some(format) = json.get("format").and_then(Json::as_u64) else {
+            return Err(std::io::Error::other("missing block's content format"));
+        };
+
+        let Some(content) = json.get("content") else {
+            return Err(std::io::Error::other("missing block's content data"));
+        };
+
+        match format {
+            // validators v1 format
+            0 => {
+                let Some(validators) = content.as_array() else {
+                    return Err(std::io::Error::other("invalid validators format"));
+                };
+
+                let validators = validators.iter()
+                    .flat_map(Json::as_str)
+                    .flat_map(PublicKey::from_base64)
+                    .collect::<Vec<_>>();
+
+                Ok(Self::Validators(validators.into_boxed_slice()))
+            }
+
+            // transactions v1 format
+            1 => {
+                let Some(transactions) = content.as_array() else {
+                    return Err(std::io::Error::other("invalid transactions format"));
+                };
+
+                let transactions = transactions.iter()
+                    .map(Transaction::from_json)
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok(Self::Transactions(transactions.into_boxed_slice()))
+            }
+
+            _ => Err(std::io::Error::other("unknown block's content format"))
         }
     }
 }
