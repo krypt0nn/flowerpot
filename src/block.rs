@@ -10,8 +10,9 @@ use crate::transaction::*;
 pub struct Block {
     previous: Hash,
     timestamp: UtcDateTime,
+    content: BlockContent,
     sign: Signature,
-    content: BlockContent
+    approvals: Vec<Signature>
 }
 
 impl Block {
@@ -41,8 +42,9 @@ impl Block {
         Ok(Self {
             previous,
             timestamp,
+            content,
             sign,
-            content
+            approvals: vec![]
         })
     }
 
@@ -57,13 +59,36 @@ impl Block {
     }
 
     #[inline(always)]
+    pub fn content(&self) -> &BlockContent {
+        &self.content
+    }
+
+    #[inline(always)]
     pub fn sign(&self) -> &Signature {
         &self.sign
     }
 
     #[inline(always)]
-    pub fn content(&self) -> &BlockContent {
-        &self.content
+    pub fn approvals(&self) -> &[Signature] {
+        &self.approvals
+    }
+
+    /// Add approval signature to the block.
+    ///
+    /// Return `Ok(false)` if signature is not valid.
+    pub fn approve(&mut self, sign: Signature) -> std::io::Result<bool> {
+        if !self.approvals.contains(&sign) {
+            let (valid, _) = sign.verify(self.hash()?)
+                .map_err(std::io::Error::other)?;
+
+            if !valid {
+                return Ok(false);
+            }
+
+            self.approvals.push(sign);
+        }
+
+        Ok(true)
     }
 
     /// Calculate hash of the current block.
@@ -84,11 +109,17 @@ impl Block {
 
         let mut block = Vec::new();
 
-        block.push(0);                      // Format version
-        block.extend(self.previous.0);      // Previous block's hash
-        block.write_i64_varint(timestamp)?; // Creation timestamp
-        block.extend(self.sign.to_bytes()); // Sign
-        block.extend(content);              // Content
+        block.push(0);                                   // Format version
+        block.extend(self.previous.0);                   // Previous block's hash
+        block.write_i64_varint(timestamp)?;              // Creation timestamp
+        block.extend(self.sign.to_bytes());              // Sign
+        block.write_usize_varint(self.approvals.len())?; // Approvals number
+
+        for approval in &self.approvals {
+            block.extend(approval.to_bytes()); // Approval signatures
+        }
+
+        block.extend(content); // Content
 
         Ok(block.into_boxed_slice())
     }
@@ -116,12 +147,26 @@ impl Block {
         let timestamp = UtcDateTime::from_unix_timestamp(timestamp)
             .map_err(|_| std::io::Error::other("invalid timestamp format"))?;
 
-        let mut sign = [0; 64];
+        let mut sign = [0; 65];
 
         block.read_exact(&mut sign)?;
 
         let sign = Signature::from_bytes(sign)
             .ok_or_else(|| std::io::Error::other("invalid signature format"))?;
+
+        let approvals_num = block.read_usize_varint()?;
+
+        let mut approval = [0; 65];
+        let mut approvals = Vec::with_capacity(approvals_num);
+
+        for _ in 0..approvals_num {
+            block.read_exact(&mut approval)?;
+
+            let approval = Signature::from_bytes(approval)
+                .ok_or_else(|| std::io::Error::other("invalid approval format"))?;
+
+            approvals.push(approval);
+        }
 
         let mut content = Vec::new();
 
@@ -130,8 +175,9 @@ impl Block {
         Ok(Self {
             previous: Hash::from(previous),
             timestamp,
+            content: BlockContent::from_bytes(content)?,
             sign,
-            content: BlockContent::from_bytes(content)?
+            approvals
         })
     }
 }
