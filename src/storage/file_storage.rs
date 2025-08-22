@@ -151,11 +151,7 @@ impl Storage for FileStorage {
         }
     }
 
-    fn write_block(&self, block: Block) -> Result<(), Self::Error> {
-        let Some(index) = self.index_find_block_hash(block.previous())? else {
-            return Err(std::io::Error::other("can't write block if parent block is not written yet"));
-        };
-
+    fn write_block(&self, block: &Block) -> Result<(), Self::Error> {
         let hash = block.hash()?;
         let path = self.get_block_path(&hash);
 
@@ -165,12 +161,20 @@ impl Storage for FileStorage {
 
         std::fs::write(path, block.to_bytes()?)?;
 
-        self.index_write_block_hash(index + 1, &hash)?;
+        if !block.is_root() {
+            let Some(index) = self.index_find_block_hash(block.previous())? else {
+                return Err(std::io::Error::other("can't write block if parent block is not written yet"));
+            };
+
+            self.index_write_block_hash(index + 1, &hash)?;
+        } else {
+            self.index_write_block_hash(0, &hash)?;
+        }
 
         Ok(())
     }
 
-    fn get_validators_for_block(&self, hash: &Hash) -> Result<Vec<PublicKey>, Self::Error> {
+    fn get_validators_before_block(&self, hash: &Hash) -> Result<Vec<PublicKey>, Self::Error> {
         let mut block = self.read_block(hash)?;
 
         while let Some(value) = block {
@@ -184,9 +188,23 @@ impl Storage for FileStorage {
         Ok(vec![])
     }
 
+    fn get_validators_after_block(&self, hash: &Hash) -> Result<Vec<PublicKey>, Self::Error> {
+        let mut block = self.read_block(hash)?;
+
+        while let Some(value) = block {
+            if let BlockContent::Validators(validators) = value.content() {
+                return Ok(validators.to_vec());
+            }
+
+            block = self.read_block(value.previous())?;
+        }
+
+        Ok(vec![])
+    }
+
     fn get_current_validators(&self) -> Result<Vec<PublicKey>, Self::Error> {
         match self.read_last_block()? {
-            Some(block) => self.get_validators_for_block(&block.hash()?),
+            Some(block) => self.get_validators_after_block(&block.hash()?),
             None => Ok(vec![])
         }
     }

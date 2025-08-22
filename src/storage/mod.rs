@@ -4,7 +4,7 @@ use crate::block::*;
 pub mod file_storage;
 
 pub trait Storage {
-    type Error;
+    type Error: std::error::Error;
 
     /// Read block from its hash. Return `Ok(None)` if there's no such block.
     fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error>;
@@ -34,7 +34,7 @@ pub trait Storage {
     /// there's any. History modifications, block and stored transactions must
     /// be verified outside of this trait so this method must work without extra
     /// verifications, even if the block is not valid.
-    fn write_block(&self, block: Block) -> Result<(), Self::Error>;
+    fn write_block(&self, block: &Block) -> Result<(), Self::Error>;
 
     /// Get list of blockchain validators at the point in time when the block
     /// with provided hash didn't exist yet. This is needed because validators
@@ -45,7 +45,15 @@ pub trait Storage {
     /// changes validators list then this method should return *previous
     /// validators* list - so validators who can approve creation of the block
     /// with provided hash.
-    fn get_validators_for_block(
+    fn get_validators_before_block(
+        &self,
+        hash: &Hash
+    ) -> Result<Vec<PublicKey>, Self::Error>;
+
+    /// Similar to `get_validators_before_block` but this method should return
+    /// list of validators after the block with provided hash was added to
+    /// the blockchain.
+    fn get_validators_after_block(
         &self,
         hash: &Hash
     ) -> Result<Vec<PublicKey>, Self::Error>;

@@ -74,6 +74,12 @@ impl Block {
         &self.approvals
     }
 
+    /// Return `true` if the current block is root of the blockchain.
+    #[inline]
+    pub fn is_root(&self) -> bool {
+        self.previous.0 == [0; 32]
+    }
+
     /// Add approval signature to the block.
     ///
     /// Return `Ok(false)` if signature is not valid.
@@ -101,6 +107,18 @@ impl Block {
         hasher.update(&self.content.to_bytes()?);
 
         Ok(Hash::from(hasher.finalize()))
+    }
+
+    /// Verify the signature of the current block.
+    ///
+    /// This method *does not* validate the block's approvals. This must be done
+    /// outside of this method using the blockchain's storage.
+    pub fn verify(&self) -> std::io::Result<(bool, Hash, PublicKey)> {
+        let hash = self.hash()?;
+
+        self.sign.verify(hash)
+            .map(|(valid, author)| (valid, hash, author))
+            .map_err(std::io::Error::other)
     }
 
     /// Encode block into bytes representation.

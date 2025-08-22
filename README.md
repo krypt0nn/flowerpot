@@ -97,6 +97,9 @@ provided then the first block of the blockchain will be assumed.
 Full blocks will be returned so that client can download them and validate
 locally.
 
+If selected `after` block is not a part of blockchain known to the shard then
+`404` status with an empty body should be returned.
+
 ```ts
 type Response = object[]; // Standard block JSON format
 ```
