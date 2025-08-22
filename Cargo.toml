@@ -1,0 +1,17 @@
+[package]
+name = "dwchain"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+thiserror = "2.0"
+tokio = { version = "1.45", features = ["io-std", "macros"] }
+reqwest = { version = "0.12", features = ["socks", "h2", "http2", "rustls-tls", "rustls-tls-webpki-roots"], default-features = false }
+serde_json = "1.0"
+varint-rs = "2.2"
+time = "0.3"
+blake3 = "1.8"
+k256 = "0.13"
+base64 = "0.22"
+rand_chacha = "0.3"
+zstd = "0.13"
