@@ -6,8 +6,8 @@ use crate::crypto::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transaction {
-    sign: Signature,
-    data: Box<[u8]>
+    pub(crate) sign: Signature,
+    pub(crate) data: Box<[u8]>
 }
 
 impl Transaction {

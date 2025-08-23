@@ -110,8 +110,27 @@ impl Client {
     }
 
     #[inline(always)]
+    pub fn secret_key(&self) -> &SecretKey {
+        &self.secret_key
+    }
+
+    #[inline(always)]
+    pub fn http(&self) -> &Http {
+        &self.http
+    }
+
+    #[inline(always)]
     pub fn shards(&self) -> &HashSet<String> {
         &self.shards
+    }
+
+    pub fn with_shards<T: ToString>(
+        &mut self,
+        shards: impl IntoIterator<Item = T>
+    ) {
+        self.shards = shards.into_iter()
+            .map(|shard| shard.to_string())
+            .collect();
     }
 
     #[inline]
@@ -122,11 +141,6 @@ impl Client {
     #[inline]
     pub fn remove_shard(&mut self, address: impl AsRef<str>) {
         self.shards.remove(address.as_ref());
-    }
-
-    #[inline(always)]
-    pub fn secret_key(&self) -> &SecretKey {
-        &self.secret_key
     }
 
     /// Announce transaction to all the connected shards.

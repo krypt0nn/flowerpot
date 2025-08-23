@@ -32,8 +32,8 @@ type Request = object; // Standard transaction JSON format
 
 Read content of a transaction with provided hash.
 
-If transaction with such hash is not found - then `404` status with an empty
-body should be returned.
+If transaction with such hash is not found - then `404` status should be
+returned.
 
 ```ts
 type Response = object; // Standard transaction JSON format
@@ -70,8 +70,7 @@ type Request = object; // Standard block JSON format
 
 Read content of a block with provided hash.
 
-If block with such hash is not found - then `404` status with an empty body
-should be returned.
+If block with such hash is not found - then `404` status should be returned.
 
 ```ts
 type Response = object; // Standard block JSON format
@@ -98,7 +97,7 @@ Full blocks will be returned so that client can download them and validate
 locally.
 
 If selected `after` block is not a part of blockchain known to the shard then
-`404` status with an empty body should be returned.
+`404` status should be returned.
 
 ```ts
 type Response = object[]; // Standard block JSON format

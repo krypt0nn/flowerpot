@@ -9,11 +9,11 @@ use crate::transaction::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
-    previous: Hash,
-    timestamp: UtcDateTime,
-    content: BlockContent,
-    sign: Signature,
-    approvals: Vec<Signature>
+    pub(crate) previous: Hash,
+    pub(crate) timestamp: UtcDateTime,
+    pub(crate) content: BlockContent,
+    pub(crate) sign: Signature,
+    pub(crate) approvals: Vec<Signature>
 }
 
 impl Block {

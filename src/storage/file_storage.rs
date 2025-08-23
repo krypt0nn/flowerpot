@@ -5,6 +5,7 @@ use std::fs::File;
 use super::*;
 
 /// Very inefficient, quickly crafted filesystem-based storage for blockchain.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FileStorage(PathBuf);
 
 impl FileStorage {
