@@ -63,6 +63,12 @@ impl From<[u8; 32]> for Hash {
     }
 }
 
+impl std::fmt::Display for Hash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_base64())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicKey(k256::ecdsa::VerifyingKey);
 
@@ -93,6 +99,12 @@ impl From<k256::ecdsa::VerifyingKey> for PublicKey {
     #[inline(always)]
     fn from(value: k256::ecdsa::VerifyingKey) -> Self {
         Self(value)
+    }
+}
+
+impl std::fmt::Display for PublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_base64())
     }
 }
 
@@ -139,6 +151,12 @@ impl From<k256::ecdsa::SigningKey> for SecretKey {
     #[inline(always)]
     fn from(value: k256::ecdsa::SigningKey) -> Self {
         Self(value)
+    }
+}
+
+impl std::fmt::Display for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_base64())
     }
 }
 
@@ -197,5 +215,11 @@ impl Signature {
 
     pub fn from_base64(sign: impl AsRef<[u8]>) -> Option<Self> {
         Self::from_bytes(base64_decode(sign).ok()?)
+    }
+}
+
+impl std::fmt::Display for Signature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_base64())
     }
 }
