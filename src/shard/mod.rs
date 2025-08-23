@@ -2,9 +2,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::collections::HashMap;
 
+use futures::TryFutureExt;
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, Mutex};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver};
 
 use axum::Router;
 use axum::routing::{get, put};
@@ -185,7 +186,12 @@ where
         "starting shard HTTP API server"
     );
 
-    let (events_sender, _events_listener) = tokio::sync::mpsc::unbounded_channel();
+    let (events_sender, events_listener) = tokio::sync::mpsc::unbounded_channel();
+
+    let client = Arc::new(RwLock::new(shard.client));
+    let storage = Arc::new(Mutex::new(shard.storage));
+    let pending_transactions = Arc::new(RwLock::new(HashMap::new()));
+    let pending_blocks = Arc::new(RwLock::new(HashMap::new()));
 
     let router = Router::new()
         .route("/api/v1/transactions", get(transactions_api::get_transactions))
@@ -198,17 +204,101 @@ where
         .route("/api/v1/shards", get(shards_api::get_shards))
         .route("/api/v1/shards", put(shards_api::put_shards))
         .with_state(ShardState {
-            client: Arc::new(RwLock::new(shard.client)),
-            storage: Arc::new(Mutex::new(shard.storage)),
+            client: client.clone(),
+            storage: storage.clone(),
             security_rules: shard.security_rules,
-            pending_transactions: Default::default(),
-            pending_blocks: Default::default(),
+            pending_transactions: pending_transactions.clone(),
+            pending_blocks: pending_blocks.clone(),
             events_sender: Arc::new(events_sender)
         });
 
     let listener = TcpListener::bind(shard.local_address).await?;
 
-    axum::serve(listener, router).await?;
+    futures::try_join!(
+        // Shard HTTP API server.
+        axum::serve(listener, router)
+            .into_future()
+            .map_err(Error::from),
+
+        // Shard events handler.
+        handle_events(
+            events_listener,
+            client,
+            pending_transactions,
+            pending_blocks
+        )
+    )?;
+
+    Ok(())
+}
+
+async fn handle_events(
+    mut events_listener: UnboundedReceiver<ShardEvent>,
+    client: Arc<RwLock<Client>>,
+    pending_transactions: Arc<RwLock<HashMap<[u8; 32], Transaction>>>,
+    pending_blocks: Arc<RwLock<HashMap<[u8; 32], Block>>>
+) -> Result<(), Error> {
+    while let Some(event) = events_listener.recv().await {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(?event, "processing shard event");
+
+        match event {
+            ShardEvent::SharePendingTransaction(hash) => {
+                let transaction = pending_transactions.read().await
+                    .get(&hash.0)
+                    .cloned();
+
+                if let Some(transaction) = transaction {
+                    let result = client.read().await
+                        .announce_transaction(&transaction).await;
+
+                    if let Err(err) = result {
+                        #[cfg(feature = "tracing")]
+                        tracing::error!(
+                            hash = hash.to_base64(),
+                            ?err,
+                            "failed to share pending transaction"
+                        );
+                    }
+                }
+            }
+
+            ShardEvent::SharePendingBlock(hash) => {
+                let block = pending_blocks.read().await
+                    .get(&hash.0)
+                    .cloned();
+
+                if let Some(block) = block {
+                    let result = client.read().await
+                        .announce_block(&block).await;
+
+                    if let Err(err) = result {
+                        #[cfg(feature = "tracing")]
+                        tracing::error!(
+                            hash = hash.to_base64(),
+                            ?err,
+                            "failed to share pending block"
+                        );
+                    }
+                }
+            }
+
+            ShardEvent::SharePendingBlockApproval(hash, sign) => {
+                let result = client.read().await
+                    .approve_block(&hash, &sign).await;
+
+                if let Err(err) = result {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(
+                        hash = hash.to_base64(),
+                        sign = sign.to_base64(),
+                        ?err,
+                        "failed to share pending block approval"
+                    );
+                }
+            }
+        }
+    }
 
     Ok(())
 }
