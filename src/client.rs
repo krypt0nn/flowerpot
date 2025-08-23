@@ -716,4 +716,69 @@ impl Client {
 
         Ok(())
     }
+
+    /// Fetch list of other shards known to shards we are connected to.
+    ///
+    /// Perform `GET /api/v1/shards` request.
+    pub async fn list_shards(&self) -> Result<HashSet<String>, Error> {
+        let mut responses = Vec::with_capacity(self.shards.len());
+        let mut bodies = Vec::with_capacity(self.shards.len());
+        let mut addresses = HashSet::new();
+
+        for address in &self.shards {
+            let request = self.http.get(format!("{address}/api/v1/shards"));
+
+            responses.push(request.send());
+        }
+
+        for response in futures::future::try_join_all(responses).await? {
+            if response.status().is_success() {
+                bodies.push(response.bytes());
+            }
+        }
+
+        for body in futures::future::try_join_all(bodies).await? {
+            let response = serde_json::from_slice::<HashSet<String>>(&body)?;
+
+            for address in response {
+                if !self.shards.contains(&address) {
+                    addresses.insert(address);
+                }
+            }
+        }
+
+        Ok(addresses)
+    }
+
+    /// Announce shards to all the shards we are connected to.
+    ///
+    /// This method will merge lists of all the shards we are connected to
+    /// with the provided `extra_shards` list and send it to all the shards
+    /// we are connected to.
+    ///
+    /// Perform `PUT /api/v1/shards` request.
+    pub async fn announce_shards<T: ToString>(
+        &self,
+        extra_shards: impl IntoIterator<Item = T>
+    ) -> Result<(), Error> {
+        let mut responses = Vec::with_capacity(self.shards.len());
+        let mut addresses = self.shards.clone();
+
+        for address in extra_shards {
+            addresses.insert(address.to_string());
+        }
+
+        let addresses = serde_json::to_vec(&addresses)?;
+
+        for address in &self.shards {
+            let request = self.http.put(format!("{address}/api/v1/shards"))
+                .body(addresses.clone());
+
+            responses.push(request.send());
+        }
+
+        futures::future::try_join_all(responses).await?;
+
+        Ok(())
+    }
 }

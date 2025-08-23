@@ -137,7 +137,21 @@ type Request = object[]; // Standard block JSON format
 
 API to handle public nodes (shards) of the network.
 
-TBD
+### `GET /api/v1/shards`
+
+Get list of shards the current shard is connected to.
+
+```ts
+type Response = string[];
+```
+
+### `PUT /api/v1/shards`
+
+Announce list of shards to another shard.
+
+```ts
+type Request = string[];
+```
 
 ## Validators
 
