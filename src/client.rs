@@ -1,5 +1,6 @@
 use std::collections::{HashSet, HashMap};
 
+use futures::FutureExt;
 use reqwest::Client as Http;
 use serde_json::Value as Json;
 
@@ -83,7 +84,8 @@ impl PendingBlock {
 pub struct Client {
     secret_key: SecretKey,
     http: Http,
-    shards: HashSet<String>
+    shards: HashSet<String>,
+    target_root: Option<Hash>
 }
 
 impl Client {
@@ -105,7 +107,8 @@ impl Client {
             http,
             shards: shards.into_iter()
                 .map(|shard| shard.to_string())
-                .collect()
+                .collect(),
+            target_root: None
         }
     }
 
@@ -124,23 +127,88 @@ impl Client {
         &self.shards
     }
 
-    pub fn with_shards<T: ToString>(
+    /// This function will verify that the added shards' root blocks are equal
+    /// to the target root block of the current client by performing
+    /// `GET /api/v1/blocks/<hash>` requests.
+    pub async fn with_shards<T: ToString>(
         &mut self,
         shards: impl IntoIterator<Item = T>
-    ) {
+    ) -> Result<(), Error> {
         self.shards = shards.into_iter()
             .map(|shard| shard.to_string())
             .collect();
+
+        self.filter_shards().await
     }
 
-    #[inline]
-    pub fn add_shard(&mut self, address: impl ToString) {
+    /// This function will verify that the added shard's root block is equal
+    /// to the target root block of the current client by performing
+    /// `GET /api/v1/blocks/<hash>` request.
+    pub async fn add_shard(&mut self, address: impl ToString) -> Result<(), Error> {
         self.shards.insert(address.to_string());
+
+        self.filter_shards().await
     }
 
     #[inline]
     pub fn remove_shard(&mut self, address: impl AsRef<str>) {
         self.shards.remove(address.as_ref());
+    }
+
+    /// Specify target root block hash. If one is specified then only shards
+    /// with the asked root block will be used, and all the other shards will
+    /// be silently ignored.
+    ///
+    /// This function will iterate over the known shards and filter out those
+    /// with different target block.
+    #[inline]
+    pub async fn with_target_root(&mut self, hash: impl Into<Hash>) -> Result<(), Error> {
+        self.target_root = Some(hash.into());
+
+        self.filter_shards().await
+    }
+
+    /// Iterate over connected shards and remove those which root block is
+    /// different from the target one, if it is specified.
+    async fn filter_shards(&mut self) -> Result<(), Error> {
+        let Some(root_hash) = self.target_root else {
+            return Ok(());
+        };
+
+        let mut responses = Vec::with_capacity(self.shards.len());
+        let mut bodies = Vec::with_capacity(responses.len());
+
+        let root_hash = root_hash.to_base64();
+
+        for address in &self.shards {
+            let request = self.http.get(format!("{address}/api/v1/blocks/{root_hash}"));
+
+            responses.push(request.send().map(|response| {
+                response.map(|response| (address.clone(), response))
+            }));
+        }
+
+        for (address, response) in futures::future::try_join_all(responses).await? {
+            if response.status().is_success() {
+                bodies.push(response.bytes().map(|body| {
+                    body.map(|body| (address, body))
+                }));
+            } else {
+                self.shards.remove(&address);
+            }
+        }
+
+        for (address, body) in futures::future::try_join_all(bodies).await? {
+            let body = serde_json::from_slice::<Json>(&body)?;
+
+            let block = Block::from_json(&body)?;
+
+            if !block.is_root() {
+                self.shards.remove(&address);
+            }
+        }
+
+        Ok(())
     }
 
     /// Announce transaction to all the connected shards.
@@ -168,6 +236,7 @@ impl Client {
     /// Perform `GET /api/v1/transactions` request.
     pub async fn list_pending_transactions(&self) -> Result<HashSet<Hash>, Error> {
         let mut responses = Vec::with_capacity(self.shards.len());
+        let mut bodies = Vec::with_capacity(self.shards.len());
         let mut transactions = HashSet::new();
 
         for address in &self.shards {
@@ -177,8 +246,13 @@ impl Client {
         }
 
         for response in futures::future::try_join_all(responses).await? {
-            let response = response.bytes().await?;
-            let response = serde_json::from_slice::<HashSet<String>>(&response)?;
+            if response.status().is_success() {
+                bodies.push(response.bytes());
+            }
+        }
+
+        for body in futures::future::try_join_all(bodies).await? {
+            let response = serde_json::from_slice::<HashSet<String>>(&body)?;
 
             for hash in response {
                 if let Some(hash) = Hash::from_base64(hash) {
@@ -236,6 +310,7 @@ impl Client {
     /// Perform `GET /api/v1/blocks` request.
     pub async fn list_pending_blocks(&self) -> Result<Vec<PendingBlock>, Error> {
         let mut responses = Vec::with_capacity(self.shards.len());
+        let mut bodies = Vec::with_capacity(self.shards.len());
         let mut blocks = HashMap::new();
 
         for address in &self.shards {
@@ -245,10 +320,15 @@ impl Client {
         }
 
         for response in futures::future::try_join_all(responses).await? {
-            let response = response.bytes().await?;
-            let response = serde_json::from_slice::<Vec<Json>>(&response)?;
+            if response.status().is_success() {
+                bodies.push(response.bytes());
+            }
+        }
 
-            for block in response {
+        for body in futures::future::try_join_all(bodies).await? {
+            let body = serde_json::from_slice::<Vec<Json>>(&body)?;
+
+            for block in body {
                 let block = PendingBlock::from_json(&block)?;
 
                 let approvals = block.approvals.clone();
