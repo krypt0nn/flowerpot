@@ -34,11 +34,34 @@ pub struct Shard<S: Storage> {
     pub remote_address: Option<String>,
 
     /// Blockchain storage.
-    pub storage: S
+    pub storage: S,
+
+    /// Shard security rules.
+    pub security_rules: ShardSecurityRules
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ShardSecurityRules {
+    /// Maximal allowed size of transaction's body in bytes.
+    ///
+    /// Transactions with larger body will be rejected. They still can be
+    /// accepted by other shards and validated, so added to the blockchain.
+    ///
+    /// Default is `33554432` (32 MB).
+    pub max_transaction_body_size: u64
+}
+
+impl Default for ShardSecurityRules {
+    fn default() -> Self {
+        Self {
+            max_transaction_body_size: 32 * 1024 * 1024
+        }
+    }
 }
 
 #[derive(Clone)]
 struct ShardState<S: Storage> {
+    pub security_rules: ShardSecurityRules,
     pub storage: Arc<Mutex<S>>,
     pub pending_transactions: Arc<RwLock<HashMap<[u8; 32], Transaction>>>,
     pub pending_blocks: Arc<RwLock<HashMap<[u8; 32], Block>>>
@@ -64,6 +87,7 @@ where
         .route("/api/v1/blocks/{hash}", get(blocks_api::get_blocks_hash))
         .route("/api/v1/blocks/{hash}", put(blocks_api::put_blocks_hash))
         .with_state(ShardState {
+            security_rules: shard.security_rules,
             storage: Arc::new(Mutex::new(shard.storage)),
             pending_transactions: Default::default(),
             pending_blocks: Default::default()

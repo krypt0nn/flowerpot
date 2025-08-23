@@ -33,6 +33,18 @@ pub async fn put_transactions<S: Storage>(
 
     match Transaction::from_json(&transaction) {
         Ok(transaction) => {
+            if transaction.data.len() as u64 > state.security_rules.max_transaction_body_size {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    sign = transaction.sign().to_base64(),
+                    hash = transaction.hash().to_base64(),
+                    size = transaction.data.len(),
+                    "PUT /api/v1/transactions: rejecting transaction because it's too large"
+                );
+
+                return (StatusCode::PAYLOAD_TOO_LARGE, AxumJson(Json::Null));
+            }
+
             match transaction.verify() {
                 Ok((true, public_key)) => {
                     #[cfg(feature = "tracing")]

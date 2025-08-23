@@ -1,8 +1,8 @@
 #[cfg(feature = "_http")]
-pub use {tokio, futures, reqwest};
+pub use {futures, reqwest};
 
 #[cfg(feature = "shard")]
-pub use axum;
+pub use {tokio, axum};
 
 pub mod crypto;
 pub mod transaction;
