@@ -835,7 +835,7 @@ impl Client {
                         }
 
                         // Verify block approvals.
-                        let required_approvals = validators.len() * 2 / 3;
+                        let required_approvals = crate::calc_required_approvals(validators.len());
                         let mut accepted_approvals = HashSet::new();
 
                         for approval in block.approvals() {

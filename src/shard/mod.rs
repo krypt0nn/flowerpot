@@ -94,6 +94,13 @@ pub struct ShardSecurityRules {
     /// quality.
     pub accept_shards: bool,
 
+    /// Automatically merge blocks to the local storage if they have enough
+    /// approvals. Otherwise merging will happen only in the blockchain
+    /// synchronization task.
+    ///
+    /// Default is `true`.
+    pub merge_blocks_without_sync: bool,
+
     /// Optional filter function which will be applied to the pending
     /// transactions before adding them to the pool. If `true` is returned
     /// by such function then transaction is accepted, otherwise it will be
@@ -140,7 +147,18 @@ pub struct ShardSecurityRules {
     /// overload the network.
     ///
     /// Default is `30s`.
-    pub pending_blocks_sync_interval: Duration
+    pub pending_blocks_sync_interval: Duration,
+
+    /// Interval between blockchain synchronization attempts between our local
+    /// storage and all the connected shards.
+    ///
+    /// Note that in normal situation pending blocks should be merged to the
+    /// local storage automatically once enough approvals are received. This
+    /// task exist in case some block was not received yet or if it got more
+    /// approvals than our currently written one, so just in case.
+    ///
+    /// Default is `90s`.
+    pub blockchain_sync_interval: Duration
 }
 
 impl Default for ShardSecurityRules {
@@ -151,10 +169,12 @@ impl Default for ShardSecurityRules {
             spread_pending_blocks: true,
             spread_pending_blocks_approvals: true,
             accept_shards: true,
+            merge_blocks_without_sync: true,
             transactions_filter: None,
             blocks_filter: None,
             pending_transactions_sync_interval: Duration::from_secs(20),
-            pending_blocks_sync_interval: Duration::from_secs(30)
+            pending_blocks_sync_interval: Duration::from_secs(30),
+            blockchain_sync_interval: Duration::from_secs(90)
         }
     }
 }
@@ -184,7 +204,7 @@ pub async fn serve<S>(
     handle: RuntimeHandle
 ) -> Result<(), Error>
 where
-    S: Storage + Clone + Send + 'static,
+    S: Storage + Clone + Send + Sync + 'static,
     S::Error: Send
 {
     #[cfg(feature = "tracing")]
@@ -242,6 +262,7 @@ where
 
     let transactions_sync_interval = shard.security_rules.pending_transactions_sync_interval;
     let blocks_sync_interval = shard.security_rules.pending_blocks_sync_interval;
+    let blockchain_sync_interval = shard.security_rules.blockchain_sync_interval;
 
     let router = Router::new()
         .route("/api/v1/transactions", get(transactions_api::get_transactions))
@@ -288,10 +309,17 @@ where
 
         // Pending blocks sync.
         handle.spawn(sync_pending_blocks(
-            client,
+            client.clone(),
             reverse_client,
             pending_blocks,
             blocks_sync_interval
+        )),
+
+        // Sync blockchain.
+        handle.spawn(sync_blockchain(
+            client,
+            storage,
+            blockchain_sync_interval
         ))
     ]).await?;
 
@@ -503,6 +531,23 @@ async fn sync_pending_blocks(
         }
 
         drop(client_guard);
+
+        tokio::time::sleep(sync_interval).await;
+    }
+}
+
+async fn sync_blockchain<S: Storage>(
+    client: Arc<RwLock<Client>>,
+    storage: Arc<Mutex<S>>,
+    sync_interval: Duration
+) -> Result<(), Error> {
+    loop {
+        let guard = storage.lock().await;
+
+        client.read().await
+            .sync(&*guard).await?;
+
+        drop(guard);
 
         tokio::time::sleep(sync_interval).await;
     }

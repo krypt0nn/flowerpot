@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use axum::body::Body;
 use axum::extract::{State, Request, Path};
 
-use crate::block::Block;
+use crate::block::*;
 use crate::storage::Storage;
 
 use super::*;
@@ -96,24 +96,61 @@ pub async fn put_blocks<S: Storage>(
 
                             block.approvals = valid_approvals;
 
-                            // Store the pending block.
-
-                            #[cfg(feature = "tracing")]
-                            tracing::debug!(
-                                public_key = public_key.to_base64(),
-                                sign = block.sign().to_base64(),
-                                hash = hash.to_base64(),
-                                "PUT /api/v1/blocks: add pending block"
-                            );
-
-                            let mut guard = state.pending_blocks.write().await;
-
-                            // Share this block with other shards if it is newly added
-                            // and security rules allow it.
-                            if guard.insert(hash.0, block).is_none() &&
-                                state.security_rules.spread_pending_blocks
+                            // If enough approvals are met and it's not disabled
+                            // in the security rules - write this block to the
+                            // local storage.
+                            if state.security_rules.merge_blocks_without_sync
+                                && block.approvals.len() >= crate::calc_required_approvals(validators.len())
                             {
-                                let _ = state.events_sender.send(ShardEvent::SharePendingBlock(hash));
+                                #[cfg(feature = "tracing")]
+                                tracing::info!("PUT /api/v1/blocks: enough approvals received, merging block");
+
+                                let result = state.storage.lock().await
+                                    .write_block(&block);
+
+                                match result {
+                                    Ok(()) => {
+                                        if let BlockContent::Transactions(transactions) = block.content() {
+                                            let mut guard = state.pending_transactions.write().await;
+
+                                            for transaction in transactions {
+                                                guard.remove(&transaction.hash().0);
+                                            }
+                                        }
+                                    }
+
+                                    Err(err) => {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::error!(?err, "PUT /api/v1/blocks: failed to write approved block to the local storage");
+                                    }
+                                }
+
+                                // Share this block with other shards if
+                                // security rules allow it.
+                                if state.security_rules.spread_pending_blocks {
+                                    let _ = state.events_sender.send(ShardEvent::SharePendingBlock(hash));
+                                }
+                            }
+
+                            // Otherwise store the pending block.
+                            else {
+                                #[cfg(feature = "tracing")]
+                                tracing::debug!(
+                                    public_key = public_key.to_base64(),
+                                    sign = block.sign().to_base64(),
+                                    hash = hash.to_base64(),
+                                    "PUT /api/v1/blocks: add pending block"
+                                );
+
+                                let mut guard = state.pending_blocks.write().await;
+
+                                // Share this block with other shards if it is newly added
+                                // and security rules allow it.
+                                if guard.insert(hash.0, block).is_none() &&
+                                    state.security_rules.spread_pending_blocks
+                                {
+                                    let _ = state.events_sender.send(ShardEvent::SharePendingBlock(hash));
+                                }
                             }
 
                             (StatusCode::OK, AxumJson(Json::Null))
@@ -269,6 +306,38 @@ pub async fn put_blocks_hash<S: Storage>(
                                                 // newly added and security rules allow it.
                                                 if state.security_rules.spread_pending_blocks_approvals {
                                                     let _ = state.events_sender.send(ShardEvent::SharePendingBlockApproval(hash, sign));
+                                                }
+
+                                                // If enough approvals are met and it's not disabled
+                                                // in the security rules - write this block to the
+                                                // local storage.
+                                                if state.security_rules.merge_blocks_without_sync
+                                                    && block.approvals.len() >= crate::calc_required_approvals(validators.len())
+                                                {
+                                                    #[cfg(feature = "tracing")]
+                                                    tracing::info!("PUT /api/v1/blocks/<hash>: enough approvals received, merging block");
+
+                                                    let result = state.storage.lock().await
+                                                        .write_block(block);
+
+                                                    match result {
+                                                        Ok(()) => {
+                                                            if let BlockContent::Transactions(transactions) = block.content() {
+                                                                let mut guard = state.pending_transactions.write().await;
+
+                                                                for transaction in transactions {
+                                                                    guard.remove(&transaction.hash().0);
+                                                                }
+                                                            }
+
+                                                            guard.remove(&hash.0);
+                                                        }
+
+                                                        Err(err) => {
+                                                            #[cfg(feature = "tracing")]
+                                                            tracing::error!(?err, "PUT /api/v1/blocks/<hash>: failed to write approved block to the local storage");
+                                                        }
+                                                    }
                                                 }
                                             }
 
