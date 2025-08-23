@@ -5,11 +5,10 @@ use axum::http::StatusCode;
 use axum::body::Body;
 use axum::extract::{State, Request, Path};
 
-use crate::crypto::*;
 use crate::block::Block;
 use crate::storage::Storage;
 
-use super::ShardState;
+use super::*;
 
 pub async fn get_blocks<S: Storage>(
     State(state): State<ShardState<S>>
@@ -38,6 +37,9 @@ pub async fn put_blocks<S: Storage>(
                 Ok((true, hash, public_key)) => {
                     let validators = state.storage.lock().await
                         .get_current_validators();
+
+                    // TODO: do not accept pending blocks if current last block
+                    //       is not the previous block of this pending block?
 
                     match validators {
                         Ok(validators) => {
@@ -90,7 +92,13 @@ pub async fn put_blocks<S: Storage>(
 
                             let mut guard = state.pending_blocks.write().await;
 
-                            guard.insert(hash.0, block);
+                            // Share this block with other shards if it is newly added
+                            // and security rules allow it.
+                            if guard.insert(hash.0, block).is_none() &&
+                                state.security_rules.spread_pending_blocks
+                            {
+                                let _ = state.events_sender.send(ShardEvent::SharePendingBlock(hash));
+                            }
 
                             (StatusCode::OK, AxumJson(Json::Null))
                         }
@@ -239,7 +247,13 @@ pub async fn put_blocks_hash<S: Storage>(
                                             }
 
                                             else if !block.approvals.contains(&sign) && public_key != block_author {
-                                                block.approvals.push(sign);
+                                                block.approvals.push(sign.clone());
+
+                                                // Share this approval with other shards if it is
+                                                // newly added and security rules allow it.
+                                                if state.security_rules.spread_pending_blocks_approvals {
+                                                    let _ = state.events_sender.send(ShardEvent::SharePendingBlockApproval(hash, sign));
+                                                }
                                             }
 
                                             (StatusCode::OK, AxumJson(Json::Null))

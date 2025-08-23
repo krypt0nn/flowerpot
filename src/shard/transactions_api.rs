@@ -4,11 +4,10 @@ use axum::Json as AxumJson;
 use axum::http::StatusCode;
 use axum::extract::{State, Path};
 
-use crate::crypto::*;
 use crate::transaction::Transaction;
 use crate::storage::Storage;
 
-use super::ShardState;
+use super::*;
 
 pub async fn get_transactions<S: Storage>(
     State(state): State<ShardState<S>>
@@ -57,7 +56,15 @@ pub async fn put_transactions<S: Storage>(
 
                     let mut guard = state.pending_transactions.write().await;
 
-                    guard.insert(transaction.hash().0, transaction);
+                    // Share this transaction with other shards if it is newly added
+                    // and security rules allow it.
+                    let hash = transaction.hash();
+
+                    if guard.insert(hash.0, transaction).is_none() &&
+                        state.security_rules.spread_pending_transactions
+                    {
+                        let _ = state.events_sender.send(ShardEvent::SharePendingTransaction(hash));
+                    }
 
                     (StatusCode::OK, AxumJson(Json::Null))
                 }
