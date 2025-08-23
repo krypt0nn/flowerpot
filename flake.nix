@@ -45,8 +45,6 @@
 
                         gcc
                         pkg-config
-
-                        ollama-rocm
                     ];
                 };
             });
