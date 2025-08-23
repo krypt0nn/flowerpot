@@ -141,11 +141,16 @@ impl Client {
         self.filter_shards().await
     }
 
-    /// This function will verify that the added shard's root block is equal
+    /// This function will verify that the added shards' root blocks are equal
     /// to the target root block of the current client by performing
-    /// `GET /api/v1/blocks/<hash>` request.
-    pub async fn add_shard(&mut self, address: impl ToString) -> Result<(), Error> {
-        self.shards.insert(address.to_string());
+    /// `GET /api/v1/blocks/<hash>` requests.
+    pub async fn add_shards<T: ToString>(
+        &mut self,
+        shards: impl IntoIterator<Item = T>
+    ) -> Result<(), Error> {
+        for address in shards {
+            self.shards.insert(address.to_string());
+        }
 
         self.filter_shards().await
     }

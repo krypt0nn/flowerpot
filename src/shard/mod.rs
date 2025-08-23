@@ -17,6 +17,7 @@ use crate::client::{Client, Error as ClientError};
 
 mod transactions_api;
 mod blocks_api;
+mod shards_api;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -77,7 +78,14 @@ pub struct ShardSecurityRules {
     ///
     /// Default is `true`. Disabling it will result in worse overall network
     /// quality.
-    pub spread_pending_blocks_approvals: bool
+    pub spread_pending_blocks_approvals: bool,
+
+    /// Accept shards which were announced using the `PUT /api/v1/shards`
+    /// request.
+    ///
+    /// Default is `true`. Disabling it will result in worse overall network
+    /// quality.
+    pub accept_shards: bool
 }
 
 impl Default for ShardSecurityRules {
@@ -86,7 +94,8 @@ impl Default for ShardSecurityRules {
             max_transaction_body_size: 32 * 1024 * 1024,
             spread_pending_transactions: true,
             spread_pending_blocks: true,
-            spread_pending_blocks_approvals: true
+            spread_pending_blocks_approvals: true,
+            accept_shards: true
         }
     }
 }
@@ -101,8 +110,9 @@ enum ShardEvent {
 
 #[derive(Clone)]
 struct ShardState<S: Storage> {
-    pub security_rules: ShardSecurityRules,
+    pub client: Arc<RwLock<Client>>,
     pub storage: Arc<Mutex<S>>,
+    pub security_rules: ShardSecurityRules,
     pub pending_transactions: Arc<RwLock<HashMap<[u8; 32], Transaction>>>,
     pub pending_blocks: Arc<RwLock<HashMap<[u8; 32], Block>>>,
     pub events_sender: Arc<UnboundedSender<ShardEvent>>
@@ -161,9 +171,12 @@ where
         .route("/api/v1/blocks", put(blocks_api::put_blocks))
         .route("/api/v1/blocks/{hash}", get(blocks_api::get_blocks_hash))
         .route("/api/v1/blocks/{hash}", put(blocks_api::put_blocks_hash))
+        .route("/api/v1/shards", get(shards_api::get_shards))
+        .route("/api/v1/shards", put(shards_api::put_shards))
         .with_state(ShardState {
-            security_rules: shard.security_rules,
+            client: Arc::new(RwLock::new(shard.client)),
             storage: Arc::new(Mutex::new(shard.storage)),
+            security_rules: shard.security_rules,
             pending_transactions: Default::default(),
             pending_blocks: Default::default(),
             events_sender: Arc::new(events_sender)
