@@ -216,10 +216,91 @@ impl Client {
         Ok(())
     }
 
+    /// Fetch list of pending (not yet verified by validators) transactions.
+    ///
+    /// Perform `GET /api/v1/transactions` request.
+    ///
+    /// This method can fail only by internal reasons. All network-related
+    /// issues will be silently ignored. If `tracing` feature is enabled then
+    /// warnings will be generated.
+    pub async fn list_pending_transactions(&self) -> Result<HashSet<Hash>, Error> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!("GET /api/v1/transactions");
+
+        let mut responses = Vec::with_capacity(self.shards.len());
+        let mut bodies = Vec::with_capacity(self.shards.len());
+        let mut transactions = HashSet::new();
+
+        for address in &self.shards {
+            let request = self.http.get(format!("{address}/api/v1/transactions"));
+
+            responses.push(request.send().map(|response| {
+                (address.clone(), response)
+            }));
+        }
+
+        for (address, response) in futures::future::join_all(responses).await {
+            match response {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        bodies.push(response.bytes().map(|body| {
+                            (address, body)
+                        }));
+                    }
+                }
+
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(?address, ?err, "GET /api/v1/transactions: shard is offline");
+                }
+            }
+        }
+
+        for (address, body) in futures::future::join_all(bodies).await {
+            match body {
+                Ok(body) => {
+                    match serde_json::from_slice::<HashSet<String>>(&body) {
+                        Ok(body) => {
+                            for hash in body {
+                                if let Some(hash) = Hash::from_base64(hash) {
+                                    transactions.insert(hash);
+                                }
+                            }
+                        }
+
+                        Err(err) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::warn!(
+                                ?address,
+                                body = String::from_utf8_lossy(&body).to_string(),
+                                ?err,
+                                "GET /api/v1/transactions: failed to deserialize shard response body"
+                            );
+                        }
+                    }
+                }
+
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(?address, ?err, "GET /api/v1/transactions: failed to read shard response body");
+                }
+            }
+        }
+
+        Ok(transactions)
+    }
+
     /// Announce transaction to all the connected shards.
     ///
     /// Perform `PUT /api/v1/transactions` request.
+    ///
+    /// This method can fail only by internal reasons. All network-related
+    /// issues will be silently ignored. If `tracing` feature is enabled then
+    /// warnings will be generated.
     pub async fn announce_transaction(&self, transaction: &Transaction) -> Result<(), Error> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!("PUT /api/v1/transactions");
+
         let transaction = serde_json::to_vec(&transaction.to_json()?)?;
 
         let mut responses = Vec::with_capacity(self.shards.len());
@@ -228,92 +309,113 @@ impl Client {
             let request = self.http.put(format!("{address}/api/v1/transactions"))
                 .body(transaction.clone());
 
-            responses.push(request.send());
+            responses.push(request.send().map(|response| {
+                (address.clone(), response)
+            }));
         }
 
-        futures::future::try_join_all(responses).await?;
+        for (address, response) in futures::future::join_all(responses).await {
+            if let Err(err) = response {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(?address, ?err, "PUT /api/v1/transactions: shard is offline");
+            }
+        }
 
         Ok(())
-    }
-
-    /// Fetch list of pending (not yet verified by validators) transactions.
-    ///
-    /// Perform `GET /api/v1/transactions` request.
-    pub async fn list_pending_transactions(&self) -> Result<HashSet<Hash>, Error> {
-        let mut responses = Vec::with_capacity(self.shards.len());
-        let mut bodies = Vec::with_capacity(self.shards.len());
-        let mut transactions = HashSet::new();
-
-        for address in &self.shards {
-            let request = self.http.get(format!("{address}/api/v1/transactions"));
-
-            responses.push(request.send());
-        }
-
-        for response in futures::future::try_join_all(responses).await? {
-            if response.status().is_success() {
-                bodies.push(response.bytes());
-            }
-        }
-
-        for body in futures::future::try_join_all(bodies).await? {
-            let response = serde_json::from_slice::<HashSet<String>>(&body)?;
-
-            for hash in response {
-                if let Some(hash) = Hash::from_base64(hash) {
-                    transactions.insert(hash);
-                }
-            }
-        }
-
-        Ok(transactions)
     }
 
     /// Read transaction with the given hash.
     ///
     /// Perform `GET /api/v1/transactions/<hash>` request.
+    ///
+    /// This method can fail only by internal reasons. All network-related
+    /// issues will be silently ignored. If `tracing` feature is enabled then
+    /// warnings will be generated.
     pub async fn read_transaction(&self, hash: &Hash) -> Result<Option<Transaction>, Error> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!("GET /api/v1/transactions/<hash>");
+
         let hash = hash.to_base64();
 
         for address in &self.shards {
             let response = self.http.get(format!("{address}/api/v1/transactions/{hash}"))
-                .send().await?;
+                .send().await;
+
+            let response = match response {
+                Ok(response) => response,
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        ?address,
+                        ?hash,
+                        ?err,
+                        "GET /api/v1/transactions/<hash>: shard is offline"
+                    );
+
+                    continue;
+                }
+            };
 
             if response.status().is_success() {
-                let response = response.bytes().await?;
-                let response = serde_json::from_slice::<Json>(&response)?;
+                let response = match response.bytes().await {
+                    Ok(response) => response,
+                    Err(err) => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            ?address,
+                            ?hash,
+                            ?err,
+                            "GET /api/v1/transactions/<hash>: failed to read shard response body"
+                        );
 
-                return Ok(Some(Transaction::from_json(&response)?));
+                        continue;
+                    }
+                };
+
+                let response = match serde_json::from_slice::<Json>(&response) {
+                    Ok(response) => response,
+                    Err(err) => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            ?address,
+                            ?hash,
+                            ?err,
+                            "GET /api/v1/transactions/<hash>: failed to deserialize shard response body"
+                        );
+
+                        continue;
+                    }
+                };
+
+                match Transaction::from_json(&response) {
+                    Ok(transaction) => return Ok(Some(transaction)),
+                    Err(err) => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            ?address,
+                            ?hash,
+                            ?err,
+                            "GET /api/v1/transactions/<hash>: failed to deserialize transaction from shard response body"
+                        );
+                    }
+                }
             }
         }
 
         Ok(None)
     }
 
-    /// Announce block to all the connected shards.
-    ///
-    /// Perform `PUT /api/v1/blocks` request.
-    pub async fn announce_block(&self, block: &Block) -> Result<(), Error> {
-        let block = serde_json::to_vec(&block.to_json()?)?;
-
-        let mut responses = Vec::with_capacity(self.shards.len());
-
-        for address in &self.shards {
-            let request = self.http.put(format!("{address}/api/v1/blocks"))
-                .body(block.clone());
-
-            responses.push(request.send());
-        }
-
-        futures::future::try_join_all(responses).await?;
-
-        Ok(())
-    }
-
     /// Fetch list of pending (not yet verified by validators) blocks.
     ///
     /// Perform `GET /api/v1/blocks` request.
+    ///
+    /// This method can fail only by internal reasons. All network-related
+    /// issues will be silently ignored. If `tracing` feature is enabled then
+    /// warnings will be generated.
     pub async fn list_pending_blocks(&self) -> Result<Vec<PendingBlock>, Error> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!("GET /api/v1/blocks");
+
         let mut responses = Vec::with_capacity(self.shards.len());
         let mut bodies = Vec::with_capacity(self.shards.len());
         let mut blocks = HashMap::new();
@@ -321,20 +423,74 @@ impl Client {
         for address in &self.shards {
             let request = self.http.get(format!("{address}/api/v1/blocks"));
 
-            responses.push(request.send());
+            responses.push(request.send().map(|response| {
+                (address.clone(), response)
+            }));
         }
 
-        for response in futures::future::try_join_all(responses).await? {
-            if response.status().is_success() {
-                bodies.push(response.bytes());
+        for (address, response) in futures::future::join_all(responses).await {
+            match response {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        bodies.push(response.bytes().map(|body| {
+                            (address, body)
+                        }));
+                    }
+                }
+
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(?address, ?err, "GET /api/v1/blocks: shard is offline");
+                }
             }
         }
 
-        for body in futures::future::try_join_all(bodies).await? {
-            let body = serde_json::from_slice::<Vec<Json>>(&body)?;
+        for (address, body) in futures::future::join_all(bodies).await {
+            let body = match body {
+                Ok(body) => body,
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        ?address,
+                        ?err,
+                        "GET /api/v1/blocks: failed to read shard response body"
+                    );
+
+                    continue;
+                }
+            };
+
+            let body = match serde_json::from_slice::<Vec<Json>>(&body) {
+                Ok(body) => body,
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        ?address,
+                        ?err,
+                        "GET /api/v1/blocks: failed to deserialize shard response body"
+                    );
+
+                    continue;
+                }
+            };
 
             for block in body {
-                let block = PendingBlock::from_json(&block)?;
+                let block = match PendingBlock::from_json(&block) {
+                    Ok(block) => block,
+                    Err(err) => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            ?address,
+                            ?block,
+                            ?err,
+                            "GET /api/v1/blocks: failed to deserialize pending block from shard response"
+                        );
+
+                        // Don't even try processing other blocks if at least
+                        // one is broken.
+                        break;
+                    }
+                };
 
                 let approvals = block.approvals.clone();
 
@@ -352,21 +508,115 @@ impl Client {
         Ok(blocks.values().cloned().collect())
     }
 
+    /// Announce block to all the connected shards.
+    ///
+    /// Perform `PUT /api/v1/blocks` request.
+    ///
+    /// This method can fail only by internal reasons. All network-related
+    /// issues will be silently ignored. If `tracing` feature is enabled then
+    /// warnings will be generated.
+    pub async fn announce_block(&self, block: &Block) -> Result<(), Error> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!("PUT /api/v1/blocks");
+
+        let block = serde_json::to_vec(&block.to_json()?)?;
+
+        let mut responses = Vec::with_capacity(self.shards.len());
+
+        for address in &self.shards {
+            let request = self.http.put(format!("{address}/api/v1/blocks"))
+                .body(block.clone());
+
+            responses.push(request.send().map(|response| {
+                (address.clone(), response)
+            }));
+        }
+
+        for (address, response) in futures::future::join_all(responses).await {
+            if let Err(err) = response {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(?address, ?err, "PUT /api/v1/blocks: shard is offline");
+            }
+        }
+
+        Ok(())
+    }
+
     /// Read block with the given hash.
     ///
     /// Perform `GET /api/v1/blocks/<hash>` request.
+    ///
+    /// This method can fail only by internal reasons. All network-related
+    /// issues will be silently ignored. If `tracing` feature is enabled then
+    /// warnings will be generated.
     pub async fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Error> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!("GET /api/v1/blocks/<hash>");
+
         let hash = hash.to_base64();
 
         for address in &self.shards {
             let response = self.http.get(format!("{address}/api/v1/blocks/{hash}"))
-                .send().await?;
+                .send().await;
+
+            let response = match response {
+                Ok(response) => response,
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        ?address,
+                        ?hash,
+                        ?err,
+                        "GET /api/v1/blocks/<hash>: shard is offline"
+                    );
+
+                    continue;
+                }
+            };
 
             if response.status().is_success() {
-                let response = response.bytes().await?;
-                let response = serde_json::from_slice::<Json>(&response)?;
+                let response = match response.bytes().await {
+                    Ok(response) => response,
+                    Err(err) => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            ?address,
+                            ?hash,
+                            ?err,
+                            "GET /api/v1/blocks/<hash>: failed to read shard response body"
+                        );
 
-                return Ok(Some(Block::from_json(&response)?));
+                        continue;
+                    }
+                };
+
+                let response = match serde_json::from_slice::<Json>(&response) {
+                    Ok(response) => response,
+                    Err(err) => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            ?address,
+                            ?hash,
+                            ?err,
+                            "GET /api/v1/blocks/<hash>: failed to deserialize shard response body"
+                        );
+
+                        continue;
+                    }
+                };
+
+                match Block::from_json(&response) {
+                    Ok(block) => return Ok(Some(block)),
+                    Err(err) => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            ?address,
+                            ?hash,
+                            ?err,
+                            "GET /api/v1/blocks/<hash>: failed to deserialize block from shard body"
+                        );
+                    }
+                }
             }
         }
 
@@ -376,11 +626,18 @@ impl Client {
     /// Announce approval of a pending block to all the connected shards.
     ///
     /// Perform `PUT /api/v1/blocks/<hash>` request.
+    ///
+    /// This method can fail only by internal reasons. All network-related
+    /// issues will be silently ignored. If `tracing` feature is enabled then
+    /// warnings will be generated.
     pub async fn approve_block(
         &self,
         hash: &Hash,
         approval: &Signature
     ) -> Result<(), Error> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!("PUT /api/v1/blocks/<hash>");
+
         let hash = hash.to_base64();
         let approval = approval.to_base64();
 
@@ -390,13 +647,28 @@ impl Client {
             let request = self.http.put(format!("{address}/api/v1/blocks/{hash}"))
                 .body(approval.clone());
 
-            responses.push(request.send());
+            responses.push(request.send().map(|response| {
+                (address.clone(), response)
+            }));
         }
 
-        futures::future::try_join_all(responses).await?;
+        for (address, response) in futures::future::join_all(responses).await {
+            if let Err(err) = response {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    ?address,
+                    ?hash,
+                    ?approval,
+                    ?err,
+                    "PUT /api/v1/blocks/<hash>: shard is offline"
+                );
+            }
+        }
 
         Ok(())
     }
+
+    // TODO: make this method error-proof!!!
 
     /// Synchronize local blockchain storage with all the connected shards.
     ///
@@ -405,7 +677,13 @@ impl Client {
     /// blockchain history.
     ///
     /// This is a heavy operation and should be performed in background.
+    ///
+    /// WARNING: this method is not error-proof yet and can return an error
+    /// for network-related issues.
     pub async fn sync(&self, storage: &impl Storage) -> Result<(), Error> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!("GET /api/v1/sync");
+
         // List of shards with invalid blockchains (blocklist).
         let mut invalid_shards = HashSet::with_capacity(self.shards.len());
 
@@ -719,13 +997,23 @@ impl Client {
 
         // TODO: reverse sync with PUT requests.
 
+        // #[cfg(feature = "tracing")]
+        // tracing::trace!("PUT /api/v1/sync");
+
         Ok(())
     }
 
     /// Fetch list of other shards known to shards we are connected to.
     ///
     /// Perform `GET /api/v1/shards` request.
+    ///
+    /// This method can fail only by internal reasons. All network-related
+    /// issues will be silently ignored. If `tracing` feature is enabled then
+    /// warnings will be generated.
     pub async fn list_shards(&self) -> Result<HashSet<String>, Error> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!("GET /api/v1/shards");
+
         let mut responses = Vec::with_capacity(self.shards.len());
         let mut bodies = Vec::with_capacity(self.shards.len());
         let mut addresses = HashSet::new();
@@ -733,19 +1021,58 @@ impl Client {
         for address in &self.shards {
             let request = self.http.get(format!("{address}/api/v1/shards"));
 
-            responses.push(request.send());
+            responses.push(request.send().map(|response| {
+                (address.clone(), response)
+            }));
         }
 
-        for response in futures::future::try_join_all(responses).await? {
-            if response.status().is_success() {
-                bodies.push(response.bytes());
+        for (address, response) in futures::future::join_all(responses).await {
+            match response {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        bodies.push(response.bytes().map(|body| {
+                            (address, body)
+                        }));
+                    }
+                }
+
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(?address, ?err, "GET /api/v1/shards: shard is offline");
+                }
             }
         }
 
-        for body in futures::future::try_join_all(bodies).await? {
-            let response = serde_json::from_slice::<HashSet<String>>(&body)?;
+        for (address, body) in futures::future::join_all(bodies).await {
+            let body = match body {
+                Ok(body) => body,
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        ?address,
+                        ?err,
+                        "GET /api/v1/shards: failed to read shard response body"
+                    );
 
-            for address in response {
+                    continue;
+                }
+            };
+
+            let body = match serde_json::from_slice::<HashSet<String>>(&body) {
+                Ok(body) => body,
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        ?address,
+                        ?err,
+                        "GET /api/v1/shards: failed to deserialize shard response body"
+                    );
+
+                    continue;
+                }
+            };
+
+            for address in body {
                 if !self.shards.contains(&address) {
                     addresses.insert(address);
                 }
@@ -762,10 +1089,17 @@ impl Client {
     /// we are connected to.
     ///
     /// Perform `PUT /api/v1/shards` request.
+    ///
+    /// This method can fail only by internal reasons. All network-related
+    /// issues will be silently ignored. If `tracing` feature is enabled then
+    /// warnings will be generated.
     pub async fn announce_shards<T: ToString>(
         &self,
         extra_shards: impl IntoIterator<Item = T>
     ) -> Result<(), Error> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!("PUT /api/v1/shards");
+
         let mut responses = Vec::with_capacity(self.shards.len());
         let mut addresses = self.shards.clone();
 
@@ -779,10 +1113,21 @@ impl Client {
             let request = self.http.put(format!("{address}/api/v1/shards"))
                 .body(addresses.clone());
 
-            responses.push(request.send());
+            responses.push(request.send().map(|response| {
+                (address.clone(), response)
+            }));
         }
 
-        futures::future::try_join_all(responses).await?;
+        for (address, response) in futures::future::join_all(responses).await {
+            if let Err(err) = response {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    ?address,
+                    ?err,
+                    "PUT /api/v1/shards: shard is offline"
+                );
+            }
+        }
 
         Ok(())
     }
