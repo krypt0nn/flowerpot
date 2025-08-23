@@ -4,9 +4,11 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use futures::TryFutureExt;
+
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, Mutex};
 use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver};
+use tokio::runtime::Handle as RuntimeHandle;
 
 use axum::Router;
 use axum::routing::{get, put};
@@ -28,6 +30,9 @@ pub enum Error {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Tokio(#[from] tokio::task::JoinError),
 
     #[error("storage error: {0}")]
     Storage(String)
@@ -174,7 +179,10 @@ struct ShardState<S: Storage> {
 
 /// This function runs many background async tasks at once so multi-thread
 /// executor is highly adviced.
-pub async fn serve<S>(shard: Shard<S>) -> Result<(), Error>
+pub async fn serve<S>(
+    shard: Shard<S>,
+    handle: RuntimeHandle
+) -> Result<(), Error>
 where
     S: Storage + Clone + Send + 'static,
     S::Error: Send
@@ -256,36 +264,40 @@ where
 
     let listener = TcpListener::bind(shard.local_address).await?;
 
-    futures::try_join!(
+    let results = futures::future::try_join_all([
         // Shard HTTP API server.
-        axum::serve(listener, router)
+        handle.spawn(axum::serve(listener, router)
             .into_future()
-            .map_err(Error::from),
+            .map_err(Error::from)),
 
         // Shard events handler.
-        handle_events(
+        handle.spawn(handle_events(
             events_listener,
             client.clone(),
             pending_transactions.clone(),
             pending_blocks.clone()
-        ),
+        )),
 
         // Pending transactions sync.
-        sync_pending_transactions(
+        handle.spawn(sync_pending_transactions(
             client.clone(),
             reverse_client.clone(),
             pending_transactions,
             transactions_sync_interval
-        ),
+        )),
 
         // Pending blocks sync.
-        sync_pending_blocks(
+        handle.spawn(sync_pending_blocks(
             client,
             reverse_client,
             pending_blocks,
             blocks_sync_interval
-        )
-    )?;
+        ))
+    ]).await?;
+
+    for result in results {
+        result?;
+    }
 
     Ok(())
 }

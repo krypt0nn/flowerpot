@@ -16,7 +16,7 @@ tracing = ["dep:tracing"]
 default = ["client", "shard", "validator", "tracing"]
 
 [dependencies.tokio]
-version = "1.45"
+version = "1.47"
 features = ["io-std", "macros"]
 optional = true
 
