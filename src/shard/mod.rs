@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use futures::TryFutureExt;
 use tokio::net::TcpListener;
@@ -108,7 +109,33 @@ pub struct ShardSecurityRules {
     /// transactions.
     ///
     /// Default is `None`.
-    pub blocks_filter: Option<fn(&Block, &Hash, &PublicKey) -> bool>
+    pub blocks_filter: Option<fn(&Block, &Hash, &PublicKey) -> bool>,
+
+    /// Interval between pending transactions polling from other connected
+    /// shards. This will request list of pending transactions from all the
+    /// connected shards and request all the unknown pending transactions to
+    /// always keep local pool updated.
+    ///
+    /// Note that is connected shards did not disable
+    /// `spread_pending_transactions` option then our local pool will keep
+    /// being updates on its own, so this interval should not be very low.
+    /// You can keep it large enough to not to overload the network.
+    ///
+    /// Default is `20s`.
+    pub pending_transactions_sync_interval: Duration,
+
+    /// Interval between pending blocks polling from other connected shards.
+    /// This will request list of pending blocks from all the connected shards
+    /// and request all the unknown pending transactions to always keep local
+    /// pool updated.
+    ///
+    /// Note that is connected shards did not disable `spread_pending_blocks`
+    /// option then our local pool will keep being updates on its own, so this
+    /// interval should not be very low. You can keep it large enough to not to
+    /// overload the network.
+    ///
+    /// Default is `30s`.
+    pub pending_blocks_sync_interval: Duration
 }
 
 impl Default for ShardSecurityRules {
@@ -120,7 +147,9 @@ impl Default for ShardSecurityRules {
             spread_pending_blocks_approvals: true,
             accept_shards: true,
             transactions_filter: None,
-            blocks_filter: None
+            blocks_filter: None,
+            pending_transactions_sync_interval: Duration::from_secs(20),
+            pending_blocks_sync_interval: Duration::from_secs(30)
         }
     }
 }
@@ -143,6 +172,8 @@ struct ShardState<S: Storage> {
     pub events_sender: Arc<UnboundedSender<ShardEvent>>
 }
 
+/// This function runs many background async tasks at once so multi-thread
+/// executor is highly adviced.
 pub async fn serve<S>(shard: Shard<S>) -> Result<(), Error>
 where
     S: Storage + Clone + Send + 'static,
@@ -188,10 +219,21 @@ where
 
     let (events_sender, events_listener) = tokio::sync::mpsc::unbounded_channel();
 
+    let mut reverse_client = shard.client.clone();
+
+    reverse_client.with_shards([
+        format!("http://{}", shard.local_address)
+    ]).await?;
+
+    let reverse_client = Arc::new(RwLock::new(reverse_client));
+
     let client = Arc::new(RwLock::new(shard.client));
     let storage = Arc::new(Mutex::new(shard.storage));
     let pending_transactions = Arc::new(RwLock::new(HashMap::new()));
     let pending_blocks = Arc::new(RwLock::new(HashMap::new()));
+
+    let transactions_sync_interval = shard.security_rules.pending_transactions_sync_interval;
+    let blocks_sync_interval = shard.security_rules.pending_blocks_sync_interval;
 
     let router = Router::new()
         .route("/api/v1/transactions", get(transactions_api::get_transactions))
@@ -223,9 +265,25 @@ where
         // Shard events handler.
         handle_events(
             events_listener,
-            client,
+            client.clone(),
+            pending_transactions.clone(),
+            pending_blocks.clone()
+        ),
+
+        // Pending transactions sync.
+        sync_pending_transactions(
+            client.clone(),
+            reverse_client.clone(),
             pending_transactions,
-            pending_blocks
+            transactions_sync_interval
+        ),
+
+        // Pending blocks sync.
+        sync_pending_blocks(
+            client,
+            reverse_client,
+            pending_blocks,
+            blocks_sync_interval
         )
     )?;
 
@@ -301,4 +359,139 @@ async fn handle_events(
     }
 
     Ok(())
+}
+
+async fn sync_pending_transactions(
+    client: Arc<RwLock<Client>>,
+    reverse_client: Arc<RwLock<Client>>,
+    pending_transactions: Arc<RwLock<HashMap<[u8; 32], Transaction>>>,
+    sync_interval: Duration
+) -> Result<(), Error> {
+    loop {
+        let transactions = pending_transactions.read().await
+            .keys()
+            .map(|hash| Hash::from(*hash))
+            .collect::<HashSet<Hash>>();
+
+        let client_guard = client.read().await;
+
+        let result = client_guard.list_pending_transactions().await;
+
+        match result {
+            Ok(result) => {
+                let reverse_client_guard = reverse_client.read().await;
+
+                for hash in result {
+                    if !transactions.contains(&hash) {
+                        match client_guard.read_transaction(&hash).await {
+                            Ok(Some(transaction)) => {
+                                // Use reverse client to not to perform the same verification
+                                // steps here again.
+                                if let Err(err) = reverse_client_guard.announce_transaction(&transaction).await {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::error!(
+                                        ?err,
+                                        hash = hash.to_base64(),
+                                        "failed to sync pending transaction using reverse client"
+                                    );
+                                }
+                            }
+
+                            Ok(None) => (),
+
+                            Err(err) => {
+                                #[cfg(feature = "tracing")]
+                                tracing::error!(
+                                    ?err,
+                                    hash = hash.to_base64(),
+                                    "failed to request pending transaction"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                drop(reverse_client_guard);
+            }
+
+            Err(err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    ?err,
+                    "failed to request list of pending transactions"
+                );
+            }
+        }
+
+        drop(client_guard);
+
+        tokio::time::sleep(sync_interval).await;
+    }
+}
+
+async fn sync_pending_blocks(
+    client: Arc<RwLock<Client>>,
+    reverse_client: Arc<RwLock<Client>>,
+    pending_blocks: Arc<RwLock<HashMap<[u8; 32], Block>>>,
+    sync_interval: Duration
+) -> Result<(), Error> {
+    loop {
+        let blocks = pending_blocks.read().await
+            .keys()
+            .map(|hash| Hash::from(*hash))
+            .collect::<HashSet<Hash>>();
+
+        let client_guard = client.read().await;
+
+        let result = client_guard.list_pending_blocks().await;
+
+        match result {
+            Ok(result) => {
+                let reverse_client_guard = reverse_client.read().await;
+
+                for pending_block in result {
+                    if !blocks.contains(&pending_block.block) {
+                        match client_guard.read_block(&pending_block.block).await {
+                            Ok(Some(block)) => {
+                                // Use reverse client to not to perform the same verification
+                                // steps here again.
+                                if let Err(err) = reverse_client_guard.announce_block(&block).await {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::error!(
+                                        ?err,
+                                        "failed to sync pending block using reverse client"
+                                    );
+                                }
+                            }
+
+                            Ok(None) => (),
+
+                            Err(err) => {
+                                #[cfg(feature = "tracing")]
+                                tracing::error!(
+                                    ?err,
+                                    ?pending_block,
+                                    "failed to request pending block"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                drop(reverse_client_guard);
+            }
+
+            Err(err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    ?err,
+                    "failed to request list of pending blocks"
+                );
+            }
+        }
+
+        drop(client_guard);
+
+        tokio::time::sleep(sync_interval).await;
+    }
 }
