@@ -49,7 +49,7 @@ pub struct Shard<S: Storage> {
     pub security_rules: ShardSecurityRules
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct ShardSecurityRules {
     /// Maximal allowed size of transaction's body in bytes.
     ///
@@ -85,7 +85,29 @@ pub struct ShardSecurityRules {
     ///
     /// Default is `true`. Disabling it will result in worse overall network
     /// quality.
-    pub accept_shards: bool
+    pub accept_shards: bool,
+
+    /// Optional filter function which will be applied to the pending
+    /// transactions before adding them to the pool. If `true` is returned
+    /// by such function then transaction is accepted, otherwise it will be
+    /// dropped.
+    ///
+    /// This function is useful for applications with custom transaction
+    /// formats and rules to filter out malicious or invalid transactions.
+    ///
+    /// Default is `None`.
+    pub transactions_filter: Option<fn(&Transaction, &PublicKey) -> bool>,
+
+    /// Optional filter function which will be applied to the pending blocks
+    /// before adding them to the pool. If `true` is returned by such function
+    /// then block is accepted, otherwise it will be dropped.
+    ///
+    /// This function is useful for applications with custom transaction
+    /// formats and rules to filter out blocks with malicious or invalid
+    /// transactions.
+    ///
+    /// Default is `None`.
+    pub blocks_filter: Option<fn(&Block, &Hash, &PublicKey) -> bool>
 }
 
 impl Default for ShardSecurityRules {
@@ -95,7 +117,9 @@ impl Default for ShardSecurityRules {
             spread_pending_transactions: true,
             spread_pending_blocks: true,
             spread_pending_blocks_approvals: true,
-            accept_shards: true
+            accept_shards: true,
+            transactions_filter: None,
+            blocks_filter: None
         }
     }
 }

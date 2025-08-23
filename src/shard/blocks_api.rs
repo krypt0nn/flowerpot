@@ -35,6 +35,22 @@ pub async fn put_blocks<S: Storage>(
         Ok(mut block) => {
             match block.verify() {
                 Ok((true, hash, public_key)) => {
+                    // Check block using the filter function if one is provided
+                    // by the security rules.
+                    if let Some(filter) = state.security_rules.blocks_filter
+                        && !filter(&block, &hash, &public_key)
+                    {
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            public_key = public_key.to_base64(),
+                            sign = block.sign().to_base64(),
+                            hash = hash.to_base64(),
+                            "PUT /api/v1/blocks: rejecting block"
+                        );
+
+                        return (StatusCode::NOT_ACCEPTABLE, AxumJson(Json::Null));
+                    }
+
                     let validators = state.storage.lock().await
                         .get_current_validators();
 

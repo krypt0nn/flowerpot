@@ -46,6 +46,22 @@ pub async fn put_transactions<S: Storage>(
 
             match transaction.verify() {
                 Ok((true, public_key)) => {
+                    // Check transaction using the filter function if one is
+                    // provided by the security rules.
+                    if let Some(filter) = state.security_rules.transactions_filter
+                        && !filter(&transaction, &public_key)
+                    {
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            public_key = public_key.to_base64(),
+                            sign = transaction.sign().to_base64(),
+                            hash = transaction.hash().to_base64(),
+                            "PUT /api/v1/transactions: rejecting transaction"
+                        );
+
+                        return (StatusCode::NOT_ACCEPTABLE, AxumJson(Json::Null));
+                    }
+
                     #[cfg(feature = "tracing")]
                     tracing::debug!(
                         public_key = public_key.to_base64(),
