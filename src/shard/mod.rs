@@ -13,7 +13,7 @@ use crate::crypto::*;
 use crate::transaction::Transaction;
 use crate::block::Block;
 use crate::storage::Storage;
-use crate::client::Client;
+use crate::client::{Client, Error as ClientError};
 
 mod transactions_api;
 mod blocks_api;
@@ -21,7 +21,13 @@ mod blocks_api;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Io(#[from] std::io::Error)
+    Client(#[from] ClientError),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error("storage error: {0}")]
+    Storage(String)
 }
 
 #[derive(Debug, Clone)]
@@ -107,10 +113,42 @@ where
     S: Storage + Clone + Send + 'static,
     S::Error: Send
 {
+    #[cfg(feature = "tracing")]
+    tracing::info!("bootstrapping shard connections");
+
+    // TODO
+
+    #[cfg(feature = "tracing")]
+    tracing::info!("reading local blockchain data");
+
+    let first_block = shard.storage.read_first_block()
+        .map_err(|err| Error::Storage(err.to_string()))?
+        .map(|block| block.hash())
+        .transpose()
+        .map_err(|err| Error::Storage(err.to_string()))?
+        .map(|hash| hash.to_base64());
+
+    let last_block = shard.storage.read_last_block()
+        .map_err(|err| Error::Storage(err.to_string()))?
+        .map(|block| block.hash())
+        .transpose()
+        .map_err(|err| Error::Storage(err.to_string()))?
+        .map(|hash| hash.to_base64());
+
+    #[cfg(feature = "tracing")]
+    tracing::info!(
+        ?first_block,
+        ?last_block,
+        "synchronizing local blockchain storage"
+    );
+
+    shard.client.sync(&shard.storage).await?;
+
+    #[cfg(feature = "tracing")]
     tracing::info!(
         local_address = ?shard.local_address,
         remote_address = ?shard.remote_address,
-        "starting shard server"
+        "starting shard HTTP API server"
     );
 
     let (events_sender, _events_listener) = tokio::sync::mpsc::unbounded_channel();
