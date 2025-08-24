@@ -21,6 +21,7 @@ use crate::client::{Client, Error as ClientError};
 
 mod transactions_api;
 mod blocks_api;
+mod sync_api;
 mod shards_api;
 
 #[derive(Debug, thiserror::Error)]
@@ -133,7 +134,7 @@ pub struct ShardSecurityRules {
     /// being updates on its own, so this interval should not be very low.
     /// You can keep it large enough to not to overload the network.
     ///
-    /// Default is `20s`.
+    /// Default is `10s`.
     pub pending_transactions_sync_interval: Duration,
 
     /// Interval between pending blocks polling from other connected shards.
@@ -146,18 +147,19 @@ pub struct ShardSecurityRules {
     /// interval should not be very low. You can keep it large enough to not to
     /// overload the network.
     ///
-    /// Default is `30s`.
+    /// Default is `20s`.
     pub pending_blocks_sync_interval: Duration,
 
     /// Interval between blockchain synchronization attempts between our local
     /// storage and all the connected shards.
     ///
-    /// Note that in normal situation pending blocks should be merged to the
-    /// local storage automatically once enough approvals are received. This
-    /// task exist in case some block was not received yet or if it got more
-    /// approvals than our currently written one, so just in case.
+    /// Note that unless `merge_blocks_without_sync` option is disabled pending
+    /// blocks should be merged to the local storage automatically once enough
+    /// approvals are received. This task exist in case some block was not
+    /// received yet or if it got more approvals than our currently written one,
+    /// so just in case.
     ///
-    /// Default is `90s`.
+    /// Default is `60s`.
     pub blockchain_sync_interval: Duration
 }
 
@@ -172,9 +174,9 @@ impl Default for ShardSecurityRules {
             merge_blocks_without_sync: true,
             transactions_filter: None,
             blocks_filter: None,
-            pending_transactions_sync_interval: Duration::from_secs(20),
-            pending_blocks_sync_interval: Duration::from_secs(30),
-            blockchain_sync_interval: Duration::from_secs(90)
+            pending_transactions_sync_interval: Duration::from_secs(10),
+            pending_blocks_sync_interval: Duration::from_secs(20),
+            blockchain_sync_interval: Duration::from_secs(60)
         }
     }
 }
@@ -272,6 +274,7 @@ where
         .route("/api/v1/blocks", put(blocks_api::put_blocks))
         .route("/api/v1/blocks/{hash}", get(blocks_api::get_blocks_hash))
         .route("/api/v1/blocks/{hash}", put(blocks_api::put_blocks_hash))
+        .route("/api/v1/sync", get(sync_api::get_sync))
         .route("/api/v1/shards", get(shards_api::get_shards))
         .route("/api/v1/shards", put(shards_api::put_shards))
         .with_state(ShardState {

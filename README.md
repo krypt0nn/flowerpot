@@ -108,7 +108,7 @@ type Request = string;
 
 API to synchronize blocks of the blockchain between the nodes of the network.
 
-### `GET /api/v1/sync[?after=<hash>]`
+### `GET /api/v1/sync[?after=<hash>][&max_blocks=<number>]`
 
 Get list of some blocks after a block with provided hash. If no `after` param
 provided then the first block of the blockchain will be assumed.
