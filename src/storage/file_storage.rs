@@ -2,7 +2,21 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::fs::File;
 
+use crate::block::Error as BlockError;
+
 use super::*;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Block(#[from] BlockError),
+
+    #[error("can't write a block if parent block is not written yet")]
+    WriteWithoutParent
+}
 
 /// Very inefficient, quickly crafted filesystem-based storage for blockchain.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -101,7 +115,7 @@ impl FileStorage {
 }
 
 impl Storage for FileStorage {
-    type Error = std::io::Error;
+    type Error = Error;
 
     fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error> {
         let path = self.get_block_path(hash);
@@ -164,7 +178,7 @@ impl Storage for FileStorage {
 
         if !block.is_root() {
             let Some(index) = self.index_find_block_hash(block.previous())? else {
-                return Err(std::io::Error::other("can't write block if parent block is not written yet"));
+                return Err(Error::WriteWithoutParent);
             };
 
             self.index_write_block_hash(index + 1, &hash)?;

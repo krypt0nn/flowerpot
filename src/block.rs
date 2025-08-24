@@ -7,6 +7,60 @@ use serde_json::{json, Value as Json};
 use crate::crypto::*;
 use crate::transaction::*;
 
+pub const BLOCK_COMPRESSION_LEVEL: i32 = 20;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("failed to serialize block to bytes: {0}")]
+    SerializeBytes(#[source] std::io::Error),
+
+    #[error("failed to calculate hash of the block: {0}")]
+    Hash(#[source] std::io::Error),
+
+    #[error("failed to sign new block: {0}")]
+    Sign(#[source] k256::ecdsa::Error),
+
+    #[error("failed to verify the block's signature: {0}")]
+    Verify(#[source] k256::ecdsa::Error)
+}
+
+/// Block validation status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockStatus {
+    /// Block is valid and approved by enough amount of validators.
+    Valid {
+        /// Hash of the block.
+        hash: Hash,
+
+        /// Public key of the block's author.
+        public_key: PublicKey,
+
+        /// Amount of required approvals.
+        required_approvals: usize,
+
+        /// List of valid approvals and their signer's public key.
+        approvals: Vec<(Signature, PublicKey)>
+    },
+
+    /// Block is valid but not approved by enough amount of validators.
+    NotApproved {
+        /// Hash of the block.
+        hash: Hash,
+
+        /// Public key of the block's author.
+        public_key: PublicKey,
+
+        /// Amount of required approvals.
+        required_approvals: usize,
+
+        /// List of valid approvals and their signer's public key.
+        approvals: Vec<(Signature, PublicKey)>
+    },
+
+    /// Block is not valid.
+    Invalid
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub(crate) previous: Hash,
@@ -23,7 +77,7 @@ impl Block {
         validator: &SecretKey,
         previous: impl Into<Hash>,
         content: impl Into<BlockContent>
-    ) -> std::io::Result<Self> {
+    ) -> Result<Self, Error> {
         let previous: Hash = previous.into();
         let content: BlockContent = content.into();
 
@@ -33,12 +87,12 @@ impl Block {
 
         hasher.update(&previous.0);
         hasher.update(&timestamp.unix_timestamp().to_be_bytes());
-        hasher.update(&content.to_bytes()?);
+        hasher.update(&content.to_bytes().map_err(Error::SerializeBytes)?);
 
         let hash = Hash::from(hasher.finalize());
 
         let sign = Signature::create(validator, hash)
-            .map_err(std::io::Error::other)?;
+            .map_err(Error::Sign)?;
 
         Ok(Self {
             previous,
@@ -80,13 +134,24 @@ impl Block {
         self.previous.0 == [0; 32]
     }
 
+    /// Calculate hash of the current block.
+    pub fn hash(&self) -> Result<Hash, Error> {
+        let mut hasher = blake3::Hasher::new();
+
+        hasher.update(&self.previous.0);
+        hasher.update(&self.timestamp.unix_timestamp().to_be_bytes());
+        hasher.update(&self.content.to_bytes().map_err(Error::SerializeBytes)?);
+
+        Ok(Hash::from(hasher.finalize()))
+    }
+
     /// Add approval signature to the block.
     ///
     /// Return `Ok(false)` if signature is not valid.
-    pub fn approve(&mut self, sign: Signature) -> std::io::Result<bool> {
+    pub fn approve(&mut self, sign: Signature) -> Result<bool, Error> {
         if !self.approvals.contains(&sign) {
             let (valid, _) = sign.verify(self.hash()?)
-                .map_err(std::io::Error::other)?;
+                .map_err(Error::Verify)?;
 
             if !valid {
                 return Ok(false);
@@ -98,27 +163,72 @@ impl Block {
         Ok(true)
     }
 
-    /// Calculate hash of the current block.
-    pub fn hash(&self) -> std::io::Result<Hash> {
-        let mut hasher = blake3::Hasher::new();
-
-        hasher.update(&self.previous.0);
-        hasher.update(&self.timestamp.unix_timestamp().to_be_bytes());
-        hasher.update(&self.content.to_bytes()?);
-
-        Ok(Hash::from(hasher.finalize()))
-    }
-
     /// Verify the signature of the current block.
     ///
     /// This method *does not* validate the block's approvals. This must be done
     /// outside of this method using the blockchain's storage.
-    pub fn verify(&self) -> std::io::Result<(bool, Hash, PublicKey)> {
+    pub fn verify(&self) -> Result<(bool, Hash, PublicKey), Error> {
         let hash = self.hash()?;
 
         self.sign.verify(hash)
-            .map(|(valid, author)| (valid, hash, author))
-            .map_err(std::io::Error::other)
+            .map(|(valid, public_key)| (valid, hash, public_key))
+            .map_err(Error::Verify)
+    }
+
+    /// Use provided validators list to verify that the block is approved.
+    ///
+    /// This method calls `verify` method internally as well so you don't need
+    /// to do this twice.
+    pub fn validate(
+        &self,
+        validators: &[PublicKey]
+    ) -> Result<BlockStatus, Error> {
+        // Verify the block and obtain its hash and signer.
+        let (valid, hash, public_key) = self.verify()?;
+
+        // Immediately reject the block if it's not valid or its signer is not
+        // a validator.
+        if !valid || !validators.contains(&public_key) {
+            return Ok(BlockStatus::Invalid);
+        }
+
+        // Iterate over the block's approvals.
+        let mut valid_approvals = Vec::new();
+
+        for approval in &self.approvals {
+            // Verify that approval is correct.
+            let (valid, approval_public_key) = approval.verify(hash)
+                .map_err(Error::Verify)?;
+
+            // Reject invalid approval, approvals from non-validators and
+            // self-approvals from the block's author.
+            if !valid || !validators.contains(&public_key)
+                || approval_public_key == public_key
+            {
+                continue;
+            }
+
+            valid_approvals.push((approval.clone(), approval_public_key));
+        }
+
+        // Count valid approvals and check that their amount is correct.
+        let required_approvals = crate::calc_required_approvals(validators.len());
+
+        if valid_approvals.len() < required_approvals {
+            return Ok(BlockStatus::NotApproved {
+                hash,
+                public_key,
+                required_approvals,
+                approvals: valid_approvals
+            });
+        }
+
+        Ok(BlockStatus::Valid {
+            hash,
+            public_key,
+            required_approvals,
+            approvals: valid_approvals
+        })
     }
 
     /// Encode block into bytes representation.
@@ -140,7 +250,10 @@ impl Block {
 
         block.extend(content); // Content
 
-        let block = zstd::encode_all(Cursor::new(block), 20)?;
+        let block = zstd::encode_all(
+            Cursor::new(block),
+            BLOCK_COMPRESSION_LEVEL
+        )?;
 
         Ok(block.into_boxed_slice())
     }
