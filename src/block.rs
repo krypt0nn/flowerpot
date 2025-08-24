@@ -28,7 +28,7 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockStatus {
     /// Block is valid and approved by enough amount of validators.
-    Valid {
+    Approved {
         /// Hash of the block.
         hash: Hash,
 
@@ -59,6 +59,66 @@ pub enum BlockStatus {
 
     /// Block is not valid.
     Invalid
+}
+
+impl BlockStatus {
+    /// Validate a block with provided params.
+    ///
+    /// This function will verify the block's approval signatures. It will not
+    /// verify the block itself.
+    pub fn validate<'a>(
+        block_hash: impl Into<Hash>,
+        public_key: impl Into<PublicKey>,
+        approvals: impl IntoIterator<Item = &'a Signature>,
+        validators: impl AsRef<[PublicKey]>
+    ) -> Result<Self, Error> {
+        let block_hash: Hash = block_hash.into();
+        let public_key: PublicKey = public_key.into();
+        let validators = validators.as_ref();
+
+        // Immediately reject the block if its signer is not a validator.
+        if !validators.contains(&public_key) {
+            return Ok(BlockStatus::Invalid);
+        }
+
+        // Iterate over the block's approvals.
+        let mut valid_approvals = Vec::new();
+
+        for approval in approvals {
+            // Verify that approval is correct.
+            let (valid, approval_public_key) = approval.verify(block_hash)
+                .map_err(Error::Verify)?;
+
+            // Reject invalid approval, approvals from non-validators and
+            // self-approvals from the block's author.
+            if !valid || !validators.contains(&public_key)
+                || approval_public_key == public_key
+            {
+                continue;
+            }
+
+            valid_approvals.push((approval.clone(), approval_public_key));
+        }
+
+        // Count valid approvals and check that their amount is correct.
+        let required_approvals = crate::calc_required_approvals(validators.len());
+
+        if valid_approvals.len() < required_approvals {
+            return Ok(Self::NotApproved {
+                hash: block_hash,
+                public_key,
+                required_approvals,
+                approvals: valid_approvals
+            });
+        }
+
+        Ok(Self::Approved {
+            hash: block_hash,
+            public_key,
+            required_approvals,
+            approvals: valid_approvals
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,43 +252,12 @@ impl Block {
             return Ok(BlockStatus::Invalid);
         }
 
-        // Iterate over the block's approvals.
-        let mut valid_approvals = Vec::new();
-
-        for approval in &self.approvals {
-            // Verify that approval is correct.
-            let (valid, approval_public_key) = approval.verify(hash)
-                .map_err(Error::Verify)?;
-
-            // Reject invalid approval, approvals from non-validators and
-            // self-approvals from the block's author.
-            if !valid || !validators.contains(&public_key)
-                || approval_public_key == public_key
-            {
-                continue;
-            }
-
-            valid_approvals.push((approval.clone(), approval_public_key));
-        }
-
-        // Count valid approvals and check that their amount is correct.
-        let required_approvals = crate::calc_required_approvals(validators.len());
-
-        if valid_approvals.len() < required_approvals {
-            return Ok(BlockStatus::NotApproved {
-                hash,
-                public_key,
-                required_approvals,
-                approvals: valid_approvals
-            });
-        }
-
-        Ok(BlockStatus::Valid {
+        BlockStatus::validate(
             hash,
             public_key,
-            required_approvals,
-            approvals: valid_approvals
-        })
+            self.approvals(),
+            validators
+        )
     }
 
     /// Encode block into bytes representation.
