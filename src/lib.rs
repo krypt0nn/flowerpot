@@ -6,6 +6,9 @@ pub mod storage;
 #[cfg(feature = "client")]
 pub mod client;
 
+#[cfg(feature = "client")]
+pub mod viewer;
+
 #[cfg(feature = "shard")]
 pub mod shard;
 

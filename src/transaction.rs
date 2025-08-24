@@ -4,6 +4,8 @@ use serde_json::{json, Value as Json};
 
 use crate::crypto::*;
 
+pub const TRANSACTION_COMPRESSION_LEVEL: i32 = 0;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transaction {
     pub(crate) sign: Signature,
@@ -60,7 +62,10 @@ impl Transaction {
         bytes.extend(sign);                  // Fixed-size sign
         bytes.extend_from_slice(&self.data); // Transaction data
 
-        let bytes = zstd::encode_all(Cursor::new(bytes), 0)?;
+        let bytes = zstd::encode_all(
+            Cursor::new(bytes),
+            TRANSACTION_COMPRESSION_LEVEL
+        )?;
 
         Ok(bytes.into_boxed_slice())
     }
@@ -91,7 +96,10 @@ impl Transaction {
 
     /// Get standard JSON representation of the transaction.
     pub fn to_json(&self) -> std::io::Result<Json> {
-        let data = zstd::encode_all(Cursor::new(&self.data), 0)?;
+        let data = zstd::encode_all(
+            Cursor::new(&self.data),
+            TRANSACTION_COMPRESSION_LEVEL
+        )?;
 
         Ok(json!({
             "format": 0,
