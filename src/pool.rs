@@ -26,6 +26,57 @@ impl Default for ShardsPool {
 }
 
 impl ShardsPool {
+    pub async fn new<T: ToString>(shards: impl IntoIterator<Item = T>) -> Self {
+        let mut pool = Self::default();
+
+        pool.add_shards(shards).await;
+
+        pool
+    }
+
+    pub fn with_max_active(&mut self, max_active: usize) -> &mut Self {
+        self.max_active = max_active;
+
+        // Push excess active shards to the top of the inactive shards pool.
+        while self.active_shards.len() > max_active {
+            let Some(address) = self.active_shards.pop_back() else {
+                break;
+            };
+
+            self.inactive_shards.push_front(address);
+        }
+
+        // Truncate inactive shards pool to its max allowed capacity.
+        if self.inactive_shards.len() > self.max_inactive {
+            self.inactive_shards.resize(self.max_inactive, String::new());
+        }
+
+        self
+    }
+
+    pub fn with_max_inactive(&mut self, max_inactive: usize) -> &mut Self {
+        self.max_inactive = max_inactive;
+
+        // Truncate inactive shards pool to its max allowed capacity.
+        if self.inactive_shards.len() > max_inactive {
+            self.inactive_shards.resize(max_inactive, String::new());
+        }
+
+        self
+    }
+
+    pub async fn add_shards<T: ToString>(&mut self, shards: impl IntoIterator<Item = T>) {
+        let shards = shards.into_iter()
+            .map(|address| address.to_string());
+
+        self.inactive_shards.extend(shards);
+
+        // Truncate inactive shards pool to its max allowed capacity.
+        if self.inactive_shards.len() > self.max_inactive {
+            self.inactive_shards.resize(self.max_inactive, String::new());
+        }
+    }
+
     #[inline]
     pub fn active(&self) -> impl Iterator<Item = &'_ String> {
         self.active_shards.iter()
@@ -34,6 +85,16 @@ impl ShardsPool {
     #[inline]
     pub fn inactive(&self) -> impl Iterator<Item = &'_ String> {
         self.inactive_shards.iter()
+    }
+
+    #[inline(always)]
+    pub fn max_active(&self) -> usize {
+        self.max_active
+    }
+
+    #[inline(always)]
+    pub fn max_inactive(&self) -> usize {
+        self.max_inactive
     }
 
     /// Iterate over the shards within the pool, verify their online status,
