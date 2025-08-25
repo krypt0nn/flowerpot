@@ -81,6 +81,8 @@ impl FileStorage {
             .write(true)
             .open(self.0.join("index"))?;
 
+        // FIXME: do not truncate the index if the hash is the same as before.
+
         file.set_len(index * 32)?;
         file.seek(SeekFrom::Start(index * 32))?;
         file.write_all(&hash.0)?;
@@ -116,6 +118,10 @@ impl FileStorage {
 
 impl Storage for FileStorage {
     type Error = Error;
+
+    fn has_block(&self, hash: &Hash) -> Result<bool, Self::Error> {
+        Ok(self.index_find_block_hash(hash)?.is_some())
+    }
 
     fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error> {
         let path = self.get_block_path(hash);

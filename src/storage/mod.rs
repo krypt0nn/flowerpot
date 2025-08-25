@@ -6,6 +6,9 @@ pub mod file_storage;
 pub trait Storage {
     type Error: std::error::Error;
 
+    /// Check if blockchain has block with given hash.
+    fn has_block(&self, hash: &Hash) -> Result<bool, Self::Error>;
+
     /// Read block from its hash. Return `Ok(None)` if there's no such block.
     fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error>;
 
