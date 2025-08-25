@@ -72,7 +72,7 @@ impl FileStorage {
 
     fn index_write_block_hash(
         &self,
-        index: u64,
+        mut index: u64,
         hash: &Hash
     ) -> std::io::Result<()> {
         let mut file = File::options()
@@ -81,10 +81,21 @@ impl FileStorage {
             .write(true)
             .open(self.0.join("index"))?;
 
-        // FIXME: do not truncate the index if the hash is the same as before.
+        index *= 32;
+
+        // If we can seek to the target index.
+        if file.seek(SeekFrom::Start(index))? == index {
+            let mut current_hash = [0; 32];
+
+            // And if the target hash is already written to the index - then we
+            // don't need to overwrite it and truncate the blockchain.
+            if file.read_exact(&mut current_hash).is_ok() && current_hash == hash.0 {
+                return Ok(());
+            }
+        }
 
         file.set_len(index * 32)?;
-        file.seek(SeekFrom::Start(index * 32))?;
+        file.seek(SeekFrom::Start(index))?;
         file.write_all(&hash.0)?;
         file.flush()?;
 
