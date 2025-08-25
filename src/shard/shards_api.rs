@@ -16,9 +16,12 @@ pub async fn get_shards<S: Storage>(
     #[cfg(feature = "tracing")]
     tracing::trace!("GET /api/v1/shards");
 
-    let shards = state.client.read().await
-        .shards()
-        .clone();
+    let guard = state.shards.read().await;
+
+    let shards = guard.active()
+        .chain(guard.inactive())
+        .cloned()
+        .collect::<Vec<_>>();
 
     (StatusCode::OK, AxumJson(json!(shards)))
 }
@@ -37,23 +40,10 @@ pub async fn put_shards<S: Storage>(
 
     match serde_json::from_value::<HashSet<String>>(shards) {
         Ok(shards) => {
-            let mut guard = state.client.write().await;
+            state.shards.write().await
+                .add_shards(shards);
 
-            // TODO: wouldn't hurt to verify that these shards are online.
-
-            match guard.add_shards(&shards).await {
-                Ok(()) => (StatusCode::OK, AxumJson(Json::Null)),
-                Err(err) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!(
-                        ?shards,
-                        ?err,
-                        "PUT /api/v1/shards: failed to add shards to the client"
-                    );
-
-                    (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null))
-                }
-            }
+            (StatusCode::OK, AxumJson(Json::Null))
         }
 
         Err(err) => {

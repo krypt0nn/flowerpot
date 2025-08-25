@@ -4,7 +4,7 @@ use futures::FutureExt;
 
 use crate::crypto::*;
 use crate::block::{Block, BlockContent, BlockStatus, Error as BlockError};
-use crate::client::{Client2, SyncResult, Error2 as ClientError};
+use crate::client::{Client, SyncResult, Error as ClientError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -28,7 +28,7 @@ pub struct ValidBlock {
 /// This struct will silently ignore any shard-related errors and simply remove
 /// shards if they returned invalid results.
 pub struct Viewer {
-    client: Client2,
+    client: Client,
     shards: HashSet<String>,
     root_block: Hash,
     curr_block: ValidBlock,
@@ -53,11 +53,11 @@ impl Viewer {
     /// Return `Ok(None)` if none of provided shards contain at least one valid
     /// block.
     pub async fn open<T: ToString>(
-        client: impl Into<Client2>,
+        client: impl Into<Client>,
         shards: impl IntoIterator<Item = T>,
         root_block: Option<Hash>
     ) -> Result<Option<Self>, ClientError> {
-        let client: Client2 = client.into();
+        let client: Client = client.into();
 
         let mut shards = shards.into_iter()
             .map(|address| address.to_string())
@@ -209,7 +209,7 @@ impl Viewer {
     }
 
     #[inline(always)]
-    pub fn client(&self) -> &Client2 {
+    pub fn client(&self) -> &Client {
         &self.client
     }
 
@@ -224,7 +224,7 @@ impl Viewer {
     }
 
     #[inline(always)]
-    pub fn into_client(self) -> Client2 {
+    pub fn into_client(self) -> Client {
         self.client
     }
 

@@ -34,76 +34,24 @@ pub async fn put_transactions<S: Storage>(
         Ok(transaction) => {
             if transaction.data.len() as u64 > state.security_rules.max_transaction_body_size {
                 #[cfg(feature = "tracing")]
-                tracing::debug!(
-                    sign = transaction.sign().to_base64(),
+                tracing::warn!(
                     hash = transaction.hash().to_base64(),
+                    sign = transaction.sign().to_base64(),
                     size = transaction.data.len(),
                     "PUT /api/v1/transactions: rejecting transaction because it's too large"
                 );
 
-                return (StatusCode::PAYLOAD_TOO_LARGE, AxumJson(Json::Null));
+                return (StatusCode::NOT_ACCEPTABLE, AxumJson(Json::Null));
             }
 
-            match transaction.verify() {
-                Ok((true, public_key)) => {
-                    // Check transaction using the filter function if one is
-                    // provided by the security rules.
-                    if let Some(filter) = state.security_rules.transactions_filter
-                        && !filter(&transaction, &public_key)
-                    {
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(
-                            public_key = public_key.to_base64(),
-                            sign = transaction.sign().to_base64(),
-                            hash = transaction.hash().to_base64(),
-                            "PUT /api/v1/transactions: rejecting transaction"
-                        );
+            if state.events_sender.send(ShardEvent::TryPutTransaction(transaction)).is_err() {
+                #[cfg(feature = "tracing")]
+                tracing::error!("PUT /api/v1/transactions: events handler is down");
 
-                        return (StatusCode::NOT_ACCEPTABLE, AxumJson(Json::Null));
-                    }
-
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(
-                        public_key = public_key.to_base64(),
-                        sign = transaction.sign().to_base64(),
-                        hash = transaction.hash().to_base64(),
-                        "PUT /api/v1/transactions: add pending transaction"
-                    );
-
-                    let mut guard = state.pending_transactions.write().await;
-
-                    // Share this transaction with other shards if it is newly added
-                    // and security rules allow it.
-                    let hash = transaction.hash();
-
-                    if guard.insert(hash.0, transaction).is_none() &&
-                        state.security_rules.spread_pending_transactions
-                    {
-                        let _ = state.events_sender.send(ShardEvent::SharePendingTransaction(hash));
-                    }
-
-                    (StatusCode::OK, AxumJson(Json::Null))
-                }
-
-                Ok((false, public_key)) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(
-                        public_key = public_key.to_base64(),
-                        sign = transaction.sign().to_base64(),
-                        hash = transaction.hash().to_base64(),
-                        "PUT /api/v1/transactions: attempted to put invalid transaction"
-                    );
-
-                    (StatusCode::NOT_ACCEPTABLE, AxumJson(Json::Null))
-                }
-
-                Err(err) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!(?err, "PUT /api/v1/transactions: failed to verify transaction");
-
-                    (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null))
-                }
+                return (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null));
             }
+
+            (StatusCode::OK, AxumJson(Json::Null))
         }
 
         Err(err) => {

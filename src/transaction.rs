@@ -48,8 +48,11 @@ impl Transaction {
     }
 
     /// Derive transaction's author and verify its content.
-    pub fn verify(&self) -> Result<(bool, PublicKey), k256::ecdsa::Error> {
-        self.sign.verify(self.hash())
+    pub fn verify(&self) -> Result<(bool, Hash, PublicKey), k256::ecdsa::Error> {
+        let hash = self.hash();
+
+        self.sign.verify(hash)
+            .map(|(is_valid, public_key)| (is_valid, hash, public_key))
     }
 
     /// Get bytes representation of the current transaction.
@@ -160,13 +163,12 @@ mod tests {
     fn validate() -> Result<(), Box<dyn std::error::Error>> {
         let (secret_key, transaction) = get_transaction()?;
 
-        let (valid, author) = transaction.verify()?;
+        let (is_valid, hash, author) = transaction.verify()?;
 
-        assert!(valid);
-
+        assert!(is_valid);
+        assert_eq!(hash.to_base64(), "W5KgqE-8UKWMdPRxe8DV9AMoKuTNfXo4QxHtPEGKFdg=");
         assert_eq!(author, secret_key.public_key());
         assert_eq!(transaction.data(), b"hello, world!");
-        assert_eq!(transaction.hash().to_base64(), "W5KgqE-8UKWMdPRxe8DV9AMoKuTNfXo4QxHtPEGKFdg=");
 
         Ok(())
     }

@@ -32,158 +32,15 @@ pub async fn put_blocks<S: Storage>(
     tracing::trace!("PUT /api/v1/blocks");
 
     match Block::from_json(&block) {
-        Ok(mut block) => {
-            match block.verify() {
-                Ok((true, hash, public_key)) => {
-                    // Check block using the filter function if one is provided
-                    // by the security rules.
-                    if let Some(filter) = state.security_rules.blocks_filter
-                        && !filter(&block, &hash, &public_key)
-                    {
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(
-                            public_key = public_key.to_base64(),
-                            sign = block.sign().to_base64(),
-                            hash = hash.to_base64(),
-                            "PUT /api/v1/blocks: rejecting block"
-                        );
+        Ok(block) => {
+            if state.events_sender.send(ShardEvent::TryPutBlock(block)).is_err() {
+                #[cfg(feature = "tracing")]
+                tracing::error!("PUT /api/v1/blocks: events handler is down");
 
-                        return (StatusCode::NOT_ACCEPTABLE, AxumJson(Json::Null));
-                    }
-
-                    let validators = state.storage.lock().await
-                        .get_current_validators();
-
-                    // TODO: do not accept pending blocks if current last block
-                    //       is not the previous block of this pending block?
-
-                    match validators {
-                        Ok(validators) => {
-                            if !validators.contains(&public_key) {
-                                #[cfg(feature = "tracing")]
-                                tracing::error!("PUT /api/v1/blocks: attempted to put a block with invalid signer");
-
-                                return (StatusCode::NOT_ACCEPTABLE, AxumJson(Json::Null));
-                            }
-
-                            // Keep only valid approvals before storing a pending block.
-                            let mut valid_approvals = Vec::with_capacity(block.approvals.len());
-
-                            for approval in block.approvals.drain(..) {
-                                match approval.verify(hash) {
-                                    Ok((true, verifier)) => {
-                                        if !validators.contains(&verifier) {
-                                            #[cfg(feature = "tracing")]
-                                            tracing::error!("PUT /api/v1/blocks: sent block contains approval signature from invalid validator");
-                                        } else {
-                                            valid_approvals.push(approval);
-                                        }
-                                    }
-
-                                    Ok((false, _)) => {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::warn!("PUT /api/v1/blocks: sent block contains invalid approval signature");
-                                    }
-
-                                    Err(err) => {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::error!(?err, "PUT /api/v1/blocks: failed to verify approval signature");
-
-                                        return (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null));
-                                    }
-                                }
-                            }
-
-                            block.approvals = valid_approvals;
-
-                            // If enough approvals are met and it's not disabled
-                            // in the security rules - write this block to the
-                            // local storage.
-                            if state.security_rules.merge_blocks_without_sync
-                                && block.approvals.len() >= crate::calc_required_approvals(validators.len())
-                            {
-                                #[cfg(feature = "tracing")]
-                                tracing::info!("PUT /api/v1/blocks: enough approvals received, merging block");
-
-                                let result = state.storage.lock().await
-                                    .write_block(&block);
-
-                                match result {
-                                    Ok(()) => {
-                                        if let BlockContent::Transactions(transactions) = block.content() {
-                                            let mut guard = state.pending_transactions.write().await;
-
-                                            for transaction in transactions {
-                                                guard.remove(&transaction.hash().0);
-                                            }
-                                        }
-                                    }
-
-                                    Err(err) => {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::error!(?err, "PUT /api/v1/blocks: failed to write approved block to the local storage");
-                                    }
-                                }
-
-                                // Share this block with other shards if
-                                // security rules allow it.
-                                if state.security_rules.spread_pending_blocks {
-                                    let _ = state.events_sender.send(ShardEvent::SharePendingBlock(hash));
-                                }
-                            }
-
-                            // Otherwise store the pending block.
-                            else {
-                                #[cfg(feature = "tracing")]
-                                tracing::debug!(
-                                    public_key = public_key.to_base64(),
-                                    sign = block.sign().to_base64(),
-                                    hash = hash.to_base64(),
-                                    "PUT /api/v1/blocks: add pending block"
-                                );
-
-                                let mut guard = state.pending_blocks.write().await;
-
-                                // Share this block with other shards if it is newly added
-                                // and security rules allow it.
-                                if guard.insert(hash.0, block).is_none() &&
-                                    state.security_rules.spread_pending_blocks
-                                {
-                                    let _ = state.events_sender.send(ShardEvent::SharePendingBlock(hash));
-                                }
-                            }
-
-                            (StatusCode::OK, AxumJson(Json::Null))
-                        }
-
-                        Err(err) => {
-                            #[cfg(feature = "tracing")]
-                            tracing::error!(?err, "PUT /api/v1/blocks: failed to read current validators");
-
-                            (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null))
-                        }
-                    }
-                }
-
-                Ok((false, hash, public_key)) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(
-                        public_key = public_key.to_base64(),
-                        sign = block.sign().to_base64(),
-                        hash = hash.to_base64(),
-                        "PUT /api/v1/blocks: attempted to put invalid block"
-                    );
-
-                    (StatusCode::NOT_ACCEPTABLE, AxumJson(Json::Null))
-                }
-
-                Err(err) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!(?err, "PUT /api/v1/blocks: failed to verify block");
-
-                    (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null))
-                }
+                return (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null));
             }
+
+            (StatusCode::OK, AxumJson(Json::Null))
         }
 
         Err(err) => {
@@ -229,20 +86,18 @@ pub async fn get_blocks_hash<S: Storage>(
         }
     }
 
-    match block {
-        Some(block) => {
-            match block.to_json() {
-                Ok(block) => (StatusCode::OK, AxumJson(block)),
-                Err(err) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!(?err, "GET /api/v1/blocks/<hash>: failed to serialize block");
+    let Some(block) = block else {
+        return (StatusCode::NOT_FOUND, AxumJson(Json::Null));
+    };
 
-                    (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null))
-                }
-            }
+    match block.to_json() {
+        Ok(block) => (StatusCode::OK, AxumJson(block)),
+        Err(err) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(?err, "GET /api/v1/blocks/<hash>: failed to serialize block");
+
+            (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null))
         }
-
-        None => (StatusCode::NOT_FOUND, AxumJson(Json::Null))
     }
 }
 
@@ -265,129 +120,21 @@ pub async fn put_blocks_hash<S: Storage>(
         Ok(body) => {
             let body = String::from_utf8_lossy(&body);
 
-            let Some(sign) = Signature::from_base64(body.trim_end()) else {
+            let Some(approval) = Signature::from_base64(body.trim_end()) else {
                 #[cfg(feature = "tracing")]
                 tracing::warn!(?hash, "PUT /api/v1/blocks/<hash>: failed to decode signature");
 
                 return (StatusCode::NOT_ACCEPTABLE, AxumJson(Json::Null));
             };
 
-            match sign.verify(hash) {
-                Ok((true, public_key)) => {
-                    let validators = state.storage.lock().await
-                        .get_current_validators();
+            if state.events_sender.send(ShardEvent::TryApproveBlock(hash, approval)).is_err() {
+                #[cfg(feature = "tracing")]
+                tracing::error!("PUT /api/v1/blocks/<hash>: events handler is down");
 
-                    match validators {
-                        Ok(validators) => {
-                            if !validators.contains(&public_key) {
-                                #[cfg(feature = "tracing")]
-                                tracing::error!("PUT /api/v1/blocks/<hash>: attempted to put approval signature with invalid signer");
-
-                                return (StatusCode::NOT_ACCEPTABLE, AxumJson(Json::Null));
-                            }
-
-                            let mut guard = state.pending_blocks.write().await;
-
-                            match guard.get_mut(&hash.0) {
-                                Some(block) => {
-                                    match block.verify() {
-                                        Ok((valid, hash, block_author)) => {
-                                            if !valid {
-                                                #[cfg(feature = "tracing")]
-                                                tracing::warn!("PUT /api/v1/blocks/<hash>: asked block is invalid");
-
-                                                guard.remove(&hash.0);
-                                            }
-
-                                            else if !block.approvals.contains(&sign) && public_key != block_author {
-                                                block.approvals.push(sign.clone());
-
-                                                // Share this approval with other shards if it is
-                                                // newly added and security rules allow it.
-                                                if state.security_rules.spread_pending_blocks_approvals {
-                                                    let _ = state.events_sender.send(ShardEvent::SharePendingBlockApproval(hash, sign));
-                                                }
-
-                                                // If enough approvals are met and it's not disabled
-                                                // in the security rules - write this block to the
-                                                // local storage.
-                                                if state.security_rules.merge_blocks_without_sync
-                                                    && block.approvals.len() >= crate::calc_required_approvals(validators.len())
-                                                {
-                                                    #[cfg(feature = "tracing")]
-                                                    tracing::info!("PUT /api/v1/blocks/<hash>: enough approvals received, merging block");
-
-                                                    let result = state.storage.lock().await
-                                                        .write_block(block);
-
-                                                    match result {
-                                                        Ok(()) => {
-                                                            if let BlockContent::Transactions(transactions) = block.content() {
-                                                                let mut guard = state.pending_transactions.write().await;
-
-                                                                for transaction in transactions {
-                                                                    guard.remove(&transaction.hash().0);
-                                                                }
-                                                            }
-
-                                                            guard.remove(&hash.0);
-                                                        }
-
-                                                        Err(err) => {
-                                                            #[cfg(feature = "tracing")]
-                                                            tracing::error!(?err, "PUT /api/v1/blocks/<hash>: failed to write approved block to the local storage");
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            (StatusCode::OK, AxumJson(Json::Null))
-                                        }
-
-                                        Err(err) => {
-                                            #[cfg(feature = "tracing")]
-                                            tracing::error!(?err, "PUT /api/v1/blocks/<hash>: failed to read the block's signer");
-
-                                            (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null))
-                                        }
-                                    }
-                                }
-
-                                None => {
-                                    #[cfg(feature = "tracing")]
-                                    tracing::debug!(
-                                        hash = hash.to_base64(),
-                                        "PUT /api/v1/blocks/<hash>: block with that hash is not pending"
-                                    );
-
-                                    (StatusCode::NOT_FOUND, AxumJson(Json::Null))
-                                }
-                            }
-                        }
-
-                        Err(err) => {
-                            #[cfg(feature = "tracing")]
-                            tracing::error!(?err, "PUT /api/v1/blocks/<hash>: failed to read current validators");
-
-                            (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null))
-                        }
-                    }
-                }
-
-                Ok((false, _)) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!("PUT /api/v1/blocks/<hash>: attempted to put invalid approval signature");
-
-                    (StatusCode::NOT_ACCEPTABLE, AxumJson(Json::Null))
-                }
-
-                Err(err) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!(?err, "PUT /api/v1/blocks/<hash>: failed to verify approval signature");
-
-                    (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null))
-                }
+                return (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null));
             }
+
+            (StatusCode::OK, AxumJson(Json::Null))
         }
 
         Err(err) => {
