@@ -26,10 +26,10 @@ impl Default for ShardsPool {
 }
 
 impl ShardsPool {
-    pub async fn new<T: ToString>(shards: impl IntoIterator<Item = T>) -> Self {
+    pub fn new<T: ToString>(shards: impl IntoIterator<Item = T>) -> Self {
         let mut pool = Self::default();
 
-        pool.add_shards(shards).await;
+        pool.add_shards(shards);
 
         pool
     }
@@ -65,11 +65,16 @@ impl ShardsPool {
         self
     }
 
-    pub async fn add_shards<T: ToString>(&mut self, shards: impl IntoIterator<Item = T>) {
+    pub fn add_shards<T: ToString>(&mut self, shards: impl IntoIterator<Item = T>) {
         let shards = shards.into_iter()
             .map(|address| address.to_string());
 
-        self.inactive_shards.extend(shards);
+        // Ensure that there are no duplicates.
+        for address in shards {
+            if self.inactive_shards.contains(&address) {
+                self.inactive_shards.push_front(address);
+            }
+        }
 
         // Truncate inactive shards pool to its max allowed capacity.
         if self.inactive_shards.len() > self.max_inactive {
