@@ -20,6 +20,14 @@ updates for your app.
 
 # HTTP Shards API v1 reference
 
+## Node status
+
+API to check status of the shard node.
+
+### `GET /api/v1/heartbeat`
+
+Check if the shard is online. In that case `200 OK` response must be returned.
+
 ## Transactions
 
 API to push new transactions to the network and monitor their status.
