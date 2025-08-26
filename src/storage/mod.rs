@@ -1,6 +1,7 @@
 use crate::crypto::*;
 use crate::block::*;
 
+#[cfg(feature = "file_storage")]
 pub mod file_storage;
 
 pub trait Storage {
