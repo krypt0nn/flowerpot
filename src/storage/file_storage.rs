@@ -149,6 +149,10 @@ impl Storage for FileStorage {
     }
 
     fn next_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error> {
+        if hash == &Hash::default() {
+            return self.root_block();
+        }
+
         match self.index_find_block_hash(hash)? {
             Some(index) => Ok(self.index_read_block_hash(index + 1)?),
             None => Ok(None)

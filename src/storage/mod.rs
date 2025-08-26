@@ -19,6 +19,9 @@ pub trait Storage {
     /// Get hash of a block next to the one with provided hash. Return
     /// `Ok(None)` if there's no block next to the requested one.
     ///
+    /// Next block from the default hash (zeros) must return the root block
+    /// of the blockchain if it's available.
+    ///
     /// ```text,no_run
     /// [curr_block] <--- [next_block]
     ///                   ^^^^^^^^^^^^ returned value
