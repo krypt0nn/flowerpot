@@ -131,16 +131,6 @@ If selected `after` block is not a part of blockchain known to the shard then
 type Response = object[]; // Standard block JSON format
 ```
 
-### `PUT /api/v1/sync`
-
-Announce a part of a blockchain to the network. This part can be verified by the
-shard and, if valid, attempted to be written to the history of the shard. If so,
-then shard can continue sharing this part of the blockchain.
-
-```ts
-type Request = object[]; // Standard block JSON format
-```
-
 ## Shards
 
 API to handle public nodes (shards) of the network.
@@ -160,12 +150,6 @@ Announce list of shards to another shard.
 ```ts
 type Request = string[];
 ```
-
-## Validators
-
-API to handle validator nodes of the network.
-
-TBD
 
 Author: [Nikita Podvirnyi](https://github.com/krypt0nn)\
 Licensed under [GPL-3.0](LICENSE)
