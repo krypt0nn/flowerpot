@@ -148,6 +148,13 @@ impl Storage for FileStorage {
         Ok(self.index_find_block_hash(hash)?.is_some())
     }
 
+    fn next_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error> {
+        match self.index_find_block_hash(hash)? {
+            Some(index) => Ok(self.index_read_block_hash(index + 1)?),
+            None => Ok(None)
+        }
+    }
+
     fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error> {
         let path = self.get_block_path(hash);
 
@@ -159,22 +166,6 @@ impl Storage for FileStorage {
         let block = Block::from_bytes(block)?;
 
         Ok(Some(block))
-    }
-
-    fn read_next_block(
-        &self,
-        hash: &Hash
-    ) -> Result<Option<Block>, Self::Error> {
-        match self.index_find_block_hash(hash)? {
-            Some(index) => {
-                match self.index_read_block_hash(index + 1)? {
-                    Some(hash) => self.read_block(&hash),
-                    None => Ok(None)
-                }
-            }
-
-            None => Ok(None)
-        }
     }
 
     fn write_block(&self, block: &Block) -> Result<(), Self::Error> {

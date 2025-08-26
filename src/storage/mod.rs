@@ -16,20 +16,17 @@ pub trait Storage {
     /// Check if blockchain has block with given hash.
     fn has_block(&self, hash: &Hash) -> Result<bool, Self::Error>;
 
-    /// Read block from its hash. Return `Ok(None)` if there's no such block.
-    fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error>;
-
-    /// Read block next to the one with provided hash. Return `Ok(None)` if
-    /// there's no block next to the requested one.
+    /// Get hash of a block next to the one with provided hash. Return
+    /// `Ok(None)` if there's no block next to the requested one.
     ///
     /// ```text,no_run
     /// [curr_block] <--- [next_block]
     ///                   ^^^^^^^^^^^^ returned value
     /// ```
-    fn read_next_block(
-        &self,
-        hash: &Hash
-    ) -> Result<Option<Block>, Self::Error>;
+    fn next_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error>;
+
+    /// Read block from its hash. Return `Ok(None)` if there's no such block.
+    fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error>;
 
     /// Write block to the blockchain.
     ///

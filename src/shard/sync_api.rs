@@ -39,7 +39,20 @@ pub async fn get_sync<S: Storage>(
                 return (StatusCode::NOT_FOUND, AxumJson(Json::Null));
             }
 
-            guard.read_next_block(&hash)
+            match guard.next_block(&hash) {
+                Ok(Some(next_block)) => guard.read_block(&next_block),
+                Ok(None) => Ok(None),
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(
+                        ?hash,
+                        ?err,
+                        "GET /api/v1/sync: failed to read block next to the requested one"
+                    );
+
+                    return (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null));
+                }
+            }
         }
 
         None => match guard.root_block() {
@@ -100,13 +113,29 @@ pub async fn get_sync<S: Storage>(
             }
         }
 
-        match guard.read_next_block(&hash) {
+        let next_block = match guard.next_block(&hash) {
+            Ok(Some(next_block)) => next_block,
+            Ok(None) => break,
+            Err(err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    ?hash,
+                    ?err,
+                    "GET /api/v1/sync: failed to read next block from the local storage"
+                );
+
+                return (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null));
+            }
+        };
+
+        match guard.read_block(&next_block) {
             Ok(Some(next_block)) => block = next_block,
             Ok(None) => break,
             Err(err) => {
                 #[cfg(feature = "tracing")]
                 tracing::error!(
                     hash = hash.to_base64(),
+                    next_block = next_block.to_base64(),
                     ?err,
                     "GET /api/v1/sync: failed to read next block from the storage"
                 );
