@@ -77,7 +77,7 @@ impl BlockStatus {
         let validators = validators.as_ref();
 
         // Immediately reject the block if its signer is not a validator.
-        if !validators.contains(&public_key) {
+        if !validators.is_empty() && !validators.contains(&public_key) {
             return Ok(BlockStatus::Invalid);
         }
 
@@ -91,7 +91,8 @@ impl BlockStatus {
 
             // Reject invalid approval, approvals from non-validators and
             // self-approvals from the block's author.
-            if !valid || !validators.contains(&public_key)
+            if !valid
+                || (!validators.is_empty() && !validators.contains(&public_key))
                 || approval_public_key == public_key
             {
                 continue;
