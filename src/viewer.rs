@@ -230,7 +230,7 @@ impl Viewer {
 
     /// Get currently selected block.
     #[inline(always)]
-    pub fn curr_block(&self) -> &ValidBlock {
+    pub fn current_block(&self) -> &ValidBlock {
         &self.curr_block
     }
 
@@ -240,14 +240,14 @@ impl Viewer {
         &self.validators
     }
 
-    /// Try to read the next block of the blockchain. Return `true` if new
-    /// block was read, otherwise return `false` if there's no new block
+    /// Try to read the next block of the blockchain. Return `Some` with the new
+    /// block if it was read, otherwise return `None` if there's no new block
     /// available yet. All the errors are handled silently and if `tracing`
     /// feature is enabled are reported there.
     ///
     /// Note that this method removes broken shards from the list, so eventually
     /// viewer can have no more shards to work with.
-    pub async fn forward(&mut self) -> bool {
+    pub async fn forward(&mut self) -> Option<&ValidBlock> {
         // Use the blocks pool if it's available.
         if let Some(block) = self.blocks_pool.pop_front() {
             // Update validators list if the new block is of validators type.
@@ -257,7 +257,7 @@ impl Viewer {
 
             self.curr_block = block;
 
-            return true;
+            return Some(&self.curr_block);
         }
 
         // At that point we either don't have blocks pool, or it was cleared
@@ -399,33 +399,28 @@ impl Viewer {
         }
 
         // Use the blocks pool if it's available.
-        match self.blocks_pool.pop_front() {
-            Some(block) => {
-                // Update validators list if the new block is of validators type.
-                if let BlockContent::Validators(validators) = block.block.content() {
-                    self.validators = validators.clone();
-                }
+        let block = self.blocks_pool.pop_front()?;
 
-                self.curr_block = block;
-
-                true
-            }
-
-            None => false
+        // Update validators list if the new block is of validators type.
+        if let BlockContent::Validators(validators) = block.block.content() {
+            self.validators = validators.clone();
         }
+
+        self.curr_block = block;
+
+        Some(&self.curr_block)
     }
 
     /// Continuously call the `forward` method until the block with `block_hash`
     /// is met or the end of the blockchain is reached.
     ///
-    /// Return `true` if the current block is `block_hash`, otherwise `false`.
-    pub async fn forward_to(&mut self, block_hash: &Hash) -> bool {
+    /// Return `Some` with the current block being `block_hash`, otherwise
+    /// return `None`.
+    pub async fn forward_to(&mut self, block_hash: &Hash) -> Option<&ValidBlock> {
         while &self.curr_block.hash != block_hash {
-            if !self.forward().await {
-                return false;
-            }
+            self.forward().await?;
         }
 
-        true
+        Some(&self.curr_block)
     }
 }
