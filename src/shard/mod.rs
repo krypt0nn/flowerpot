@@ -249,15 +249,27 @@ where
     #[cfg(feature = "tracing")]
     tracing::info!("reading local blockchain data");
 
-    let first_block = shard.storage.read_first_block()
+    let root_block = shard.storage.root_block()
         .map_err(|err| Error::Storage(err.to_string()))?
+        .and_then(|root_block| {
+            shard.storage.read_block(&root_block)
+                .map_err(|err| Error::Storage(err.to_string()))
+                .transpose()
+        })
+        .transpose()?
         .map(|block| block.hash())
         .transpose()
         .map_err(|err| Error::Storage(err.to_string()))?
         .map(|hash| hash.to_base64());
 
-    let last_block = shard.storage.read_last_block()
+    let tail_block = shard.storage.tail_block()
         .map_err(|err| Error::Storage(err.to_string()))?
+        .and_then(|tail_block| {
+            shard.storage.read_block(&tail_block)
+                .map_err(|err| Error::Storage(err.to_string()))
+                .transpose()
+        })
+        .transpose()?
         .map(|block| block.hash())
         .transpose()
         .map_err(|err| Error::Storage(err.to_string()))?
@@ -265,8 +277,8 @@ where
 
     #[cfg(feature = "tracing")]
     tracing::info!(
-        ?first_block,
-        ?last_block,
+        ?root_block,
+        ?tail_block,
         "synchronizing local blockchain storage"
     );
 
@@ -861,7 +873,19 @@ async fn handle_events<S: Storage>(
                         if !block.approvals.contains(&approval) {
                             // Get list of validators for this block.
                             let validators = match storage_guard.get_validators_before_block(&hash) {
-                                Ok(validators) => validators,
+                                Ok(Some(validators)) => validators,
+
+                                // Normally shouldn't be a thing.
+                                Ok(None) => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::warn!(
+                                        hash = hash.to_base64(),
+                                        "failed to get block validators list although block is available, perhaps a storage implementation bug"
+                                    );
+
+                                    continue;
+                                }
+
                                 Err(err) => {
                                     #[cfg(feature = "tracing")]
                                     tracing::error!(

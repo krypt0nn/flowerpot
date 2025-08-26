@@ -130,6 +130,20 @@ impl FileStorage {
 impl Storage for FileStorage {
     type Error = Error;
 
+    fn root_block(&self) -> Result<Option<Hash>, Self::Error> {
+        Ok(self.index_read_block_hash(0)?)
+    }
+
+    fn tail_block(&self) -> Result<Option<Hash>, Self::Error> {
+        let size = self.index_size()?;
+
+        if size == 0 {
+            return Ok(None);
+        }
+
+        Ok(self.index_read_block_hash(size - 1)?)
+    }
+
     fn has_block(&self, hash: &Hash) -> Result<bool, Self::Error> {
         Ok(self.index_find_block_hash(hash)?.is_some())
     }
@@ -163,26 +177,6 @@ impl Storage for FileStorage {
         }
     }
 
-    fn read_first_block(&self) -> Result<Option<Block>, Self::Error> {
-        match self.index_read_block_hash(0)? {
-            Some(hash) => self.read_block(&hash),
-            None => Ok(None)
-        }
-    }
-
-    fn read_last_block(&self) -> Result<Option<Block>, Self::Error> {
-        let size = self.index_size()?;
-
-        if size == 0 {
-            return Ok(None);
-        }
-
-        match self.index_read_block_hash(size - 1)? {
-            Some(hash) => self.read_block(&hash),
-            None => Ok(None)
-        }
-    }
-
     fn write_block(&self, block: &Block) -> Result<(), Self::Error> {
         let hash = block.hash()?;
         let path = self.get_block_path(&hash);
@@ -206,38 +200,67 @@ impl Storage for FileStorage {
         Ok(())
     }
 
-    fn get_validators_before_block(&self, hash: &Hash) -> Result<Vec<PublicKey>, Self::Error> {
+    fn get_validators_before_block(&self, hash: &Hash) -> Result<Option<Vec<PublicKey>>, Self::Error> {
         let mut block = self.read_block(hash)?;
 
+        if block.is_none() {
+            return Ok(None);
+        }
+
         while let Some(value) = block {
+            if value.is_root() {
+                let (_, _, public_key) = value.verify()?;
+
+                return Ok(Some(vec![public_key]));
+            }
+
             block = self.read_block(value.previous())?;
 
             if let BlockContent::Validators(validators) = value.content() {
-                return Ok(validators.to_vec());
+                return Ok(Some(validators.to_vec()));
             }
         }
 
-        Ok(vec![])
+        Ok(Some(vec![]))
     }
 
-    fn get_validators_after_block(&self, hash: &Hash) -> Result<Vec<PublicKey>, Self::Error> {
+    fn get_validators_after_block(&self, hash: &Hash) -> Result<Option<Vec<PublicKey>>, Self::Error> {
         let mut block = self.read_block(hash)?;
+
+        if block.is_none() {
+            return Ok(None);
+        }
 
         while let Some(value) = block {
             if let BlockContent::Validators(validators) = value.content() {
-                return Ok(validators.to_vec());
+                return Ok(Some(validators.to_vec()));
+            }
+
+            if value.is_root() {
+                let (_, _, public_key) = value.verify()?;
+
+                return Ok(Some(vec![public_key]));
             }
 
             block = self.read_block(value.previous())?;
         }
 
-        Ok(vec![])
+        Ok(Some(vec![]))
     }
 
     fn get_current_validators(&self) -> Result<Vec<PublicKey>, Self::Error> {
-        match self.read_last_block()? {
-            Some(block) => self.get_validators_after_block(&block.hash()?),
-            None => Ok(vec![])
+        let Some(tail_block) = self.tail_block()? else {
+            // No tail block => blockchain is empty, no validators available.
+            return Ok(vec![]);
+        };
+
+        // Can return `None` only if `read_block` decided that tail block
+        // doesn't exist which shouldn't happen.
+        if let Some(validators) = self.get_validators_after_block(&tail_block)? {
+            return Ok(validators);
         }
+
+        // Fallback value.
+        Ok(vec![])
     }
 }

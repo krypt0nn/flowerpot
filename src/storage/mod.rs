@@ -6,6 +6,12 @@ pub mod file_storage;
 pub trait Storage {
     type Error: std::error::Error;
 
+    /// Get hash of the root block if it's available.
+    fn root_block(&self) -> Result<Option<Hash>, Self::Error>;
+
+    /// Get hash of the tail block if it's available.
+    fn tail_block(&self) -> Result<Option<Hash>, Self::Error>;
+
     /// Check if blockchain has block with given hash.
     fn has_block(&self, hash: &Hash) -> Result<bool, Self::Error>;
 
@@ -23,12 +29,6 @@ pub trait Storage {
         &self,
         hash: &Hash
     ) -> Result<Option<Block>, Self::Error>;
-
-    /// Read the first block. Return `Ok(None)` if blockchain is empty.
-    fn read_first_block(&self) -> Result<Option<Block>, Self::Error>;
-
-    /// Read the last block. Return `Ok(None)` if blockchain is empty.
-    fn read_last_block(&self) -> Result<Option<Block>, Self::Error>;
 
     /// Write block to the blockchain.
     ///
@@ -48,18 +48,22 @@ pub trait Storage {
     /// changes validators list then this method should return *previous
     /// validators* list - so validators who can approve creation of the block
     /// with provided hash.
+    ///
+    /// Return `Ok(None)` if requested block is not stored in the local storage.
     fn get_validators_before_block(
         &self,
         hash: &Hash
-    ) -> Result<Vec<PublicKey>, Self::Error>;
+    ) -> Result<Option<Vec<PublicKey>>, Self::Error>;
 
     /// Similar to `get_validators_before_block` but this method should return
     /// list of validators after the block with provided hash was added to
     /// the blockchain.
+    ///
+    /// Return `Ok(None)` if requested block is not stored in the local storage.
     fn get_validators_after_block(
         &self,
         hash: &Hash
-    ) -> Result<Vec<PublicKey>, Self::Error>;
+    ) -> Result<Option<Vec<PublicKey>>, Self::Error>;
 
     /// Get list of current blockchain validators.
     fn get_current_validators(&self) -> Result<Vec<PublicKey>, Self::Error>;

@@ -42,7 +42,19 @@ pub async fn get_sync<S: Storage>(
             guard.read_next_block(&hash)
         }
 
-        None => guard.read_first_block()
+        None => match guard.root_block() {
+            Ok(Some(root_block)) => guard.read_block(&root_block),
+
+            // No root block => blockchain is empty => nothing to sync.
+            Ok(None) => return (StatusCode::OK, AxumJson(json!([]))),
+
+            Err(err) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(?err, "GET /api/v1/sync: failed to get root block hash");
+
+                return (StatusCode::INTERNAL_SERVER_ERROR, AxumJson(Json::Null));
+            }
+        }
     };
 
     let mut block = match block {
