@@ -1,3 +1,5 @@
+use std::iter::FusedIterator;
+
 use crate::crypto::*;
 use crate::block::*;
 
@@ -40,6 +42,12 @@ pub trait Storage {
     /// verifications, even if the block is not valid.
     fn write_block(&self, block: &Block) -> Result<(), Self::Error>;
 
+    /// Get iterator over all the blocks stored in the current storage.
+    #[inline]
+    fn blocks(&self) -> StorageIter<'_, Self> where Self: Sized {
+        StorageIter::new(self)
+    }
+
     /// Get list of blockchain validators at the point in time when the block
     /// with provided hash didn't exist yet. This is needed because validators
     /// can change over time and we want to know which validators existed at any
@@ -69,3 +77,52 @@ pub trait Storage {
     /// Get list of current blockchain validators.
     fn get_current_validators(&self) -> Result<Vec<PublicKey>, Self::Error>;
 }
+
+pub struct StorageIter<'storage, S: Storage> {
+    storage: &'storage S,
+    curr_block: Hash
+}
+
+impl<'storage, S: Storage> StorageIter<'storage, S> {
+    #[inline]
+    pub fn new(storage: &'storage S) -> Self {
+        Self::new_since(storage, Hash::default())
+    }
+
+    #[inline]
+    pub fn new_since(
+        storage: &'storage S,
+        block_hash: impl Into<Hash>
+    ) -> Self {
+        Self {
+            storage,
+            curr_block: block_hash.into()
+        }
+    }
+}
+
+impl<S: Storage> Iterator for StorageIter<'_, S> {
+    type Item = Result<Block, S::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.storage.next_block(&self.curr_block) {
+            Ok(Some(next_block)) => {
+                match self.storage.read_block(&next_block) {
+                    Ok(Some(block)) => {
+                        self.curr_block = next_block;
+
+                        Some(Ok(block))
+                    }
+
+                    Ok(None) => None,
+                    Err(err) => Some(Err(err))
+                }
+            }
+
+            Ok(None) => None,
+            Err(err) => Some(Err(err))
+        }
+    }
+}
+
+impl<S: Storage> FusedIterator for StorageIter<'_, S> {}
