@@ -2,7 +2,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::fs::File;
 
-use crate::block::Error as BlockError;
+use crate::block::BlockContent;
 
 use super::*;
 

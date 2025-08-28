@@ -1,7 +1,10 @@
 use std::iter::FusedIterator;
 
 use crate::crypto::*;
-use crate::block::*;
+use crate::block::{Block, Error as BlockError};
+use crate::client::{Client, Error as ClientError};
+use crate::pool::ShardsPool;
+use crate::viewer::Viewer;
 
 #[cfg(feature = "file_storage")]
 pub mod file_storage;
@@ -126,3 +129,122 @@ impl<S: Storage> Iterator for StorageIter<'_, S> {
 }
 
 impl<S: Storage> FusedIterator for StorageIter<'_, S> {}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError<S: Storage> {
+    #[error("client error: {0}")]
+    Client(#[from] ClientError),
+
+    #[error("block error: {0}")]
+    Block(#[source] BlockError),
+
+    #[error("storage error: {0}")]
+    Storage(#[source] S::Error)
+}
+
+/// Synchronize provided storage with blockchain stored by provided shards using
+/// provided client for API requests.
+///
+/// This is potentially a very heavy function which should be executed in
+/// background.
+pub async fn sync<S: Storage>(
+    client: Client,
+    shards: &ShardsPool,
+    storage: &S
+) -> Result<(), SyncError<S>> {
+    let root_block = storage.root_block()
+        .map_err(SyncError::Storage)?;
+
+    let viewer = Viewer::open(client, shards.active(), root_block).await
+        .map_err(SyncError::Client)?;
+
+    let Some(mut viewer) = viewer else {
+        return Ok(());
+    };
+
+    let mut storage_block = match root_block {
+        Some(root_block) => storage.read_block(&root_block)
+            .map_err(SyncError::Storage)?,
+
+        None => None
+    };
+
+    let mut network_block = viewer.current_block();
+
+    loop {
+        match &mut storage_block {
+            // If we have a block in the local storage then we should weight
+            // our block against the one received from the network and if the
+            // received one is better than ours - merge it.
+            //
+            // Blocks returned from the viewer are 100% valid (we assume so),
+            // and we assume that our locally stored blocks are also 100%
+            // valid (which can be wrong!!! but still).
+            Some(storage_block) => {
+                // Verify the local block (it's really only needed to obtain
+                // its hash).
+                let (is_valid, storage_block_hash, _) = storage_block.verify()
+                    .map_err(SyncError::Block)?;
+
+                // If for some reason local block is invalid then we obviously
+                // immediately swap it.
+                let mut storage_block_updated = false;
+
+                if !is_valid {
+                    *storage_block = network_block.block.clone();
+
+                    storage_block_updated = true;
+                }
+
+                // Then we will try to merge approvals from the network block
+                // into our local one. There's a chance that network block has
+                // some new approvals which we can utilize locally.
+                for approval in network_block.block.approvals() {
+                    if !storage_block.approvals.contains(approval) {
+                        storage_block.approvals.push(approval.clone());
+
+                        storage_block_updated = true;
+                    }
+                }
+
+                // Then we count approvals in both local and network blocks.
+                let storage_block_approvals = storage_block.approvals().len();
+                let network_block_approvals = network_block.block.approvals().len();
+
+                // If our local block has less approvals than the remote one
+                // then we swap them. Otherwise, if the amount is equal BUT
+                // remote block has lower hash value then we also should swap
+                // them.
+                if storage_block_approvals < network_block_approvals
+                    || (storage_block_approvals == network_block_approvals
+                        && network_block.hash < storage_block_hash)
+                {
+                    *storage_block = network_block.block.clone();
+
+                    storage_block_updated = true;
+                }
+
+                // Write updated local block to the storage if needed.
+                if storage_block_updated {
+                    storage.write_block(storage_block)
+                        .map_err(SyncError::Storage)?;
+                }
+            }
+
+            // Otherwise we should merge the network block into our local
+            // storage.
+            None => {
+                storage.write_block(&network_block.block)
+                    .map_err(SyncError::Storage)?;
+            }
+        }
+
+        // Try to read the next block from the network or break the loop.
+        match viewer.forward().await {
+            Some(next_block) => network_block = next_block,
+            None => break
+        }
+    }
+
+    Ok(())
+}
