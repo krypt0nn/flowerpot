@@ -19,6 +19,7 @@ use crate::block::{Block, BlockContent, BlockStatus};
 use crate::storage::{Storage, sync};
 use crate::client::{Client, Error as ClientError};
 use crate::pool::ShardsPool;
+use crate::security::SecurityRules;
 
 mod transactions_api;
 mod blocks_api;
@@ -60,19 +61,21 @@ pub struct Shard<S: Storage> {
     /// Blockchain storage.
     pub storage: S,
 
-    /// Shard security rules.
-    pub security_rules: ShardSecurityRules
+    /// Security rules.
+    pub security_rules: SecurityRules,
+
+    /// Shard settings.
+    pub settings: ShardSettings
 }
 
 #[derive(Debug, Clone)]
-pub struct ShardSecurityRules {
-    /// Maximal allowed size of transaction's body in bytes.
+pub struct ShardSettings {
+    /// Accept shards which were announced using the `PUT /api/v1/shards`
+    /// request.
     ///
-    /// Transactions with larger body will be rejected. They still can be
-    /// accepted by other shards and validated, so added to the blockchain.
-    ///
-    /// Default is `33554432` (32 MB).
-    pub max_transaction_body_size: u64,
+    /// Default is `true`. Disabling it will result in worse overall network
+    /// quality.
+    pub accept_shards: bool,
 
     /// Share pending transactions with other connected shards once new
     /// transaction is received.
@@ -94,35 +97,6 @@ pub struct ShardSecurityRules {
     /// Default is `true`. Disabling it will result in worse overall network
     /// quality.
     pub spread_pending_blocks_approvals: bool,
-
-    /// Accept shards which were announced using the `PUT /api/v1/shards`
-    /// request.
-    ///
-    /// Default is `true`. Disabling it will result in worse overall network
-    /// quality.
-    pub accept_shards: bool,
-
-    /// Optional filter function which will be applied to the pending
-    /// transactions before adding them to the pool. If `true` is returned
-    /// by such function then transaction is accepted, otherwise it will be
-    /// dropped.
-    ///
-    /// This function is useful for applications with custom transaction
-    /// formats and rules to filter out malicious or invalid transactions.
-    ///
-    /// Default is `None`.
-    pub transactions_filter: Option<fn(&Transaction, &Hash, &PublicKey) -> bool>,
-
-    /// Optional filter function which will be applied to the pending blocks
-    /// before adding them to the pool. If `true` is returned by such function
-    /// then block is accepted, otherwise it will be dropped.
-    ///
-    /// This function is useful for applications with custom transaction
-    /// formats and rules to filter out blocks with malicious or invalid
-    /// transactions.
-    ///
-    /// Default is `None`.
-    pub blocks_filter: Option<fn(&Block, &Hash, &PublicKey) -> bool>,
 
     /// Amount of time between shards activity checks. This is needed to keep
     /// active shards pool in good quality.
@@ -156,33 +130,30 @@ pub struct ShardSecurityRules {
     /// Default is `20s`.
     pub pending_blocks_sync_interval: Duration,
 
-    /// Interval between blockchain synchronization attempts between our local
-    /// storage and all the connected shards.
-    ///
-    /// Note that unless `merge_blocks_without_sync` option is disabled pending
-    /// blocks should be merged to the local storage automatically once enough
-    /// approvals are received. This task exist in case some block was not
-    /// received yet or if it got more approvals than our currently written one,
-    /// so just in case.
-    ///
-    /// Default is `60s`.
-    pub blockchain_sync_interval: Duration
+    // /// Interval between blockchain synchronization attempts between our local
+    // /// storage and all the connected shards.
+    // ///
+    // /// Note that unless `merge_blocks_without_sync` option is disabled pending
+    // /// blocks should be merged to the local storage automatically once enough
+    // /// approvals are received. This task exist in case some block was not
+    // /// received yet or if it got more approvals than our currently written one,
+    // /// so just in case.
+    // ///
+    // /// Default is `60s`.
+    // pub blockchain_sync_interval: Duration
 }
 
-impl Default for ShardSecurityRules {
+impl Default for ShardSettings {
     fn default() -> Self {
         Self {
-            max_transaction_body_size: 32 * 1024 * 1024,
+            accept_shards: true,
             spread_pending_transactions: true,
             spread_pending_blocks: true,
             spread_pending_blocks_approvals: true,
-            accept_shards: true,
-            transactions_filter: None,
-            blocks_filter: None,
             shards_heartbeat_interval: Duration::from_secs(3 * 60),
             pending_transactions_sync_interval: Duration::from_secs(10),
             pending_blocks_sync_interval: Duration::from_secs(20),
-            blockchain_sync_interval: Duration::from_secs(60)
+            // blockchain_sync_interval: Duration::from_secs(60)
         }
     }
 }
@@ -228,12 +199,15 @@ enum ShardEvent {
 struct ShardState<S: Storage> {
     pub shards: Arc<RwLock<ShardsPool>>,
     pub storage: Arc<Mutex<S>>,
-    pub security_rules: Arc<ShardSecurityRules>,
+    pub security_rules: Arc<SecurityRules>,
+    pub shard_settings: Arc<ShardSettings>,
     pub pending_transactions: Arc<RwLock<HashMap<[u8; 32], Transaction>>>,
     pub pending_blocks: Arc<RwLock<HashMap<[u8; 32], Block>>>,
     pub events_sender: Arc<UnboundedSender<ShardEvent>>
 }
 
+/// Run shard HTTP API using provided settings and tokio runtime handle.
+///
 /// This function runs many background async tasks at once so multi-thread
 /// executor is highly adviced.
 pub async fn serve<S>(
@@ -301,13 +275,14 @@ where
     let shards = Arc::new(RwLock::new(shard.shards));
     let storage = Arc::new(Mutex::new(shard.storage));
     let security_rules = Arc::new(shard.security_rules);
+    let shard_settings = Arc::new(shard.settings);
 
     let pending_transactions = Arc::new(RwLock::new(HashMap::new()));
     let pending_blocks = Arc::new(RwLock::new(HashMap::new()));
 
-    let shards_heartbeat_interval = security_rules.shards_heartbeat_interval;
-    let transactions_sync_interval = security_rules.pending_transactions_sync_interval;
-    let blocks_sync_interval = security_rules.pending_blocks_sync_interval;
+    let shards_heartbeat_interval = shard_settings.shards_heartbeat_interval;
+    let transactions_sync_interval = shard_settings.pending_transactions_sync_interval;
+    let blocks_sync_interval = shard_settings.pending_blocks_sync_interval;
 
     let router = Router::new()
         .route("/api/v1/heartbeat", get(async || (axum::http::StatusCode::OK, "")))
@@ -325,6 +300,7 @@ where
             shards: shards.clone(),
             storage: storage.clone(),
             security_rules: security_rules.clone(),
+            shard_settings: shard_settings.clone(),
             pending_transactions: pending_transactions.clone(),
             pending_blocks: pending_blocks.clone(),
             events_sender: events_sender.clone()
@@ -346,6 +322,7 @@ where
             shards.clone(),
             storage.clone(),
             security_rules,
+            shard_settings,
             pending_transactions.clone(),
             pending_blocks.clone()
         )),
@@ -397,7 +374,8 @@ async fn handle_events<S: Storage>(
     client: Arc<RwLock<Client>>,
     shards: Arc<RwLock<ShardsPool>>,
     storage: Arc<Mutex<S>>,
-    security_rules: Arc<ShardSecurityRules>,
+    security_rules: Arc<SecurityRules>,
+    shard_settings: Arc<ShardSettings>,
     pending_transactions: Arc<RwLock<HashMap<[u8; 32], Transaction>>>,
     pending_blocks: Arc<RwLock<HashMap<[u8; 32], Block>>>
 ) -> Result<(), Error> {
@@ -463,7 +441,7 @@ async fn handle_events<S: Storage>(
                     .insert(hash.0, transaction.clone());
 
                 // Create the event to share this block with other shards.
-                if security_rules.spread_pending_transactions
+                if shard_settings.spread_pending_transactions
                     && events_sender.send(ShardEvent::ShareTransaction(transaction)).is_err()
                 {
                     #[cfg(feature = "tracing")]
@@ -629,7 +607,7 @@ async fn handle_events<S: Storage>(
                             .insert(hash.0, block.clone());
 
                         // Create the event to share this block with other shards.
-                        if security_rules.spread_pending_blocks
+                        if shard_settings.spread_pending_blocks
                             && events_sender.send(ShardEvent::ShareBlock(block)).is_err()
                         {
                             #[cfg(feature = "tracing")]
@@ -745,7 +723,7 @@ async fn handle_events<S: Storage>(
 
                             // Approval is valid so we can share it with other
                             // shards.
-                            if security_rules.spread_pending_blocks_approvals
+                            if shard_settings.spread_pending_blocks_approvals
                                 && events_sender.send(ShardEvent::ShareBlockApproval(hash, approval)).is_err()
                             {
                                 #[cfg(feature = "tracing")]
@@ -916,7 +894,7 @@ async fn handle_events<S: Storage>(
 
                             // Approval is valid so we can share it with other
                             // shards.
-                            if security_rules.spread_pending_blocks_approvals
+                            if shard_settings.spread_pending_blocks_approvals
                                 && events_sender.send(ShardEvent::ShareBlockApproval(hash, approval)).is_err()
                             {
                                 #[cfg(feature = "tracing")]

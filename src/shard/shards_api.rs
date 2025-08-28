@@ -34,7 +34,7 @@ pub async fn put_shards<S: Storage>(
     tracing::trace!("PUT /api/v1/shards");
 
     // Skip processing if this method is disabled by security rules.
-    if !state.security_rules.accept_shards {
+    if !state.shard_settings.accept_shards {
         return (StatusCode::OK, AxumJson(Json::Null));
     }
 

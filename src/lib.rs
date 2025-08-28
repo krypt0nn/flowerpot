@@ -12,6 +12,9 @@ pub mod viewer;
 #[cfg(feature = "client")]
 pub mod pool;
 
+#[cfg(any(feature = "shard", feature = "validator"))]
+pub mod security;
+
 #[cfg(feature = "shard")]
 pub mod shard;
 
