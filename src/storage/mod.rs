@@ -152,18 +152,18 @@ pub async fn sync<S: Storage>(
     shards: &ShardsPool,
     storage: &S
 ) -> Result<(), SyncError<S>> {
-    let root_block = storage.root_block()
+    let mut curr_local_block_hash = storage.root_block()
         .map_err(SyncError::Storage)?;
 
-    let viewer = Viewer::open(client, shards.active(), root_block).await
+    let viewer = Viewer::open(client, shards.active(), curr_local_block_hash).await
         .map_err(SyncError::Client)?;
 
     let Some(mut viewer) = viewer else {
         return Ok(());
     };
 
-    let mut storage_block = match root_block {
-        Some(root_block) => storage.read_block(&root_block)
+    let mut storage_block = match curr_local_block_hash {
+        Some(curr_local_block_hash) => storage.read_block(&curr_local_block_hash)
             .map_err(SyncError::Storage)?,
 
         None => None
@@ -192,6 +192,7 @@ pub async fn sync<S: Storage>(
 
                 if !is_valid {
                     *storage_block = network_block.block.clone();
+                    curr_local_block_hash = Some(network_block.hash);
 
                     storage_block_updated = true;
                 }
@@ -220,6 +221,7 @@ pub async fn sync<S: Storage>(
                         && network_block.hash < storage_block_hash)
                 {
                     *storage_block = network_block.block.clone();
+                    curr_local_block_hash = Some(network_block.hash);
 
                     storage_block_updated = true;
                 }
@@ -244,6 +246,22 @@ pub async fn sync<S: Storage>(
             Some(next_block) => network_block = next_block,
             None => break
         }
+
+        // Try to read the next local storage block if we could read the next
+        // block from the network.
+        if let Some(curr_block) = &mut curr_local_block_hash {
+            match storage.next_block(curr_block).map_err(SyncError::Storage)? {
+                Some(next_block) => *curr_block = next_block,
+                None => curr_local_block_hash = None
+            }
+        }
+
+        storage_block = match curr_local_block_hash {
+            Some(hash) => storage.read_block(&hash)
+                .map_err(SyncError::Storage)?,
+
+            None => None
+        };
     }
 
     Ok(())
