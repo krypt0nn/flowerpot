@@ -16,7 +16,7 @@ use axum::routing::{get, put};
 use crate::crypto::*;
 use crate::transaction::Transaction;
 use crate::block::{Block, BlockContent, BlockStatus};
-use crate::storage::Storage;
+use crate::storage::{Storage, sync};
 use crate::client::{Client, Error as ClientError};
 use crate::pool::ShardsPool;
 
@@ -35,6 +35,9 @@ pub enum Error {
 
     #[error(transparent)]
     Tokio(#[from] tokio::task::JoinError),
+
+    #[error("sync error: {0}")]
+    Sync(String),
 
     #[error("storage error: {0}")]
     Storage(String)
@@ -242,11 +245,6 @@ where
     S::Error: Send
 {
     #[cfg(feature = "tracing")]
-    tracing::info!("bootstrapping shard connections");
-
-    // TODO
-
-    #[cfg(feature = "tracing")]
     tracing::info!("reading local blockchain data");
 
     let root_block = shard.storage.root_block()
@@ -282,8 +280,11 @@ where
         "synchronizing local blockchain storage"
     );
 
-    // TODO
-    // shard.client.sync(&shard.storage).await?;
+    handle.block_on(sync(
+        shard.client.clone(),
+        &shard.shards,
+        &shard.storage
+    )).map_err(|err| Error::Sync(err.to_string()))?;
 
     #[cfg(feature = "tracing")]
     tracing::info!(
