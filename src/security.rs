@@ -10,7 +10,7 @@ pub struct SecurityRules {
     ///
     /// Transactions with larger body will be rejected.
     ///
-    /// Default is `33554432` (32 MB).
+    /// Default is `1048576` (1 MB).
     pub max_transaction_body_size: u64,
 
     /// Optional filter function which will be applied to the pending
@@ -39,7 +39,7 @@ pub struct SecurityRules {
 impl Default for SecurityRules {
     fn default() -> Self {
         Self {
-            max_transaction_body_size: 32 * 1024 * 1024,
+            max_transaction_body_size: 1024 * 1024,
             transactions_filter: None,
             blocks_filter: None
         }
