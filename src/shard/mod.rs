@@ -1079,10 +1079,10 @@ async fn sync_pending_blocks(
             match result {
                 Ok(result) => {
                     for pending_block in result {
-                        if !blocks.contains(&pending_block.block) {
-                            match client_guard.read_block(address, &pending_block.block).await {
+                        if !blocks.contains(&pending_block.current_hash) {
+                            match client_guard.read_block(address, &pending_block.current_hash).await {
                                 Ok(Some(block)) => {
-                                    blocks.insert(pending_block.block);
+                                    blocks.insert(pending_block.current_hash);
 
                                     if events_sender.send(ShardEvent::TryPutBlock(block)).is_err() {
                                         #[cfg(feature = "tracing")]

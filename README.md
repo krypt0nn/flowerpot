@@ -78,7 +78,10 @@ and fixated in the blockchain.
 
 ```ts
 type Response = {
-    block: string;
+    block: {
+        current: string;
+        previous: string;
+    };
     sign: string;
     approvals: string[];
 }[];

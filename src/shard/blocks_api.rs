@@ -17,9 +17,19 @@ pub async fn get_blocks<S: Storage>(
     tracing::trace!("GET /api/v1/blocks");
 
     let blocks = state.pending_blocks.read().await
-        .keys()
-        .map(|hash| Hash::from(*hash).to_base64())
-        .collect::<Vec<String>>();
+        .iter()
+        .map(|(hash, block)| json!({
+            "block": {
+                "current": Hash::from(*hash).to_base64(),
+                "previous": block.previous().to_base64()
+            },
+            "sign": block.sign().to_base64(),
+            "approvals": block.approvals()
+                .iter()
+                .map(|approval| approval.to_base64())
+                .collect::<Vec<String>>()
+        }))
+        .collect::<Vec<Json>>();
 
     (StatusCode::OK, AxumJson(json!(blocks)))
 }

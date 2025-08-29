@@ -51,19 +51,32 @@ pub enum Error {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingBlock {
-    pub block: Hash,
+    pub current_hash: Hash,
+    pub previous_hash: Hash,
     pub sign: Signature,
     pub approvals: Vec<Signature>
 }
 
 impl PendingBlock {
     pub fn from_json(json: &Json) -> Result<Self, Error> {
+        let block = json.get("block")
+            .ok_or_else(|| {
+                Error::ShardInvalidPendingBlock("field 'block' is invalid")
+            })?;
+
         Ok(Self {
-            block: json.get("block")
+            current_hash: block.get("current")
                 .and_then(Json::as_str)
                 .and_then(Hash::from_base64)
                 .ok_or_else(|| {
-                    Error::ShardInvalidPendingBlock("field 'block' is invalid")
+                    Error::ShardInvalidPendingBlock("field 'block.current' is invalid")
+                })?,
+
+            previous_hash: block.get("previous")
+                .and_then(Json::as_str)
+                .and_then(Hash::from_base64)
+                .ok_or_else(|| {
+                    Error::ShardInvalidPendingBlock("field 'block.previous' is invalid")
                 })?,
 
             sign: json.get("sign")
