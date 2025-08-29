@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Nikita Podvirnyi <krypt0nn@vk.com>"]
 license = "GPL-3.0"
 edition = "2024"
+publish = false
 
 [features]
 _http = ["dep:futures", "dep:reqwest"]
