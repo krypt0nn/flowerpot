@@ -1,4 +1,4 @@
-# libflowerpot - a blockchain framework library written on rust
+# libflowerpot - a blockchain framework library written in rust
 
 > In development, not ready for production use until `v1.0.0` release!
 
