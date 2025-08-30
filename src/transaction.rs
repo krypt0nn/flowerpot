@@ -22,11 +22,11 @@ use serde_json::{json, Value as Json};
 
 use crate::crypto::*;
 
-const TRANSACTION_COMPRESSION_LEVEL: i32 = 0;
+const TRANSACTION_COMPRESSION_LEVEL: i32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transaction {
-    pub(crate) seed: [u8; 32],
+    pub(crate) seed: u64,
     pub(crate) data: Box<[u8]>,
     pub(crate) sign: Signature
 }
@@ -41,14 +41,14 @@ impl Transaction {
     /// unique.
     pub fn create(
         secret_key: &SecretKey,
-        seed: [u8; 32],
+        seed: u64,
         data: impl Into<Box<[u8]>>
     ) -> Result<Self, k256::ecdsa::Error> {
         let data: Box<[u8]> = data.into();
 
         let mut hasher = blake3::Hasher::new();
 
-        hasher.update(&seed);
+        hasher.update(&seed.to_le_bytes());
         hasher.update(&data);
 
         let sign = Signature::create(secret_key, hasher.finalize())?;
@@ -65,7 +65,7 @@ impl Transaction {
     pub fn hash(&self) -> Hash {
         let mut hasher = blake3::Hasher::new();
 
-        hasher.update(&self.seed);
+        hasher.update(&self.seed.to_le_bytes());
         hasher.update(&self.data);
 
         Hash::from(hasher.finalize())
@@ -95,10 +95,11 @@ impl Transaction {
     pub fn to_bytes(&self) -> std::io::Result<Box<[u8]>> {
         let sign = self.sign.to_bytes();
 
-        let mut bytes = Vec::with_capacity(98 + self.data.len());
+        let mut bytes = Vec::with_capacity(74 + self.data.len());
 
-        bytes.push(0);                       // Format version
-        bytes.extend_from_slice(&self.seed); // Fixed-size transaction seed
+        bytes.push(0); // Format version
+        // Fixed-size transaction seed
+        bytes.extend_from_slice(&self.seed.to_le_bytes());
         bytes.extend(sign);                  // Fixed-size sign
         bytes.extend_from_slice(&self.data); // Transaction data
 
@@ -114,7 +115,7 @@ impl Transaction {
     pub fn from_bytes(bytes: impl AsRef<[u8]>) -> std::io::Result<Self> {
         let bytes = zstd::decode_all(bytes.as_ref())?;
 
-        if bytes.len() < 98 {
+        if bytes.len() < 74 {
             return Err(std::io::Error::other("invalid transaction bytes len"));
         }
 
@@ -122,20 +123,20 @@ impl Transaction {
             return Err(std::io::Error::other("unknown transaction format"));
         }
 
-        let mut seed = [0; 32];
+        let mut seed = [0; 8];
 
-        seed.copy_from_slice(&bytes[1..33]);
+        seed.copy_from_slice(&bytes[1..9]);
 
         let mut sign = [0; 65];
 
-        sign.copy_from_slice(&bytes[33..98]);
+        sign.copy_from_slice(&bytes[9..74]);
 
         let sign = Signature::from_bytes(sign)
             .ok_or_else(|| std::io::Error::other("invalid signature format"))?;
 
         Ok(Self {
-            seed,
-            data: bytes[98..].to_vec().into_boxed_slice(),
+            seed: u64::from_le_bytes(seed),
+            data: bytes[74..].to_vec().into_boxed_slice(),
             sign
         })
     }
@@ -149,7 +150,7 @@ impl Transaction {
 
         Ok(json!({
             "format": 0,
-            "seed": base64_encode(self.seed),
+            "seed": format!("{:x}", self.seed),
             "data": base64_encode(data),
             "sign": self.sign.to_base64()
         }))
@@ -172,16 +173,8 @@ impl Transaction {
             return Err(std::io::Error::other("missing transaction seed"));
         };
 
-        let seed_raw = base64_decode(seed)
-            .map_err(std::io::Error::other)?;
-
-        if seed_raw.len() != 32 {
-            return Err(std::io::Error::other("transaction seed has invalid length"));
-        }
-
-        let mut seed = [0; 32];
-
-        seed.copy_from_slice(&seed_raw);
+        let seed = u64::from_str_radix(seed, 16)
+            .map_err(|_| std::io::Error::other("invalid transaction seed"))?;
 
         let Some(data) = transaction.get("data").and_then(Json::as_str) else {
             return Err(std::io::Error::other("missing transaction data"));
@@ -213,7 +206,7 @@ mod tests {
 
         let transaction = Transaction::create(
             &secret_key,
-            [0; 32],
+            123,
             b"hello, world!".to_vec()
         )?;
 
@@ -227,7 +220,7 @@ mod tests {
         let (is_valid, hash, author) = transaction.verify()?;
 
         assert!(is_valid);
-        assert_eq!(hash.to_base64(), "GM0sOPU6i7xtqUfl2s2eBWSWWbdCDBy96cG3JDHpYbM=");
+        assert_eq!(hash.to_base64(), "bpoXoSDXtInY79Eqrdw7lTpUF6-FQH7xs2tH-BP5j5c=");
         assert_eq!(author, secret_key.public_key());
         assert_eq!(transaction.data(), b"hello, world!");
 
