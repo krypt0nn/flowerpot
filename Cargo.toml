@@ -1,5 +1,5 @@
 [package]
-name = "dwchain"
+name = "libflowerpot"
 version = "0.1.0"
 authors = ["Nikita Podvirnyi <krypt0nn@vk.com>"]
 license = "GPL-3.0"

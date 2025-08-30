@@ -1,20 +1,28 @@
-# dwchain - barebone blockchain library
+# libflowerpot - a blockchain framework library written on rust
 
-The goal of the project is to provide a way for developers to easily organize
-decentralized data storing in organized manner. For example, let's say you want
-to make a decentralized chat app. You'd need to implement a mechanism to
-synchronize messages between all the users of your chat. This library handles
-decentralized networking and organizes data equally to all the users of your
-app - in a blockchain. Moreover, users of your app don't need to download this
-blockchain, they can connect to public shards and use their HTTP API to fetch
-updates for your app.
+> In development, not ready for production use until `v1.0.0` release!
 
-- Transactions are raw byte slices;
-- K-256 curve for signing;
+Libflowerpot is a rust library implementing a basic, foundational blockchain
+which can be extensively configured for your needs. Unlike other blockchains
+this one doesn't provide built-in cryptocurrency, PoW mechanisms or anything
+else.
+
+The goal of the project is to provide a foundation for developers to easily
+create decentralized applications. Let's say you want to make a decentralized
+chat app. You'd need to implement a mechanism to synchronize messages between
+all the users of your chat. This library handles decentralized networking and
+organizes data equally to all the users of your app due to the nature of a
+blockchain. Moreover, users of your app don't need to download this blockchain,
+they can connect to public shards and use their HTTP API to fetch updates.
+
+Some key points:
+
+- Transactions are raw byte slices with random seeds for unique hash values;
+- secp256k1 curve for signing (same as in bitcoin);
 - 3 types of nodes: clients, shards and validators;
 - Public HTTP APIs, no need to self-host the blockchain;
 - 2/3 of validators must approve new blocks;
-- No cryptocurrency.
+- No cryptocurrency by design.
 
 <img src="./docs/network.png" />
 
