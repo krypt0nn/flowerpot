@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: GPL-3.0-or-later
 //
 // libflowerpot
 // Copyright (C) 2025  Nikita Podvirnyi <krypt0nn@vk.com>
