@@ -89,7 +89,7 @@ impl ShardsPool {
 
         // Ensure that there are no duplicates.
         for address in shards {
-            if self.inactive_shards.contains(&address) {
+            if !self.inactive_shards.contains(&address) {
                 self.inactive_shards.push_front(address);
             }
         }
