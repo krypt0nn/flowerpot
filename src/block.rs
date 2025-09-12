@@ -227,16 +227,48 @@ impl Block {
     /// Add approval signature to the block.
     ///
     /// Return `Ok(false)` if signature is not valid.
-    pub fn approve(&mut self, sign: Signature) -> Result<bool, Error> {
-        if !self.approvals.contains(&sign) {
-            let (valid, _) = sign.verify(self.hash()?)
+    pub fn approve(&mut self, approval: Signature) -> Result<bool, Error> {
+        if !self.approvals.contains(&approval) {
+            let hash = self.hash()?;
+
+            let (is_valid, public_key) = approval.verify(hash)
                 .map_err(Error::Verify)?;
 
-            if !valid {
+            let (_, curr_public_key) = self.sign.verify(hash)
+                .map_err(Error::Verify)?;
+
+            if !is_valid || public_key == curr_public_key {
                 return Ok(false);
             }
 
-            self.approvals.push(sign);
+            self.approvals.push(approval);
+        }
+
+        Ok(true)
+    }
+
+    /// Create approval for the block and add it.
+    ///
+    /// Return `Ok(false)` if newly created approval is already attached to the
+    /// block.
+    pub fn approve_with(&mut self, secret_key: &SecretKey) -> Result<bool, Error> {
+        let hash = self.hash()?;
+
+        let approval = Signature::create(secret_key, hash)
+            .map_err(Error::Sign)?;
+
+        if !self.approvals.contains(&approval) {
+            let (is_valid, public_key) = approval.verify(hash)
+                .map_err(Error::Verify)?;
+
+            let (_, curr_public_key) = self.sign.verify(hash)
+                .map_err(Error::Verify)?;
+
+            if !is_valid || public_key == curr_public_key {
+                return Ok(false);
+            }
+
+            self.approvals.push(approval);
         }
 
         Ok(true)
