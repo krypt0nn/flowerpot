@@ -88,7 +88,11 @@ impl ShardsPool {
             .map(|address| address.to_string());
 
         // Ensure that there are no duplicates.
-        for address in shards {
+        for mut address in shards {
+            if !address.starts_with("http") {
+                address = format!("http://{address}");
+            }
+
             if !self.inactive_shards.contains(&address) {
                 self.inactive_shards.push_front(address);
             }
@@ -148,7 +152,7 @@ impl ShardsPool {
 
         // Send heartbeat requests to the inactive shards only if active shards
         // pool is not full. Otherwise we don't need to bother.
-        if self.active_shards.len() >= self.max_active {
+        if self.active_shards.len() < self.max_active {
             let mut responses = Vec::with_capacity(self.inactive_shards.len());
 
             for address in self.inactive_shards.drain(..) {
