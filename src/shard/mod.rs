@@ -272,11 +272,11 @@ where
         "synchronizing local blockchain storage"
     );
 
-    handle.block_on(sync(
+    sync(
         shard.client.clone(),
         &shard.shards,
         &shard.storage
-    )).map_err(|err| Error::Sync(err.to_string()))?;
+    ).await.map_err(|err| Error::Sync(err.to_string()))?;
 
     #[cfg(feature = "tracing")]
     tracing::info!(

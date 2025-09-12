@@ -299,7 +299,7 @@ impl Block {
         block.extend(content); // Content
 
         let block = zstd::encode_all(
-            Cursor::new(block),
+            &mut block.as_slice(),
             BLOCK_COMPRESSION_LEVEL
         )?;
 
@@ -509,6 +509,11 @@ impl BlockContent {
 
             // transactions v1 format
             1 => {
+                // empty transactions block
+                if n == 1 {
+                    return Ok(Self::Transactions(Box::new([])));
+                }
+
                 let mut content = Cursor::new(content[1..].to_vec());
                 let mut transactions = Vec::new();
 

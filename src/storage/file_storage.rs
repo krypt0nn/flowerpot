@@ -78,6 +78,7 @@ impl FileStorage {
             .create(true)
             .truncate(false)
             .read(true)
+            .write(true)
             .open(self.0.join("index"))?;
 
         let mut hash = [0; 32];
