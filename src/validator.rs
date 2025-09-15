@@ -105,6 +105,23 @@ pub struct ValidatorSettings {
     /// Default is `1m`.
     pub blocks_sync_interval: Duration,
 
+    /// Minimal amount of time which should pass before creation of a new block.
+    ///
+    /// Validator will try to create new blocks according to this interval if
+    /// no new blocks were made between the ticks. If, on the contrary, a new
+    /// block was made (by another validator) and synced by us then we will
+    /// try to create our own block with new transactions set, resetting the
+    /// interval timer. This means that this interval is used only if no new
+    /// blocks were made in said period of time and this value should not be
+    /// very low.
+    ///
+    /// It is recommended to keep this value higher than the
+    /// `blocks_sync_interval` since otherwise it's pointless and will always
+    /// be used.
+    ///
+    /// Default is `5m`.
+    pub blocks_creation_interval: Duration,
+
     /// An optional function used to choose which block should be approved from
     /// the provided list of pending blocks.
     ///
@@ -120,6 +137,7 @@ impl Default for ValidatorSettings {
             max_transactions_amount: 128,
             shards_sync_interval: Duration::from_secs(180),
             blocks_sync_interval: Duration::from_secs(60),
+            blocks_creation_interval: Duration::from_secs(300),
             blocks_approver: None
         }
     }
@@ -162,6 +180,9 @@ pub async fn serve(mut validator: Validator) -> Result<(), Error> {
     // Map of pending transactions which should be added to a new block.
     let mut transactions_pool = HashMap::new();
 
+    // Time when a new block was created for the last time.
+    let mut last_block_creation = Instant::now();
+
     // Time when the shards pool was updated.
     let mut last_shards_update = Instant::now();
 
@@ -202,9 +223,11 @@ pub async fn serve(mut validator: Validator) -> Result<(), Error> {
 
         // If we've synced new blocks - then we can create a new block from
         // pending transactions.
-        if synced_blocks > 0
+        if (synced_blocks > 0 || last_block_creation.elapsed() > validator.settings.blocks_sync_interval)
             && transactions_pool.len() >= validator.settings.min_transactions_amount.max(1)
         {
+            last_block_creation = Instant::now();
+
             let transactions = transactions_pool.values()
                 .take(validator.settings.max_transactions_amount)
                 .cloned();
