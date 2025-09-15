@@ -21,6 +21,7 @@ use std::io::{Read, Cursor};
 use time::UtcDateTime;
 use varint_rs::{VarintReader, VarintWriter};
 use serde_json::{json, Value as Json};
+use zstd::zstd_safe::WriteBuf;
 
 use crate::crypto::*;
 use crate::transaction::*;
@@ -462,7 +463,10 @@ pub enum BlockContent {
     Validators(Box<[PublicKey]>),
 
     /// List of approved transactions.
-    Transactions(Box<[Transaction]>)
+    Transactions(Box<[Transaction]>),
+
+    /// Arbitrary data.
+    Data(Box<[u8]>)
 }
 
 impl BlockContent {
@@ -502,6 +506,11 @@ impl BlockContent {
                     content.write_usize_varint(transaction.len())?;
                     content.extend(transaction);
                 }
+            }
+
+            Self::Data(data) => {
+                content.push(2); // data v1 format
+                content.extend_from_slice(data);
             }
         }
 
@@ -564,6 +573,15 @@ impl BlockContent {
                 Ok(Self::Transactions(transactions.into_boxed_slice()))
             }
 
+            // data v1 format
+            2 => {
+                if n == 1 {
+                    Ok(Self::Data(Box::new([])))
+                } else {
+                    Ok(Self::Data(content[1..].to_vec().into_boxed_slice()))
+                }
+            }
+
             _ => Err(std::io::Error::other("unknown block content format"))
         }
     }
@@ -586,6 +604,18 @@ impl BlockContent {
                     "content": transactions.iter()
                         .map(|transactions| transactions.to_json())
                         .collect::<Result<Vec<_>, _>>()?
+                }))
+            }
+
+            Self::Data(data) => {
+                let data = zstd::encode_all(
+                    &mut data.as_slice(),
+                    BLOCK_COMPRESSION_LEVEL
+                )?;
+
+                Ok(json!({
+                    "format": 2, // data v1 format
+                    "content": base64_encode(data)
                 }))
             }
         }
@@ -627,6 +657,20 @@ impl BlockContent {
                     .collect::<Result<Vec<_>, _>>()?;
 
                 Ok(Self::Transactions(transactions.into_boxed_slice()))
+            }
+
+            // data v1 format
+            2 => {
+                let Some(content) = content.as_str() else {
+                    return Err(std::io::Error::other("invalid block data format"));
+                };
+
+                let content = base64_decode(content)
+                    .map_err(std::io::Error::other)?;
+
+                let content = zstd::decode_all(content.as_slice())?;
+
+                Ok(Self::Data(content.into_boxed_slice()))
             }
 
             _ => Err(std::io::Error::other("unknown block's content format"))
