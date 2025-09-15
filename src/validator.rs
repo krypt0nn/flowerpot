@@ -203,7 +203,7 @@ pub async fn serve(mut validator: Validator) -> Result<(), Error> {
         // If we've synced new blocks - then we can create a new block from
         // pending transactions.
         if synced_blocks > 0
-            && transactions_pool.len() > validator.settings.min_transactions_amount
+            && transactions_pool.len() >= validator.settings.min_transactions_amount.max(1)
         {
             let transactions = transactions_pool.values()
                 .take(validator.settings.max_transactions_amount)
@@ -222,7 +222,12 @@ pub async fn serve(mut validator: Validator) -> Result<(), Error> {
                 "create new block"
             );
 
-            if let Err(err) = validator.client.put_block(validator.shards.active(), &block).await {
+            let result = validator.client.put_block(
+                validator.shards.active(),
+                &block
+            ).await;
+
+            if let Err(err) = result {
                 #[cfg(feature = "tracing")]
                 tracing::error!(
                     ?curr_block_number,
@@ -270,7 +275,13 @@ pub async fn serve(mut validator: Validator) -> Result<(), Error> {
                 "approve block"
             );
 
-            if let Err(err) = validator.client.approve_block(validator.shards.active(), &hash, &approval).await {
+            let result = validator.client.approve_block(
+                validator.shards.active(),
+                &hash,
+                &approval
+            ).await;
+
+            if let Err(err) = result {
                 #[cfg(feature = "tracing")]
                 tracing::error!(
                     hash = hash.to_base64(),
