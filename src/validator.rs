@@ -281,14 +281,27 @@ pub async fn serve(mut validator: Validator) -> Result<(), Error> {
 
         let pending_blocks = fetch_blocks(&validator, &curr_block_hash).await;
 
-        let mut keys = pending_blocks.keys()
-            .copied()
-            .collect::<Vec<Hash>>();
+        // Use provided block chooser.
+        let approve_block = if let Some(blocks_approver) = &validator.settings.blocks_approver {
+            let pending_blocks = pending_blocks.values()
+                .collect::<Vec<&Block>>();
 
-        // Get block with least hash value.
-        keys.sort_by(|a, b| b.cmp(a));
+            Some(blocks_approver(pending_blocks.as_slice()))
+        }
 
-        if let Some(hash) = keys.pop() {
+        // Otherwise use built-in chooser.
+        else {
+            let mut keys = pending_blocks.keys()
+                .copied()
+                .collect::<Vec<Hash>>();
+
+            // Get block with least hash value.
+            keys.sort_by(|a, b| b.cmp(a));
+
+            keys.pop()
+        };
+
+        if let Some(hash) = approve_block {
             let approval = Signature::create(&validator.secret_key, hash)
                 .map_err(Error::ApproveBlock)?;
 
