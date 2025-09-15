@@ -258,6 +258,12 @@ impl Viewer {
         &self.validators
     }
 
+    /// Get pool of prefetched blocks.
+    #[inline]
+    pub fn blocks_pool(&self) -> &VecDeque<ValidBlock> {
+        &self.blocks_pool
+    }
+
     /// Try to read the next block of the blockchain. Return `Some` with the new
     /// block if it was read, otherwise return `None` if there's no new block
     /// available yet. All the errors are handled silently and if `tracing`
