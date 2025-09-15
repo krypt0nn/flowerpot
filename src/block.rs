@@ -484,6 +484,12 @@ impl BlockContent {
         Self::Transactions(transactions.into_iter().map(T::into).collect())
     }
 
+    /// Create new data block.
+    #[inline]
+    pub fn data(data: impl Into<Box<[u8]>>) -> Self {
+        Self::Data(data.into())
+    }
+
     /// Encode block's content into bytes representation.
     pub fn to_bytes(&self) -> std::io::Result<Box<[u8]>> {
         let mut content = Vec::new();
