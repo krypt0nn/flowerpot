@@ -470,6 +470,10 @@ pub enum BlockContent {
 }
 
 impl BlockContent {
+    pub const V1_DATA_BLOCK: u8         = 0;
+    pub const V1_TRANSACTIONS_BLOCK: u8 = 1;
+    pub const V1_VALIDATORS_BLOCK: u8   = 2;
+
     /// Create new data block.
     #[inline]
     pub fn data(data: impl Into<Box<[u8]>>) -> Self {
@@ -496,12 +500,12 @@ impl BlockContent {
 
         match self {
             Self::Data(data) => {
-                content.push(0); // data v1 format
+                content.push(Self::V1_DATA_BLOCK);
                 content.extend_from_slice(data);
             }
 
             Self::Transactions(transactions) => {
-                content.push(1); // transactions v1 format
+                content.push(Self::V1_TRANSACTIONS_BLOCK);
 
                 for transaction in transactions {
                     let transaction = transaction.to_bytes()?;
@@ -512,7 +516,7 @@ impl BlockContent {
             }
 
             Self::Validators(validators) => {
-                content.push(2); // validators v1 format
+                content.push(Self::V1_VALIDATORS_BLOCK);
 
                 for validator in validators {
                     content.extend(validator.to_bytes());
@@ -533,8 +537,7 @@ impl BlockContent {
         }
 
         match content[0] {
-            // data v1 format
-            0 => {
+            Self::V1_DATA_BLOCK => {
                 if n == 1 {
                     Ok(Self::Data(Box::new([])))
                 } else {
@@ -542,8 +545,7 @@ impl BlockContent {
                 }
             }
 
-            // transactions v1 format
-            1 => {
+            Self::V1_TRANSACTIONS_BLOCK => {
                 // empty transactions block
                 if n == 1 {
                     return Ok(Self::Transactions(Box::new([])));
@@ -567,8 +569,7 @@ impl BlockContent {
                 Ok(Self::Transactions(transactions.into_boxed_slice()))
             }
 
-            // validators v1 format
-            2 => {
+            Self::V1_VALIDATORS_BLOCK => {
                 if (n - 1) % 33 != 0 {
                     return Err(std::io::Error::other("invalid validators block format"));
                 }
@@ -602,14 +603,14 @@ impl BlockContent {
                 )?;
 
                 Ok(json!({
-                    "format": 0, // data v1 format
+                    "format": Self::V1_DATA_BLOCK,
                     "content": base64_encode(data)
                 }))
             }
 
             Self::Transactions(transactions) => {
                 Ok(json!({
-                    "format": 1, // transactions v1 format
+                    "format": Self::V1_TRANSACTIONS_BLOCK,
                     "content": transactions.iter()
                         .map(|transactions| transactions.to_json())
                         .collect::<Result<Vec<_>, _>>()?
@@ -618,7 +619,7 @@ impl BlockContent {
 
             Self::Validators(validators) => {
                 Ok(json!({
-                    "format": 2, // validators v1 format
+                    "format": Self::V1_VALIDATORS_BLOCK,
                     "content": validators.iter()
                         .map(|validator| validator.to_base64())
                         .collect::<Vec<_>>()
@@ -637,9 +638,8 @@ impl BlockContent {
             return Err(std::io::Error::other("missing block's content data"));
         };
 
-        match format {
-            // data v1 format
-            0 => {
+        match format as u8 {
+            Self::V1_DATA_BLOCK => {
                 let Some(content) = content.as_str() else {
                     return Err(std::io::Error::other("invalid block data format"));
                 };
@@ -652,8 +652,7 @@ impl BlockContent {
                 Ok(Self::Data(content.into_boxed_slice()))
             }
 
-            // transactions v1 format
-            1 => {
+            Self::V1_TRANSACTIONS_BLOCK => {
                 let Some(transactions) = content.as_array() else {
                     return Err(std::io::Error::other("invalid transactions format"));
                 };
@@ -665,8 +664,7 @@ impl BlockContent {
                 Ok(Self::Transactions(transactions.into_boxed_slice()))
             }
 
-            // validators v1 format
-            2 => {
+            Self::V1_VALIDATORS_BLOCK => {
                 let Some(validators) = content.as_array() else {
                     return Err(std::io::Error::other("invalid validators format"));
                 };
