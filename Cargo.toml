@@ -8,14 +8,23 @@ publish = false
 
 [features]
 _http = ["dep:futures", "dep:reqwest"]
+tracing = ["dep:tracing"]
 
+ram_storage = []
 file_storage = []
+
 client = ["_http"]
 shard = ["_http", "client", "dep:tokio", "dep:axum"]
 validator = ["_http", "client"]
-tracing = ["dep:tracing"]
 
-default = ["file_storage", "client", "shard", "validator", "tracing"]
+default = [
+    "tracing",
+    "ram_storage",
+    "file_storage",
+    "client",
+    "shard",
+    "validator"
+]
 
 [dependencies.tokio]
 version = "1.47"

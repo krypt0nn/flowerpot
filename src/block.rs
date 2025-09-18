@@ -459,22 +459,21 @@ impl Block {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockContent {
-    /// List of approved validators' public keys.
-    Validators(Box<[PublicKey]>),
+    /// Arbitrary data.
+    Data(Box<[u8]>),
 
     /// List of approved transactions.
     Transactions(Box<[Transaction]>),
 
-    /// Arbitrary data.
-    Data(Box<[u8]>)
+    /// List of approved validators' public keys.
+    Validators(Box<[PublicKey]>)
 }
 
 impl BlockContent {
-    /// Create new validators block.
-    pub fn validators<T: Into<PublicKey>>(
-        public_keys: impl IntoIterator<Item = T>
-    ) -> Self {
-        Self::Validators(public_keys.into_iter().map(T::into).collect())
+    /// Create new data block.
+    #[inline]
+    pub fn data(data: impl Into<Box<[u8]>>) -> Self {
+        Self::Data(data.into())
     }
 
     /// Create new transactions block.
@@ -484,10 +483,11 @@ impl BlockContent {
         Self::Transactions(transactions.into_iter().map(T::into).collect())
     }
 
-    /// Create new data block.
-    #[inline]
-    pub fn data(data: impl Into<Box<[u8]>>) -> Self {
-        Self::Data(data.into())
+    /// Create new validators block.
+    pub fn validators<T: Into<PublicKey>>(
+        public_keys: impl IntoIterator<Item = T>
+    ) -> Self {
+        Self::Validators(public_keys.into_iter().map(T::into).collect())
     }
 
     /// Encode block's content into bytes representation.
@@ -495,12 +495,9 @@ impl BlockContent {
         let mut content = Vec::new();
 
         match self {
-            Self::Validators(validators) => {
-                content.push(0); // validators v1 format
-
-                for validator in validators {
-                    content.extend(validator.to_bytes());
-                }
+            Self::Data(data) => {
+                content.push(0); // data v1 format
+                content.extend_from_slice(data);
             }
 
             Self::Transactions(transactions) => {
@@ -514,9 +511,12 @@ impl BlockContent {
                 }
             }
 
-            Self::Data(data) => {
-                content.push(2); // data v1 format
-                content.extend_from_slice(data);
+            Self::Validators(validators) => {
+                content.push(2); // validators v1 format
+
+                for validator in validators {
+                    content.extend(validator.to_bytes());
+                }
             }
         }
 
@@ -533,25 +533,13 @@ impl BlockContent {
         }
 
         match content[0] {
-            // validators v1 format
+            // data v1 format
             0 => {
-                if (n - 1) % 33 != 0 {
-                    return Err(std::io::Error::other("invalid validators block format"));
+                if n == 1 {
+                    Ok(Self::Data(Box::new([])))
+                } else {
+                    Ok(Self::Data(content[1..].to_vec().into_boxed_slice()))
                 }
-
-                let mut validators = Vec::with_capacity((n - 1) / 33);
-                let mut i = 1;
-
-                while i < n {
-                    let validator = PublicKey::from_bytes(&content[i..i + 33])
-                        .ok_or_else(|| std::io::Error::other("invalid validator's public key format"))?;
-
-                    validators.push(validator);
-
-                    i += 33;
-                }
-
-                Ok(Self::Validators(validators.into_boxed_slice()))
             }
 
             // transactions v1 format
@@ -579,13 +567,25 @@ impl BlockContent {
                 Ok(Self::Transactions(transactions.into_boxed_slice()))
             }
 
-            // data v1 format
+            // validators v1 format
             2 => {
-                if n == 1 {
-                    Ok(Self::Data(Box::new([])))
-                } else {
-                    Ok(Self::Data(content[1..].to_vec().into_boxed_slice()))
+                if (n - 1) % 33 != 0 {
+                    return Err(std::io::Error::other("invalid validators block format"));
                 }
+
+                let mut validators = Vec::with_capacity((n - 1) / 33);
+                let mut i = 1;
+
+                while i < n {
+                    let validator = PublicKey::from_bytes(&content[i..i + 33])
+                        .ok_or_else(|| std::io::Error::other("invalid validator's public key format"))?;
+
+                    validators.push(validator);
+
+                    i += 33;
+                }
+
+                Ok(Self::Validators(validators.into_boxed_slice()))
             }
 
             _ => Err(std::io::Error::other("unknown block content format"))
@@ -595,12 +595,15 @@ impl BlockContent {
     /// Get standard JSON representation of the block's content.
     pub fn to_json(&self) -> std::io::Result<Json> {
         match self {
-            Self::Validators(validators) => {
+            Self::Data(data) => {
+                let data = zstd::encode_all(
+                    &mut data.as_slice(),
+                    BLOCK_COMPRESSION_LEVEL
+                )?;
+
                 Ok(json!({
-                    "format": 0, // validators v1 format
-                    "content": validators.iter()
-                        .map(|validator| validator.to_base64())
-                        .collect::<Vec<_>>()
+                    "format": 0, // data v1 format
+                    "content": base64_encode(data)
                 }))
             }
 
@@ -613,15 +616,12 @@ impl BlockContent {
                 }))
             }
 
-            Self::Data(data) => {
-                let data = zstd::encode_all(
-                    &mut data.as_slice(),
-                    BLOCK_COMPRESSION_LEVEL
-                )?;
-
+            Self::Validators(validators) => {
                 Ok(json!({
-                    "format": 2, // data v1 format
-                    "content": base64_encode(data)
+                    "format": 2, // validators v1 format
+                    "content": validators.iter()
+                        .map(|validator| validator.to_base64())
+                        .collect::<Vec<_>>()
                 }))
             }
         }
@@ -638,18 +638,18 @@ impl BlockContent {
         };
 
         match format {
-            // validators v1 format
+            // data v1 format
             0 => {
-                let Some(validators) = content.as_array() else {
-                    return Err(std::io::Error::other("invalid validators format"));
+                let Some(content) = content.as_str() else {
+                    return Err(std::io::Error::other("invalid block data format"));
                 };
 
-                let validators = validators.iter()
-                    .flat_map(Json::as_str)
-                    .flat_map(PublicKey::from_base64)
-                    .collect::<Vec<_>>();
+                let content = base64_decode(content)
+                    .map_err(std::io::Error::other)?;
 
-                Ok(Self::Validators(validators.into_boxed_slice()))
+                let content = zstd::decode_all(content.as_slice())?;
+
+                Ok(Self::Data(content.into_boxed_slice()))
             }
 
             // transactions v1 format
@@ -665,18 +665,18 @@ impl BlockContent {
                 Ok(Self::Transactions(transactions.into_boxed_slice()))
             }
 
-            // data v1 format
+            // validators v1 format
             2 => {
-                let Some(content) = content.as_str() else {
-                    return Err(std::io::Error::other("invalid block data format"));
+                let Some(validators) = content.as_array() else {
+                    return Err(std::io::Error::other("invalid validators format"));
                 };
 
-                let content = base64_decode(content)
-                    .map_err(std::io::Error::other)?;
+                let validators = validators.iter()
+                    .flat_map(Json::as_str)
+                    .flat_map(PublicKey::from_base64)
+                    .collect::<Vec<_>>();
 
-                let content = zstd::decode_all(content.as_slice())?;
-
-                Ok(Self::Data(content.into_boxed_slice()))
+                Ok(Self::Validators(validators.into_boxed_slice()))
             }
 
             _ => Err(std::io::Error::other("unknown block's content format"))

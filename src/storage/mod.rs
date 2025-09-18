@@ -24,6 +24,9 @@ use crate::client::{Client, Error as ClientError};
 use crate::pool::ShardsPool;
 use crate::viewer::Viewer;
 
+#[cfg(feature = "ram_storage")]
+pub mod ram_storage;
+
 #[cfg(feature = "file_storage")]
 pub mod file_storage;
 
@@ -61,7 +64,25 @@ pub trait Storage {
     /// there's any. History modifications, block and stored transactions must
     /// be verified outside of this trait so this method must work without extra
     /// verifications, even if the block is not valid.
-    fn write_block(&self, block: &Block) -> Result<(), Self::Error>;
+    ///
+    /// Return `Ok(true)` if the blockchain history was modified, otherwise
+    /// `Ok(false)`.
+    ///
+    /// # Blocks writing rules
+    ///
+    /// - If a block with the same hash is already stored then do nothing.
+    /// - If there's no blocks in the storage then
+    ///     - If the block is of the root type - store it;
+    ///     - Otherwise reject it.
+    /// - If there's no block with the provided block's previous hash then
+    ///   reject it because it's out of the history.
+    /// - If the provided block's previous hash is stored and the provided block
+    ///   is not stored yet then
+    ///     - If the previous block is the tail block of the history then we
+    ///       simply push it to the end of the blockchain.
+    ///     - If the previous block is not the tail block of the history then we
+    ///       remove all the following blocks and overwrite the history.
+    fn write_block(&self, block: &Block) -> Result<bool, Self::Error>;
 
     /// Get iterator over all the blocks stored in the current storage.
     #[inline]
@@ -79,6 +100,8 @@ pub trait Storage {
     /// validators* list - so validators who can approve creation of the block
     /// with provided hash.
     ///
+    /// By default the root block's signer is the only existing validator.
+    ///
     /// Return `Ok(None)` if requested block is not stored in the local storage.
     fn get_validators_before_block(
         &self,
@@ -89,6 +112,8 @@ pub trait Storage {
     /// list of validators after the block with provided hash was added to
     /// the blockchain.
     ///
+    /// By default the root block's signer is the only existing validator.
+    ///
     /// Return `Ok(None)` if requested block is not stored in the local storage.
     fn get_validators_after_block(
         &self,
@@ -96,7 +121,23 @@ pub trait Storage {
     ) -> Result<Option<Vec<PublicKey>>, Self::Error>;
 
     /// Get list of current blockchain validators.
-    fn get_current_validators(&self) -> Result<Vec<PublicKey>, Self::Error>;
+    ///
+    /// By default the root block's signer is the only existing validator.
+    fn get_current_validators(&self) -> Result<Vec<PublicKey>, Self::Error> {
+        let Some(tail_block) = self.tail_block()? else {
+            // No tail block => blockchain is empty, no validators available.
+            return Ok(vec![]);
+        };
+
+        // Can return `None` only if `read_block` decided that tail block
+        // doesn't exist which shouldn't happen.
+        if let Some(validators) = self.get_validators_after_block(&tail_block)? {
+            return Ok(validators);
+        }
+
+        // Fallback value.
+        Ok(vec![])
+    }
 }
 
 pub struct StorageIter<'storage, S: Storage> {
@@ -281,6 +322,357 @@ pub async fn sync<S: Storage>(
             None => None
         };
     }
+
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
+    use rand_chacha::ChaCha8Rng;
+    use rand_chacha::rand_core::SeedableRng;
+
+    use crate::block::BlockContent;
+
+    // Obvious checks for empty storage.
+
+    assert!(storage.root_block()?.is_none());
+    assert!(storage.tail_block()?.is_none());
+    assert!(!storage.has_block(&Hash::default())?);
+    assert!(storage.next_block(&Hash::default())?.is_none());
+    assert!(storage.read_block(&Hash::default())?.is_none());
+    assert_eq!(storage.blocks().count(), 0);
+    assert!(storage.get_current_validators()?.is_empty());
+
+    // Prepare test blocks.
+
+    let mut rng = ChaCha8Rng::seed_from_u64(123);
+
+    let secret_key = SecretKey::random(&mut rng);
+
+    let block_1 = Block::new(
+        &secret_key,
+        Hash::default(),
+        BlockContent::data("Block 1".as_bytes())
+    ).unwrap();
+
+    assert!(block_1.is_root());
+
+    let block_1_hash = block_1.hash().unwrap();
+
+    let block_2 = Block::new(
+        &secret_key,
+        block_1_hash,
+        BlockContent::data("Block 2".as_bytes())
+    ).unwrap();
+
+    let block_2_hash = block_2.hash().unwrap();
+
+    let block_3 = Block::new(
+        &secret_key,
+        block_2_hash,
+        BlockContent::data("Block 3".as_bytes())
+    ).unwrap();
+
+    let block_3_hash = block_3.hash().unwrap();
+
+    // Prepare alternative test blocks.
+
+    let secret_key_alt = SecretKey::random(&mut rng);
+
+    let block_1_alt = Block::new(
+        &secret_key_alt,
+        Hash::default(),
+        BlockContent::data("Alternative block 1".as_bytes())
+    ).unwrap();
+
+    assert!(block_1_alt.is_root());
+
+    let block_1_alt_hash = block_1_alt.hash().unwrap();
+
+    let block_2_alt = Block::new(
+        &secret_key_alt,
+        block_1_hash,
+        BlockContent::data("Alternative block 2".as_bytes())
+    ).unwrap();
+
+    let block_2_alt_hash = block_2_alt.hash().unwrap();
+
+    let block_3_alt = Block::new(
+        &secret_key_alt,
+        block_2_hash,
+        BlockContent::data("Alternative block 3".as_bytes())
+    ).unwrap();
+
+    let block_3_alt_hash = block_3_alt.hash().unwrap();
+
+    // 1. Out of order writing.
+    //
+    // Block 2 must be rejected by the method since it's not a root block type.
+
+    storage.write_block(&block_2)?;
+
+    assert!(storage.root_block()?.is_none());
+    assert!(storage.tail_block()?.is_none());
+
+    assert!(!storage.has_block(&Hash::default())?);
+    assert!(!storage.has_block(&block_2_hash)?);
+
+    assert!(storage.next_block(&Hash::default())?.is_none());
+    assert!(storage.next_block(&block_2_hash)?.is_none());
+
+    assert!(storage.read_block(&Hash::default())?.is_none());
+    assert!(storage.read_block(&block_2_hash)?.is_none());
+
+    assert_eq!(storage.blocks().count(), 0);
+
+    // 2. Out of order writing.
+    //
+    // Block 3 must be rejected by the method since block 2 is not stored yet.
+    // Block 1 must be written successfully.
+
+    storage.write_block(&block_1)?;
+    storage.write_block(&block_3)?;
+
+    assert_eq!(storage.root_block()?, Some(block_1_hash));
+    assert_eq!(storage.tail_block()?, Some(block_1_hash));
+
+    assert!(!storage.has_block(&Hash::default())?);
+    assert!(storage.has_block(&block_1_hash)?);
+    assert!(!storage.has_block(&block_2_hash)?);
+    assert!(!storage.has_block(&block_3_hash)?);
+
+    assert_eq!(storage.next_block(&Hash::default())?, Some(block_1_hash));
+    assert!(storage.next_block(&block_1_hash)?.is_none());
+    assert!(storage.next_block(&block_2_hash)?.is_none());
+    assert!(storage.next_block(&block_3_hash)?.is_none());
+
+    assert!(storage.read_block(&Hash::default())?.is_none());
+    assert_eq!(storage.read_block(&block_1_hash)?, Some(block_1.clone()));
+    assert!(storage.read_block(&block_2_hash)?.is_none());
+    assert!(storage.read_block(&block_3_hash)?.is_none());
+
+    assert_eq!(storage.blocks().count(), 1);
+
+    // 3. In-order writing.
+    //
+    // Blocks 2 and 3 must be written to the storage successfully.
+
+    storage.write_block(&block_2)?;
+    storage.write_block(&block_3)?;
+
+    assert_eq!(storage.root_block()?, Some(block_1_hash));
+    assert_eq!(storage.tail_block()?, Some(block_3_hash));
+
+    assert!(!storage.has_block(&Hash::default())?);
+    assert!(storage.has_block(&block_1_hash)?);
+    assert!(storage.has_block(&block_2_hash)?);
+    assert!(storage.has_block(&block_3_hash)?);
+
+    assert_eq!(storage.next_block(&Hash::default())?, Some(block_1_hash));
+    assert_eq!(storage.next_block(&block_1_hash)?, Some(block_2_hash));
+    assert_eq!(storage.next_block(&block_2_hash)?, Some(block_3_hash));
+    assert!(storage.next_block(&block_3_hash)?.is_none());
+
+    assert!(storage.read_block(&Hash::default())?.is_none());
+    assert_eq!(storage.read_block(&block_1_hash)?, Some(block_1.clone()));
+    assert_eq!(storage.read_block(&block_2_hash)?, Some(block_2.clone()));
+    assert_eq!(storage.read_block(&block_3_hash)?, Some(block_3.clone()));
+
+    assert_eq!(storage.blocks().count(), 3);
+
+    assert_eq!(
+        storage.get_current_validators()?,
+        vec![secret_key.public_key()]
+    );
+
+    // 4. Tail block modification.
+    //
+    // Block 3 must be correctly replaced by the alternative block 3.
+    // Original block 3 must be removed completely.
+
+    storage.write_block(&block_3_alt)?;
+
+    assert_eq!(storage.root_block()?, Some(block_1_hash));
+    assert_eq!(storage.tail_block()?, Some(block_3_alt_hash));
+
+    assert!(!storage.has_block(&Hash::default())?);
+    assert!(storage.has_block(&block_1_hash)?);
+    assert!(storage.has_block(&block_2_hash)?);
+    assert!(!storage.has_block(&block_3_hash)?);
+    assert!(storage.has_block(&block_3_alt_hash)?);
+
+    assert_eq!(storage.next_block(&Hash::default())?, Some(block_1_hash));
+    assert_eq!(storage.next_block(&block_1_hash)?, Some(block_2_hash));
+    assert_eq!(storage.next_block(&block_2_hash)?, Some(block_3_alt_hash));
+    assert!(storage.next_block(&block_3_hash)?.is_none());
+    assert!(storage.next_block(&block_3_alt_hash)?.is_none());
+
+    assert!(storage.read_block(&Hash::default())?.is_none());
+    assert_eq!(storage.read_block(&block_1_hash)?, Some(block_1.clone()));
+    assert_eq!(storage.read_block(&block_2_hash)?, Some(block_2.clone()));
+    assert!(storage.read_block(&block_3_hash)?.is_none());
+    assert_eq!(storage.read_block(&block_3_alt_hash)?, Some(block_3_alt.clone()));
+
+    assert_eq!(storage.blocks().count(), 3);
+
+    // 5. Middle block modification.
+    //
+    // Block 2 must be correctly replaced by the alternative block 2.
+    // Alternative block 3 must be removed completely since its previous hash
+    // is not correct anymore.
+
+    storage.write_block(&block_2_alt)?;
+
+    assert_eq!(storage.root_block()?, Some(block_1_hash));
+    assert_eq!(storage.tail_block()?, Some(block_2_alt_hash));
+
+    assert!(!storage.has_block(&Hash::default())?);
+    assert!(storage.has_block(&block_1_hash)?);
+    assert!(!storage.has_block(&block_2_hash)?);
+    assert!(storage.has_block(&block_2_alt_hash)?);
+    assert!(!storage.has_block(&block_3_hash)?);
+    assert!(!storage.has_block(&block_3_alt_hash)?);
+
+    assert_eq!(storage.next_block(&Hash::default())?, Some(block_1_hash));
+    assert_eq!(storage.next_block(&block_1_hash)?, Some(block_2_alt_hash));
+
+    assert!(storage.next_block(&block_2_hash)?.is_none());
+    assert!(storage.next_block(&block_2_alt_hash)?.is_none());
+    assert!(storage.next_block(&block_3_hash)?.is_none());
+    assert!(storage.next_block(&block_3_alt_hash)?.is_none());
+
+    assert!(storage.read_block(&Hash::default())?.is_none());
+    assert_eq!(storage.read_block(&block_1_hash)?, Some(block_1.clone()));
+
+    assert!(storage.read_block(&block_2_hash)?.is_none());
+    assert_eq!(storage.read_block(&block_2_alt_hash)?, Some(block_2_alt.clone()));
+
+    assert!(storage.read_block(&block_3_hash)?.is_none());
+    assert!(storage.read_block(&block_3_alt_hash)?.is_none());
+
+    assert_eq!(storage.blocks().count(), 2);
+
+    // 6. Root block modification.
+    //
+    // Block 1 must be correctly replaced by the alternative block 1.
+    // Alternative block 2 must be removed completely since its previous hash
+    // is not correct anymore. No blocks but the alternative block 1 must remain
+    // in the history at that point.
+
+    storage.write_block(&block_1_alt)?;
+
+    assert_eq!(storage.root_block()?, Some(block_1_alt_hash));
+    assert_eq!(storage.tail_block()?, Some(block_1_alt_hash));
+
+    assert!(!storage.has_block(&Hash::default())?);
+    assert!(!storage.has_block(&block_1_hash)?);
+    assert!(storage.has_block(&block_1_alt_hash)?);
+    assert!(!storage.has_block(&block_2_hash)?);
+    assert!(!storage.has_block(&block_2_alt_hash)?);
+    assert!(!storage.has_block(&block_3_hash)?);
+    assert!(!storage.has_block(&block_3_alt_hash)?);
+
+    assert_eq!(storage.next_block(&Hash::default())?, Some(block_1_alt_hash));
+
+    assert!(storage.next_block(&block_1_hash)?.is_none());
+    assert!(storage.next_block(&block_1_alt_hash)?.is_none());
+    assert!(storage.next_block(&block_2_hash)?.is_none());
+    assert!(storage.next_block(&block_2_alt_hash)?.is_none());
+    assert!(storage.next_block(&block_3_hash)?.is_none());
+    assert!(storage.next_block(&block_3_alt_hash)?.is_none());
+
+    assert!(storage.read_block(&Hash::default())?.is_none());
+
+    assert!(storage.read_block(&block_1_hash)?.is_none());
+    assert_eq!(storage.read_block(&block_1_alt_hash)?, Some(block_1_alt.clone()));
+
+    assert!(storage.read_block(&block_2_hash)?.is_none());
+    assert!(storage.read_block(&block_2_alt_hash)?.is_none());
+
+    assert!(storage.read_block(&block_3_hash)?.is_none());
+    assert!(storage.read_block(&block_3_alt_hash)?.is_none());
+
+    assert_eq!(storage.blocks().count(), 1);
+
+    assert_eq!(
+        storage.get_current_validators()?,
+        vec![secret_key_alt.public_key()]
+    );
+
+    // Prepare validator blocks.
+
+    let validator_1 = SecretKey::random(&mut rng);
+    let validator_2 = SecretKey::random(&mut rng);
+    let validator_3 = SecretKey::random(&mut rng);
+
+    let block_2_alt = Block::new(
+        &secret_key_alt,
+        block_1_alt_hash,
+        BlockContent::validators([validator_1.public_key()])
+    ).unwrap();
+
+    let block_2_alt_hash = block_2_alt.hash().unwrap();
+
+    let block_3_alt = Block::new(
+        &validator_1,
+        block_2_alt_hash,
+        BlockContent::validators([
+            validator_2.public_key(),
+            validator_3.public_key()
+        ])
+    ).unwrap();
+
+    let block_3_alt_hash = block_3_alt.hash().unwrap();
+
+    // 7. Validator blocks.
+
+    storage.write_block(&block_2_alt)?;
+    storage.write_block(&block_3_alt)?;
+
+    // Block 1 (root)
+    assert_eq!(
+        storage.get_validators_before_block(&block_1_alt_hash)?,
+        Some(vec![secret_key_alt.public_key()])
+    );
+
+    assert_eq!(
+        storage.get_validators_after_block(&block_1_alt_hash)?,
+        Some(vec![secret_key_alt.public_key()])
+    );
+
+    // Block 2 (root -> validator 1)
+    assert_eq!(
+        storage.get_validators_before_block(&block_2_alt_hash)?,
+        Some(vec![secret_key_alt.public_key()])
+    );
+
+    assert_eq!(
+        storage.get_validators_after_block(&block_2_alt_hash)?,
+        Some(vec![validator_1.public_key()])
+    );
+
+    // Block 3 (validator 1 -> validators 2 and 3)
+    assert_eq!(
+        storage.get_validators_before_block(&block_3_alt_hash)?,
+        Some(vec![validator_1.public_key()])
+    );
+
+    assert_eq!(
+        storage.get_validators_after_block(&block_3_alt_hash)?,
+        Some(vec![
+            validator_2.public_key(),
+            validator_3.public_key()
+        ])
+    );
+
+    // Current validators (block 3)
+    assert_eq!(
+        storage.get_current_validators()?,
+        vec![
+            validator_2.public_key(),
+            validator_3.public_key()
+        ]
+    );
 
     Ok(())
 }

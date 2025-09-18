@@ -28,6 +28,9 @@ Some key points:
 
 # HTTP Shards API v1 reference
 
+> TODO: in the first `v1.0.0` release it's planned to move to raw TCP
+> connections instead of using HTTP.
+
 ## Node status
 
 API to check status of the shard node.

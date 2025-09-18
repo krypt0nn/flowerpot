@@ -192,7 +192,7 @@ impl Storage for FileStorage {
         Ok(Some(block))
     }
 
-    fn write_block(&self, block: &Block) -> Result<(), Self::Error> {
+    fn write_block(&self, block: &Block) -> Result<bool, Self::Error> {
         let hash = block.hash()?;
         let path = self.get_block_path(&hash);
 
@@ -212,7 +212,7 @@ impl Storage for FileStorage {
             self.index_write_block_hash(0, &hash)?;
         }
 
-        Ok(())
+        Ok(true) // FIXME: not always!
     }
 
     fn get_validators_before_block(&self, hash: &Hash) -> Result<Option<Vec<PublicKey>>, Self::Error> {
@@ -261,21 +261,5 @@ impl Storage for FileStorage {
         }
 
         Ok(Some(vec![]))
-    }
-
-    fn get_current_validators(&self) -> Result<Vec<PublicKey>, Self::Error> {
-        let Some(tail_block) = self.tail_block()? else {
-            // No tail block => blockchain is empty, no validators available.
-            return Ok(vec![]);
-        };
-
-        // Can return `None` only if `read_block` decided that tail block
-        // doesn't exist which shouldn't happen.
-        if let Some(validators) = self.get_validators_after_block(&tail_block)? {
-            return Ok(validators);
-        }
-
-        // Fallback value.
-        Ok(vec![])
     }
 }
