@@ -27,9 +27,6 @@ use crate::viewer::Viewer;
 #[cfg(feature = "ram_storage")]
 pub mod ram_storage;
 
-#[cfg(feature = "file_storage")]
-pub mod file_storage;
-
 #[cfg(feature = "sqlite_storage")]
 pub mod sqlite_storage;
 

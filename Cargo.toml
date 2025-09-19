@@ -11,7 +11,6 @@ _http = ["dep:futures", "dep:reqwest"]
 tracing = ["dep:tracing"]
 
 ram_storage = []
-file_storage = []
 sqlite_storage = ["dep:rusqlite"]
 
 client = ["_http"]
@@ -21,7 +20,6 @@ validator = ["_http", "client"]
 default = [
     "tracing",
     "ram_storage",
-    "file_storage",
     "sqlite_storage",
     "client",
     "shard",
