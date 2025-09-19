@@ -161,12 +161,14 @@ impl Block {
         let previous: Hash = previous.into();
         let content: BlockContent = content.into();
 
-        let timestamp = UtcDateTime::now();
+        let timestamp = UtcDateTime::now()
+            .replace_nanosecond(0)
+            .unwrap_or_else(|_| UtcDateTime::now());
 
         let mut hasher = blake3::Hasher::new();
 
         hasher.update(&previous.0);
-        hasher.update(&timestamp.unix_timestamp().to_be_bytes());
+        hasher.update(&timestamp.unix_timestamp().to_le_bytes());
         hasher.update(&content.to_bytes().map_err(Error::SerializeBytes)?);
 
         let hash = Hash::from(hasher.finalize());
@@ -211,7 +213,7 @@ impl Block {
     /// Return `true` if the current block is root of the blockchain.
     #[inline]
     pub fn is_root(&self) -> bool {
-        self.previous.0 == [0; 32]
+        self.previous == Hash::default()
     }
 
     /// Calculate hash of the current block.
@@ -219,7 +221,7 @@ impl Block {
         let mut hasher = blake3::Hasher::new();
 
         hasher.update(&self.previous.0);
-        hasher.update(&self.timestamp.unix_timestamp().to_be_bytes());
+        hasher.update(&self.timestamp.unix_timestamp().to_le_bytes());
         hasher.update(&self.content.to_bytes().map_err(Error::SerializeBytes)?);
 
         Ok(Hash::from(hasher.finalize()))
