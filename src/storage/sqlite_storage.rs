@@ -383,15 +383,17 @@ impl Storage for SqliteStorage {
                     let mut query = database.prepare_cached("
                         INSERT INTO v1_block_transactions (
                             block_id,
+                            hash,
                             seed,
                             data,
                             sign
-                        ) VALUES (?1, ?2, ?3, ?4)
+                        ) VALUES (?1, ?2, ?3, ?4, ?5)
                     ")?;
 
                     for transaction in transactions {
                         query.execute((
                             block_id,
+                            transaction.hash().0,
                             transaction.seed().to_le_bytes(),
                             transaction.data(),
                             transaction.sign().to_bytes()
