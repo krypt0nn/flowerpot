@@ -19,7 +19,7 @@
 use std::iter::FusedIterator;
 
 use crate::crypto::*;
-use crate::block::{Block, Error as BlockError};
+use crate::block::{Block, BlockContent, Error as BlockError};
 use crate::client::{Client, Error as ClientError};
 use crate::pool::ShardsPool;
 use crate::viewer::Viewer;
@@ -43,7 +43,9 @@ pub trait Storage {
     fn tail_block(&self) -> Result<Option<Hash>, Self::Error>;
 
     /// Check if blockchain has block with given hash.
-    fn has_block(&self, hash: &Hash) -> Result<bool, Self::Error>;
+    fn has_block(&self, hash: &Hash) -> Result<bool, Self::Error> {
+        Ok(self.read_block(hash)?.is_some())
+    }
 
     /// Get hash of a block next to the one with provided hash. Return
     /// `Ok(None)` if there's no block next to the requested one.
@@ -112,10 +114,41 @@ pub trait Storage {
     /// By default the root block's signer is the only existing validator.
     ///
     /// Return `Ok(None)` if requested block is not stored in the local storage.
+    ///
+    /// > Note: the default implementation is suboptimal and custom
+    /// > implementations are recommended.
     fn get_validators_before_block(
         &self,
         hash: &Hash
-    ) -> Result<Option<Vec<PublicKey>>, Self::Error>;
+    ) -> Result<Option<Vec<PublicKey>>, Self::Error> {
+        let Some(block) = self.read_block(hash)? else {
+            return Ok(None);
+        };
+
+        let mut block = self.read_block(block.previous())?;
+
+        while let Some(inner) = &block {
+            if let BlockContent::Validators(validators) = inner.content() {
+                return Ok(Some(validators.to_vec()));
+            }
+
+            block = self.read_block(inner.previous())?;
+        }
+
+        let Some(root_block) = self.root_block()? else {
+            return Ok(Some(vec![]));
+        };
+
+        let Some(root_block) = self.read_block(&root_block)? else {
+            return Ok(Some(vec![]));
+        };
+
+        let Ok((_, _, public_key)) = root_block.verify() else {
+            return Ok(Some(vec![]));
+        };
+
+        Ok(Some(vec![public_key]))
+    }
 
     /// Similar to `get_validators_before_block` but this method should return
     /// list of validators after the block with provided hash was added to
@@ -124,10 +157,41 @@ pub trait Storage {
     /// By default the root block's signer is the only existing validator.
     ///
     /// Return `Ok(None)` if requested block is not stored in the local storage.
+    ///
+    /// > Note: the default implementation is suboptimal and custom
+    /// > implementations are recommended.
     fn get_validators_after_block(
         &self,
         hash: &Hash
-    ) -> Result<Option<Vec<PublicKey>>, Self::Error>;
+    ) -> Result<Option<Vec<PublicKey>>, Self::Error> {
+        if !self.has_block(hash)? {
+            return Ok(None);
+        }
+
+        let mut block = self.read_block(hash)?;
+
+        while let Some(inner) = &block {
+            if let BlockContent::Validators(validators) = inner.content() {
+                return Ok(Some(validators.to_vec()));
+            }
+
+            block = self.read_block(inner.previous())?;
+        }
+
+        let Some(root_block) = self.root_block()? else {
+            return Ok(Some(vec![]));
+        };
+
+        let Some(root_block) = self.read_block(&root_block)? else {
+            return Ok(Some(vec![]));
+        };
+
+        let Ok((_, _, public_key)) = root_block.verify() else {
+            return Ok(Some(vec![]));
+        };
+
+        Ok(Some(vec![public_key]))
+    }
 
     /// Get list of current blockchain validators.
     ///
