@@ -12,6 +12,7 @@ tracing = ["dep:tracing"]
 
 ram_storage = []
 file_storage = []
+sqlite_storage = ["dep:rusqlite"]
 
 client = ["_http"]
 shard = ["_http", "client", "dep:tokio", "dep:axum"]
@@ -21,6 +22,7 @@ default = [
     "tracing",
     "ram_storage",
     "file_storage",
+    "sqlite_storage",
     "client",
     "shard",
     "validator"
@@ -35,6 +37,11 @@ optional = true
 version = "0.12"
 features = ["socks", "h2", "http2", "rustls-tls", "rustls-tls-webpki-roots"]
 default-features = false
+optional = true
+
+[dependencies.rusqlite]
+version = "0.37"
+features = ["bundled"]
 optional = true
 
 [dependencies]
