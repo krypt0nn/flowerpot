@@ -24,6 +24,12 @@ use crate::client::{Client, Error as ClientError};
 use crate::pool::ShardsPool;
 use crate::viewer::Viewer;
 
+// FIXME: `write_block` must update the same block if the new variant has more
+//        approvals.
+//
+// TODO: test for the upper case and add tests for different block content
+//       types.
+
 #[cfg(feature = "ram_storage")]
 pub mod ram_storage;
 

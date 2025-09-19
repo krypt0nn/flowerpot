@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// libflowerpot
+// Copyright (C) 2025  Nikita Podvirnyi <krypt0nn@vk.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+use std::io::{Read, Write};
+use std::net::{SocketAddr, ToSocketAddrs};
+
+/// Abstract client/listener transport.
+#[allow(async_fn_in_trait)]
+pub trait Transport {
+    type Stream: Stream<Error = Self::Error>;
+    type Error: std::error::Error;
+
+    /// Listen to incoming stream connections.
+    async fn listen(&self) -> Result<Self::Stream, Self::Error>;
+
+    /// Try to make a stream connection.
+    async fn connect(
+        &self,
+        address: impl ToSocketAddrs
+    ) -> Result<Self::Stream, Self::Error>;
+}
+
+/// Abstract data transportation stream.
+#[allow(async_fn_in_trait)]
+pub trait Stream {
+    type Error: std::error::Error;
+
+    /// Get socket address of the local endpoint.
+    fn local_address(&self) -> &SocketAddr;
+
+    /// Get socket address of remote endpoint.
+    fn remote_address(&self) -> &SocketAddr;
+
+    /// Read content from the network, write it to the `buf` writer. Return
+    /// amount of read bytes.
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
+
+    /// Read content from the network with exact length in bytes, write it
+    /// to the `buf` writer.
+    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error>;
+
+    /// Send content of the `buf` reader.
+    async fn write(&mut self, buf: &[u8]) -> Result<(), Self::Error>;
+
+    /// Send all the buffered data if there's any.
+    async fn flush(&mut self) -> Result<(), Self::Error>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TcpSocketError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error("tcp socket must be bound to some local address before listening to incoming connections")]
+    SocketNotBound
+}
+
+#[derive(Default, Debug)]
+pub struct TcpSocket(Option<std::net::TcpListener>);
+
+impl TcpSocket {
+    pub fn bind(address: impl ToSocketAddrs) -> std::io::Result<Self> {
+        Ok(Self(Some(std::net::TcpListener::bind(address)?)))
+    }
+}
+
+impl Transport for TcpSocket {
+    type Stream = TcpStream;
+    type Error = TcpSocketError;
+
+    async fn listen(&self) -> Result<Self::Stream, Self::Error> {
+        let Some(listener) = &self.0 else {
+            return Err(TcpSocketError::SocketNotBound);
+        };
+
+        let (stream, address) = listener.accept()?;
+
+        Ok(TcpStream {
+            local_address: stream.local_addr()?,
+            remote_address: address,
+            stream
+        })
+    }
+
+    async fn connect(
+        &self,
+        address: impl ToSocketAddrs
+    ) -> Result<Self::Stream, Self::Error> {
+        let stream = std::net::TcpStream::connect(address)?;
+
+        Ok(TcpStream {
+            local_address: stream.local_addr()?,
+            remote_address: stream.peer_addr()?,
+            stream
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct TcpStream {
+    local_address: SocketAddr,
+    remote_address: SocketAddr,
+    stream: std::net::TcpStream
+}
+
+impl Stream for TcpStream {
+    type Error = TcpSocketError;
+
+    #[inline(always)]
+    fn local_address(&self) -> &SocketAddr {
+        &self.local_address
+    }
+
+    #[inline(always)]
+    fn remote_address(&self) -> &SocketAddr {
+        &self.remote_address
+    }
+
+    #[inline]
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        Ok(self.stream.read(buf)?)
+    }
+
+    #[inline]
+    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
+        self.stream.read_exact(buf)?;
+
+        Ok(())
+    }
+
+    #[inline]
+    async fn write(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
+        self.stream.write_all(buf)?;
+
+        Ok(())
+    }
+
+    #[inline]
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        self.stream.flush()?;
+
+        Ok(())
+    }
+}

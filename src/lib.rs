@@ -20,6 +20,8 @@ pub mod crypto;
 pub mod transaction;
 pub mod block;
 pub mod storage;
+pub mod network;
+pub mod protocol;
 
 #[cfg(feature = "client")]
 pub mod client;
