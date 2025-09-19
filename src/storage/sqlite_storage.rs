@@ -17,8 +17,10 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use rusqlite::Connection;
+use spin::{Mutex, MutexGuard};
 use time::UtcDateTime;
 
 use crate::crypto::*;
@@ -27,8 +29,59 @@ use crate::transaction::Transaction;
 
 use super::Storage;
 
-#[derive(Debug)]
-pub struct SqliteStorage(Connection);
+fn root_block(
+    database: &MutexGuard<'_, Connection>
+) -> rusqlite::Result<Option<Hash>> {
+    let mut query = database.prepare_cached("
+        SELECT current_hash FROM v1_blocks ORDER BY id ASC LIMIT 1
+    ")?;
+
+    let hash = query.query_row([], |row| {
+        row.get::<_, [u8; 32]>("current_hash")
+    });
+
+    match hash {
+        Ok(hash) => Ok(Some(Hash::from(hash))),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(err)
+    }
+}
+
+fn tail_block(
+    database: &MutexGuard<'_, Connection>
+) -> rusqlite::Result<Option<Hash>> {
+    let mut query = database.prepare_cached("
+        SELECT current_hash FROM v1_blocks ORDER BY id DESC LIMIT 1
+    ")?;
+
+    let hash = query.query_row([], |row| {
+        row.get::<_, [u8; 32]>("current_hash")
+    });
+
+    match hash {
+        Ok(hash) => Ok(Some(Hash::from(hash))),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(err)
+    }
+}
+
+fn has_block(
+    database: &MutexGuard<'_, Connection>,
+    hash: &Hash
+) -> rusqlite::Result<bool> {
+    let mut query = database.prepare_cached("
+        SELECT 1 FROM v1_blocks WHERE current_hash = ?1
+    ")?;
+
+    match query.query_row([hash.0], |_| Ok(true)) {
+        Ok(_) => Ok(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(err) => Err(err)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SqliteStorage(Arc<Mutex<Connection>>);
 
 impl SqliteStorage {
     pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
@@ -104,61 +157,34 @@ impl SqliteStorage {
 
         transaction.commit()?;
 
-        Ok(Self(connection))
+        Ok(Self(Arc::new(Mutex::new(connection))))
     }
 }
 
 impl Storage for SqliteStorage {
     type Error = rusqlite::Error;
 
+    #[inline]
     fn root_block(&self) -> Result<Option<Hash>, Self::Error> {
-        let mut query = self.0.prepare_cached(
-            "SELECT current_hash FROM v1_blocks ORDER BY id ASC LIMIT 1"
-        )?;
-
-        let hash = query.query_row([], |row| {
-            row.get::<_, [u8; 32]>("current_hash")
-        });
-
-        match hash {
-            Ok(hash) => Ok(Some(Hash::from(hash))),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(err) => Err(err)
-        }
+        root_block(&self.0.lock())
     }
 
+    #[inline]
     fn tail_block(&self) -> Result<Option<Hash>, Self::Error> {
-        let mut query = self.0.prepare_cached(
-            "SELECT current_hash FROM v1_blocks ORDER BY id DESC LIMIT 1"
-        )?;
-
-        let hash = query.query_row([], |row| {
-            row.get::<_, [u8; 32]>("current_hash")
-        });
-
-        match hash {
-            Ok(hash) => Ok(Some(Hash::from(hash))),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(err) => Err(err)
-        }
+        tail_block(&self.0.lock())
     }
 
+    #[inline]
     fn has_block(&self, hash: &Hash) -> Result<bool, Self::Error> {
-        let mut query = self.0.prepare_cached(
-            "SELECT 1 FROM v1_blocks WHERE current_hash = ?1"
-        )?;
-
-        match query.query_row([hash.0], |_| Ok(true)) {
-            Ok(_) => Ok(true),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
-            Err(err) => Err(err)
-        }
+        has_block(&self.0.lock(), hash)
     }
 
     fn next_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error> {
-        let mut query = self.0.prepare_cached(
-            "SELECT current_hash FROM v1_blocks WHERE previous_hash = ?1"
-        )?;
+        let lock = self.0.lock();
+
+        let mut query = lock.prepare_cached("
+            SELECT current_hash FROM v1_blocks WHERE previous_hash = ?1
+        ")?;
 
         let hash = query.query_row([hash.0], |row| {
             row.get::<_, [u8; 32]>("current_hash")
@@ -172,7 +198,9 @@ impl Storage for SqliteStorage {
     }
 
     fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error> {
-        let mut query = self.0.prepare_cached("
+        let lock = self.0.lock();
+
+        let mut query = lock.prepare_cached("
             SELECT
                 id,
                 previous_hash,
@@ -197,7 +225,7 @@ impl Storage for SqliteStorage {
             Ok((id, previous_hash, timestamp, sign, block_type)) => {
                 let content = match block_type {
                     0 => {
-                        let mut query = self.0.prepare_cached("
+                        let mut query = lock.prepare_cached("
                             SELECT data FROM v1_block_data WHERE block_id = ?1
                         ")?;
 
@@ -209,7 +237,7 @@ impl Storage for SqliteStorage {
                     }
 
                     1 => {
-                        let mut query = self.0.prepare_cached("
+                        let mut query = lock.prepare_cached("
                             SELECT
                                 seed,
                                 data,
@@ -243,7 +271,7 @@ impl Storage for SqliteStorage {
                     }
 
                     2 => {
-                        let mut query = self.0.prepare_cached("
+                        let mut query = lock.prepare_cached("
                             SELECT public_key
                             FROM v1_block_validators
                             WHERE block_id = ?1
@@ -268,7 +296,7 @@ impl Storage for SqliteStorage {
                     _ => return Err(rusqlite::Error::InvalidQuery)
                 };
 
-                let mut query = self.0.prepare_cached("
+                let mut query = lock.prepare_cached("
                     SELECT approval
                     FROM v1_block_approvals
                     WHERE block_id = ?1
@@ -304,10 +332,8 @@ impl Storage for SqliteStorage {
     }
 
     fn write_block(&self, block: &Block) -> Result<bool, Self::Error> {
-        // FIXME: somehow make this method atomic
-
         fn insert_block(
-            database: &Connection,
+            database: &rusqlite::Transaction<'_>,
             hash: &Hash,
             block: &Block
         ) -> rusqlite::Result<()> {
@@ -388,6 +414,8 @@ impl Storage for SqliteStorage {
             Ok(())
         }
 
+        let mut lock = self.0.lock();
+
         let (is_valid, hash, _) = block.verify()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
 
@@ -398,24 +426,29 @@ impl Storage for SqliteStorage {
         }
 
         // Ignore block if it's already stored.
-        if self.has_block(&hash)? {
+        if has_block(&lock, &hash)? {
             return Ok(false);
         }
 
         // Attempt to store the root block of the blockchain.
-        else if self.root_block()?.is_none() || block.is_root() {
+        else if root_block(&lock)?.is_none() || block.is_root() {
             // But reject it if it's not of a root type.
             if !block.is_root() {
                 return Ok(false);
             }
 
-            self.0.prepare("DELETE FROM v1_blocks")?.execute(())?;
+            let transaction = lock.transaction()?;
 
-            insert_block(&self.0, &hash, block)?;
+            transaction.prepare_cached("DELETE FROM v1_blocks")?
+                .execute(())?;
+
+            insert_block(&transaction, &hash, block)?;
+
+            transaction.commit()?;
         }
 
         // Reject out-of-history blocks.
-        else if !self.has_block(block.previous())? {
+        else if !has_block(&lock, block.previous())? {
             return Ok(false);
         }
 
@@ -424,13 +457,19 @@ impl Storage for SqliteStorage {
         //
         // If the previous block is the last block of the history then we add
         // the new one to the end of the blockchain.
-        else if self.tail_block()? == Some(block.previous) {
-            insert_block(&self.0, &hash, block)?;
+        else if tail_block(&lock)? == Some(block.previous) {
+            let transaction = lock.transaction()?;
+
+            insert_block(&transaction, &hash, block)?;
+
+            transaction.commit()?;
         }
 
         // Otherwise we need to modify the history.
         else {
-            let mut query = self.0.prepare_cached("
+            let transaction = lock.transaction()?;
+
+            let mut query = transaction.prepare_cached("
                 SELECT id FROM v1_blocks WHERE current_hash = ?1
             ")?;
 
@@ -438,10 +477,14 @@ impl Storage for SqliteStorage {
                 row.get::<_, i64>("id")
             })?;
 
-            self.0.prepare("DELETE FROM v1_blocks WHERE id > ?1")?
+            drop(query);
+
+            transaction.prepare("DELETE FROM v1_blocks WHERE id > ?1")?
                 .execute([id])?;
 
-            insert_block(&self.0, &hash, block)?;
+            insert_block(&transaction, &hash, block)?;
+
+            transaction.commit()?;
         }
 
         Ok(true)

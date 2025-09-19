@@ -11,7 +11,7 @@ _http = ["dep:futures", "dep:reqwest"]
 tracing = ["dep:tracing"]
 
 ram_storage = []
-sqlite_storage = ["dep:rusqlite"]
+sqlite_storage = ["dep:rusqlite", "dep:spin"]
 
 client = ["_http"]
 shard = ["_http", "client", "dep:tokio", "dep:axum"]
@@ -49,6 +49,7 @@ serde_json = "1.0"
 futures = { version = "0.3", optional = true }
 axum = { version = "0.8", optional = true }
 tracing = { version = "0.1", optional = true }
+spin = { version = "0.10", optional = true }
 varint-rs = "2.2"
 time = "0.3"
 blake3 = "1.8"
