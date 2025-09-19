@@ -392,7 +392,7 @@ impl Storage for SqliteStorage {
                     for transaction in transactions {
                         query.execute((
                             block_id,
-                            transaction.seed(),
+                            transaction.seed().to_le_bytes(),
                             transaction.data(),
                             transaction.sign().to_bytes()
                         ))?;
