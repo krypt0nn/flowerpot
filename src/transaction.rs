@@ -60,15 +60,10 @@ impl Transaction {
         })
     }
 
-    /// Calculate hash of transaction.
-    #[inline]
-    pub fn hash(&self) -> Hash {
-        let mut hasher = blake3::Hasher::new();
-
-        hasher.update(&self.seed.to_le_bytes());
-        hasher.update(&self.data);
-
-        Hash::from(hasher.finalize())
+    /// Get transaction's seed.
+    #[inline(always)]
+    pub const fn seed(&self) -> u64 {
+        self.seed
     }
 
     /// Get transaction's data.
@@ -81,6 +76,17 @@ impl Transaction {
     #[inline(always)]
     pub fn sign(&self) -> &Signature {
         &self.sign
+    }
+
+    /// Calculate hash of transaction.
+    #[inline]
+    pub fn hash(&self) -> Hash {
+        let mut hasher = blake3::Hasher::new();
+
+        hasher.update(&self.seed.to_le_bytes());
+        hasher.update(&self.data);
+
+        Hash::from(hasher.finalize())
     }
 
     /// Derive transaction's author and verify its content.
