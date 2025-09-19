@@ -30,6 +30,9 @@ pub mod ram_storage;
 #[cfg(feature = "file_storage")]
 pub mod file_storage;
 
+#[cfg(feature = "sqlite_storage")]
+pub mod sqlite_storage;
+
 pub trait Storage {
     type Error: std::error::Error;
 
@@ -86,8 +89,14 @@ pub trait Storage {
 
     /// Get iterator over all the blocks stored in the current storage.
     #[inline]
-    fn blocks(&self) -> StorageIter<'_, Self> where Self: Sized {
-        StorageIter::new(self)
+    fn history(&self) -> StorageHistoryIter<'_, Self> where Self: Sized {
+        StorageHistoryIter::new(self)
+    }
+
+    /// Get iterator over all the blocks stored in the current storage.
+    #[inline]
+    fn blocks(&self) -> StorageBlocksIter<'_, Self> where Self: Sized {
+        StorageBlocksIter::new(self)
     }
 
     /// Get list of blockchain validators at the point in time when the block
@@ -140,12 +149,13 @@ pub trait Storage {
     }
 }
 
-pub struct StorageIter<'storage, S: Storage> {
+#[derive(Debug, Clone)]
+pub struct StorageHistoryIter<'storage, S: Storage> {
     storage: &'storage S,
-    curr_block: Hash
+    current_block: Hash
 }
 
-impl<'storage, S: Storage> StorageIter<'storage, S> {
+impl<'storage, S: Storage> StorageHistoryIter<'storage, S> {
     #[inline]
     pub fn new(storage: &'storage S) -> Self {
         Self::new_since(storage, Hash::default())
@@ -158,27 +168,25 @@ impl<'storage, S: Storage> StorageIter<'storage, S> {
     ) -> Self {
         Self {
             storage,
-            curr_block: block_hash.into()
+            current_block: block_hash.into()
         }
+    }
+
+    #[inline(always)]
+    pub const fn storage(&self) -> &'storage S {
+        self.storage
     }
 }
 
-impl<S: Storage> Iterator for StorageIter<'_, S> {
-    type Item = Result<Block, S::Error>;
+impl<S: Storage> Iterator for StorageHistoryIter<'_, S> {
+    type Item = Result<Hash, S::Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.storage.next_block(&self.curr_block) {
+        match self.storage.next_block(&self.current_block) {
             Ok(Some(next_block)) => {
-                match self.storage.read_block(&next_block) {
-                    Ok(Some(block)) => {
-                        self.curr_block = next_block;
+                self.current_block = next_block;
 
-                        Some(Ok(block))
-                    }
-
-                    Ok(None) => None,
-                    Err(err) => Some(Err(err))
-                }
+                Some(Ok(next_block))
             }
 
             Ok(None) => None,
@@ -187,7 +195,52 @@ impl<S: Storage> Iterator for StorageIter<'_, S> {
     }
 }
 
-impl<S: Storage> FusedIterator for StorageIter<'_, S> {}
+impl<S: Storage> FusedIterator for StorageHistoryIter<'_, S> {}
+
+#[derive(Debug, Clone)]
+pub struct StorageBlocksIter<'storage, S: Storage>(StorageHistoryIter<'storage, S>);
+
+impl<'storage, S: Storage> StorageBlocksIter<'storage, S> {
+    #[inline]
+    pub fn new(storage: &'storage S) -> Self {
+        Self(StorageHistoryIter::new(storage))
+    }
+
+    #[inline]
+    pub fn new_since(
+        storage: &'storage S,
+        block_hash: impl Into<Hash>
+    ) -> Self {
+        Self(StorageHistoryIter::new_since(storage, block_hash))
+    }
+}
+
+impl<S: Storage> Iterator for StorageBlocksIter<'_, S> {
+    type Item = Result<Block, S::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let hash = match self.0.next()? {
+            Ok(hash) => hash,
+            Err(err) => return Some(Err(err))
+        };
+
+        match self.0.storage.read_block(&hash) {
+            Ok(Some(block)) => Some(Ok(block)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err))
+        }
+    }
+}
+
+impl<S: Storage> FusedIterator for StorageBlocksIter<'_, S> {}
+
+impl<'storage, S: Storage> From<StorageHistoryIter<'storage, S>>
+for StorageBlocksIter<'storage, S> {
+    #[inline(always)]
+    fn from(value: StorageHistoryIter<'storage, S>) -> Self {
+        Self(value)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError<S: Storage> {
