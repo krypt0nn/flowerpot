@@ -11,8 +11,14 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    #[error("unknown packet type: {0}")]
+    UnknownPacketType(u8),
+
     #[error("provided packet bytes slice is too short")]
-    PacketTooShort
+    PacketTooShort,
+
+    #[error("couldn't deserialize signature from invalid bytes slice")]
+    InvalidSignature
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,7 +345,134 @@ impl Packet {
                 })
             }
 
-            _ => todo!()
+            Self::V1_ASK_PENDING_BLOCKS => Ok(Self::AskPendingBlocks {
+                root_block: Hash::from(root_block)
+            }),
+
+            Self::V1_PENDING_BLOCKS => {
+                let mut bytes = Cursor::new(bytes[33..].to_vec());
+
+                let mut hash = [0; 32];
+                let mut approval = [0; 65];
+
+                let mut blocks = Vec::new();
+
+                while bytes.read_exact(&mut hash).is_ok() {
+                    let len = bytes.read_usize_varint()?;
+
+                    let mut approvals = Vec::with_capacity(len);
+
+                    for _ in 0..len {
+                        bytes.read_exact(&mut approval)?;
+
+                        let Some(approval) = Signature::from_bytes(approval) else {
+                            return Err(Error::InvalidSignature);
+                        };
+
+                        approvals.push(approval);
+                    }
+
+                    blocks.push((
+                        Hash::from(hash),
+                        approvals.into_boxed_slice()
+                    ));
+                }
+
+                Ok(Self::PendingBlocks {
+                    root_block: Hash::from(root_block),
+                    pending_blocks: blocks.into_boxed_slice()
+                })
+            }
+
+            Self::V1_ASK_PENDING_TRANSACTIONS => {
+                Ok(Self::AskPendingTransactions {
+                    root_block: Hash::from(root_block)
+                })
+            }
+
+            Self::V1_PENDING_TRANSACTIONS => {
+                let mut bytes = Cursor::new(bytes[33..].to_vec());
+                let mut hash = [0; 32];
+
+                let mut transactions = Vec::new();
+
+                while bytes.read_exact(&mut hash).is_ok() {
+                    transactions.push(Hash::from(hash));
+                }
+
+                Ok(Self::PendingTransactions {
+                    root_block: Hash::from(root_block),
+                    pending_transactions: transactions.into_boxed_slice()
+                })
+            }
+
+            Self::V1_ASK_BLOCK => {
+                if bytes.len() < 65 {
+                    return Err(Error::PacketTooShort);
+                }
+
+                let mut target_block = [0; 32];
+
+                target_block.copy_from_slice(&bytes[33..66]);
+
+                Ok(Self::AskBlock {
+                    root_block: Hash::from(root_block),
+                    target_block: Hash::from(target_block)
+                })
+            }
+
+            Self::V1_BLOCK => {
+                Ok(Self::Block {
+                    root_block: Hash::from(root_block),
+                    block: Block::from_bytes(&bytes[33..])?
+                })
+            }
+
+            Self::V1_ASK_TRANSACTION => {
+                if bytes.len() < 65 {
+                    return Err(Error::PacketTooShort);
+                }
+
+                let mut transaction = [0; 32];
+
+                transaction.copy_from_slice(&bytes[33..66]);
+
+                Ok(Self::AskTransaction {
+                    root_block: Hash::from(root_block),
+                    transaction: Hash::from(transaction)
+                })
+            }
+
+            Self::V1_TRANSACTION => {
+                Ok(Self::Transaction {
+                    root_block: Hash::from(root_block),
+                    transaction: Transaction::from_bytes(&bytes[33..])?
+                })
+            }
+
+            Self::V1_APPROVE_BLOCK => {
+                if bytes.len() < 130 {
+                    return Err(Error::PacketTooShort);
+                }
+
+                let mut target_block = [0; 32];
+                let mut approval = [0; 65];
+
+                target_block.copy_from_slice(&bytes[33..66]);
+                approval.copy_from_slice(&bytes[66..]);
+
+                let Some(approval) = Signature::from_bytes(approval) else {
+                    return Err(Error::InvalidSignature);
+                };
+
+                Ok(Self::ApproveBlock {
+                    root_block: Hash::from(root_block),
+                    target_block: Hash::from(target_block),
+                    approval
+                })
+            }
+
+            packet_type => Err(Error::UnknownPacketType(packet_type))
         }
     }
 }
