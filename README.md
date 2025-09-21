@@ -26,6 +26,43 @@ Some key points:
 
 <img src="./docs/network.png" />
 
+# Roadmap to v1.0.0 release
+
+- [ ] Transition to abstract transport protocols for communication
+    - [ ] Implement base protocol and transport abstraction
+    - [ ] Rewrite client code to use internal connection
+    - [ ] Rewrite shards pool to keep active connections as transport streams
+    - [ ] Implement batched protocol methods in the shards pool
+    - [ ] Rewrite validator code
+    - [ ] Rewrite shard code
+- [ ] Rework blocks and transactions
+    - [ ] Remove zstd compression since it's not reliable
+    - [ ] Make transactions have multiple types; implement `Mint` and `Data`
+          type transactions
+- [ ] Implement gas system
+    - [ ] Calculate transaction gas usage (`ceil(size_in_bytes * alpha)`)
+    - [ ] Calculate total block gas usage (sum of transactions' gas usage)
+    - [ ] Calculate gas inflation
+          (`alpha = prev_alpha * 2` or `alpha = prev_alpha / 2`)
+    - [ ] Implement gas-related methods in the storage trait
+    - [ ] Implement `max_gas` field for every transaction
+    - [ ] Withdraw gas from the users' accounts for each staged transaction
+- [ ] Implement mining system
+    - [ ] Implement PoW task based on the [DodoPoW](https://github.com/krypt0nn/dodopow)
+    - [ ] Implement tasks verification and balance updating logic on transaction
+          staging
+    - [ ] Make default mining software
+- [ ] Rework validators system
+    - [ ] Remove different block types, keep only transactions list
+    - [ ] Add new transaction type which will make its author a validator in
+          cost of burning large amount of gas
+    - [ ] Make blockchain's creator a validator by default
+    - [ ] Choose blocks to approve using xor distance of previous block hash
+          and public keys of every known validator, prioritize pending blocks
+          using these distances
+    - [ ] Give validator which made a new block some gas fee
+          (needs further thinking)
+
 # HTTP Shards API v1 reference
 
 > TODO: in the first `v1.0.0` release it's planned to move to raw TCP
