@@ -29,7 +29,7 @@ Some key points:
 # Roadmap to v1.0.0 release
 
 - [ ] Transition to abstract transport protocols for communication
-    - [ ] Implement base protocol and transport abstraction
+    - [x] Implement base protocol and transport abstraction
     - [ ] Rewrite client code to use internal connection
     - [ ] Rewrite shards pool to keep active connections as transport streams
     - [ ] Implement batched protocol methods in the shards pool

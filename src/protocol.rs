@@ -5,9 +5,10 @@ use varint_rs::*;
 use crate::crypto::*;
 use crate::block::Block;
 use crate::transaction::Transaction;
+use crate::network::Stream;
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub enum PacketError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
@@ -144,7 +145,7 @@ impl Packet {
     pub const V1_APPROVE_BLOCK: u8            = 11;
 
     /// Convert current packet to the bytes slice.
-    pub fn to_bytes(&self) -> Result<Box<[u8]>, Error> {
+    pub fn to_bytes(&self) -> Result<Box<[u8]>, PacketError> {
         match self {
             Self::Heartbeat => Ok(Box::new([Self::V1_HEARTBEAT])),
 
@@ -300,11 +301,11 @@ impl Packet {
     }
 
     /// Convert bytes slice to a packet.
-    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, Error> {
+    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, PacketError> {
         let bytes = bytes.as_ref();
 
         if bytes.is_empty() {
-            return Err(Error::PacketTooShort);
+            return Err(PacketError::PacketTooShort);
         }
 
         match bytes[0] {
@@ -312,7 +313,7 @@ impl Packet {
 
             Self::V1_ASK_HISTORY => {
                 if bytes.len() < 35 {
-                    return Err(Error::PacketTooShort);
+                    return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; 32];
@@ -333,7 +334,7 @@ impl Packet {
 
             Self::V1_HISTORY => {
                 if bytes.len() < 33 {
-                    return Err(Error::PacketTooShort);
+                    return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; 32];
@@ -360,7 +361,7 @@ impl Packet {
 
             Self::V1_ASK_PENDING_BLOCKS => {
                 if bytes.len() < 33 {
-                    return Err(Error::PacketTooShort);
+                    return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; 32];
@@ -374,7 +375,7 @@ impl Packet {
 
             Self::V1_PENDING_BLOCKS => {
                 if bytes.len() < 33 {
-                    return Err(Error::PacketTooShort);
+                    return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; 32];
@@ -397,7 +398,7 @@ impl Packet {
                         bytes.read_exact(&mut approval)?;
 
                         let Some(approval) = Signature::from_bytes(approval) else {
-                            return Err(Error::InvalidSignature);
+                            return Err(PacketError::InvalidSignature);
                         };
 
                         approvals.push(approval);
@@ -417,7 +418,7 @@ impl Packet {
 
             Self::V1_ASK_PENDING_TRANSACTIONS => {
                 if bytes.len() < 33 {
-                    return Err(Error::PacketTooShort);
+                    return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; 32];
@@ -431,7 +432,7 @@ impl Packet {
 
             Self::V1_PENDING_TRANSACTIONS => {
                 if bytes.len() < 33 {
-                    return Err(Error::PacketTooShort);
+                    return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; 32];
@@ -455,7 +456,7 @@ impl Packet {
 
             Self::V1_ASK_BLOCK => {
                 if bytes.len() < 65 {
-                    return Err(Error::PacketTooShort);
+                    return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; 32];
@@ -472,7 +473,7 @@ impl Packet {
 
             Self::V1_BLOCK => {
                 if bytes.len() < 33 {
-                    return Err(Error::PacketTooShort);
+                    return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; 32];
@@ -487,7 +488,7 @@ impl Packet {
 
             Self::V1_ASK_TRANSACTION => {
                 if bytes.len() < 65 {
-                    return Err(Error::PacketTooShort);
+                    return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; 32];
@@ -504,7 +505,7 @@ impl Packet {
 
             Self::V1_TRANSACTION => {
                 if bytes.len() < 33 {
-                    return Err(Error::PacketTooShort);
+                    return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; 32];
@@ -519,7 +520,7 @@ impl Packet {
 
             Self::V1_APPROVE_BLOCK => {
                 if bytes.len() < 130 {
-                    return Err(Error::PacketTooShort);
+                    return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; 32];
@@ -531,7 +532,7 @@ impl Packet {
                 approval.copy_from_slice(&bytes[65..]);
 
                 let Some(approval) = Signature::from_bytes(approval) else {
-                    return Err(Error::InvalidSignature);
+                    return Err(PacketError::InvalidSignature);
                 };
 
                 Ok(Self::ApproveBlock {
@@ -541,13 +542,106 @@ impl Packet {
                 })
             }
 
-            packet_type => Err(Error::UnknownPacketType(packet_type))
+            packet_type => Err(PacketError::UnknownPacketType(packet_type))
         }
     }
 }
 
+impl AsRef<Packet> for Packet {
+    #[inline(always)]
+    fn as_ref(&self) -> &Packet {
+        self
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PacketStreamError<S: Stream> {
+    #[error(transparent)]
+    Stream(S::Error),
+
+    #[error(transparent)]
+    Packet(#[from] PacketError),
+
+    #[error("unsupported protocol version: {0}")]
+    UnsupportedProtocolVersion(u8),
+
+    #[error("packet is too large to be sent over the network")]
+    PacketTooLarge
+}
+
+#[derive(Debug)]
+pub struct PacketStream<S: Stream>(S);
+
+impl<S: Stream> PacketStream<S> {
+    /// Initialize packet stream connection using the underlying transport
+    /// stream.
+    ///
+    /// This method will exchange some handshake info, read incoming data and
+    /// if handshake was successful - provide simple interface to send and
+    /// receive packets over the network.
+    pub async fn new(mut stream: S) -> Result<Self, PacketStreamError<S>> {
+        stream.write(&[0]).await.map_err(PacketStreamError::Stream)?;
+        stream.flush().await.map_err(PacketStreamError::Stream)?;
+
+        let mut buf = [0; 1];
+
+        stream.read_exact(&mut buf).await.map_err(PacketStreamError::Stream)?;
+
+        if buf[0] != 0 {
+            return Err(PacketStreamError::UnsupportedProtocolVersion(buf[0]));
+        }
+
+        Ok(Self(stream))
+    }
+
+    /// Send packet.
+    pub async fn send(
+        &mut self,
+        packet: impl AsRef<Packet>
+    ) -> Result<(), PacketStreamError<S>> {
+        let packet = packet.as_ref()
+            .to_bytes()
+            .map_err(PacketStreamError::Packet)?;
+
+        let length = packet.len();
+
+        if length > u32::MAX as usize {
+            return Err(PacketStreamError::PacketTooLarge);
+        }
+
+        self.0.write(&(length as u32).to_le_bytes()).await
+            .map_err(PacketStreamError::Stream)?;
+
+        self.0.write(&packet).await
+            .map_err(PacketStreamError::Stream)?;
+
+        self.0.flush().await
+            .map_err(PacketStreamError::Stream)?;
+
+        Ok(())
+    }
+
+    /// Receive packet.
+    pub async fn recv(&mut self) -> Result<Packet, PacketStreamError<S>> {
+        let mut length = [0; 4];
+
+        self.0.read_exact(&mut length).await
+            .map_err(PacketStreamError::Stream)?;
+
+        let mut buf = vec![0; u32::from_le_bytes(length) as usize];
+
+        self.0.read_exact(&mut buf).await
+            .map_err(PacketStreamError::Stream)?;
+
+        let packet = Packet::from_bytes(buf)
+            .map_err(PacketStreamError::Packet)?;
+
+        Ok(packet)
+    }
+}
+
 #[test]
-fn test_serialize() -> Result<(), Error> {
+fn test_serialize() -> Result<(), PacketError> {
     use rand_chacha::ChaCha8Rng;
     use rand_chacha::rand_core::SeedableRng;
 
