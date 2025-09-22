@@ -74,9 +74,9 @@ pub fn block_validator_distance(
 ) -> [u8; 32] {
     let mut dist = *blake3::hash(&validator.to_bytes()).as_bytes();
 
-    for i in 0..32 {
+    (0..32).for_each(|i| {
         dist[i] ^= block.0[i];
-    }
+    });
 
     dist
 }
@@ -90,7 +90,7 @@ pub fn block_validator_distance(
 /// prioritized equal amount of times.
 pub fn rank_validators(
     prev_block_hash: &Hash,
-    validators: &mut Vec<PublicKey>
+    validators: &mut [PublicKey]
 ) {
     validators.sort_by(|a, b| {
         let a = block_validator_distance(prev_block_hash, a);

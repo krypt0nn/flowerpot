@@ -579,6 +579,39 @@ impl<T: Stream, F: Storage> Node<T, F> {
                 }).await.map_err(NodeError::PacketStream)?;
             }
 
+            Packet::AskBlock {
+                root_block,
+                target_block
+            } if root_block == self.root_block => {
+                if let Some(block) = self.pending_blocks.get(&target_block) {
+                    stream.send(Packet::Block {
+                        root_block,
+                        block: block.clone()
+                    }).await.map_err(NodeError::PacketStream)?;
+                }
+
+                else if let Some(storage) = &self.storage
+                    && let Some(block) = storage.read_block(&target_block).map_err(NodeError::Storage)?
+                {
+                    stream.send(Packet::Block {
+                        root_block,
+                        block
+                    }).await.map_err(NodeError::PacketStream)?;
+                }
+            }
+
+            Packet::AskTransaction {
+                root_block,
+                transaction
+            } if root_block == self.root_block => {
+                if let Some(transaction) = self.pending_transactions.get(&transaction) {
+                    stream.send(Packet::Transaction {
+                        root_block,
+                        transaction: transaction.clone()
+                    }).await.map_err(NodeError::PacketStream)?;
+                }
+            }
+
             _ => ()
         }
 
