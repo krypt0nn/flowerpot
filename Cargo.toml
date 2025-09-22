@@ -53,9 +53,10 @@ spin = { version = "0.10", optional = true }
 varint-rs = "2.2"
 time = "0.3"
 blake3 = "1.8"
-k256 = "0.13"
+k256 = { version = "0.13", features = ["ecdh"] }
 base64 = "0.22"
 zstd = "0.13"
+chacha20 = "0.9"
 
 [dev-dependencies]
 rand_chacha = "0.3"
