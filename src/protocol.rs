@@ -853,7 +853,7 @@ impl<S: Stream> PacketStream<S> {
         }
 
         // Prepare read and write encryptors.
-        let read_encryptor = match &encryption_algorithm {
+        let mut read_encryptor = match &encryption_algorithm {
             Some(algorithm) => {
                 Some(PacketStreamEncryptor::new(
                     algorithm,
@@ -865,7 +865,7 @@ impl<S: Stream> PacketStream<S> {
             None => None
         };
 
-        let write_encryptor = match &encryption_algorithm {
+        let mut write_encryptor = match &encryption_algorithm {
             Some(algorithm) => {
                 Some(PacketStreamEncryptor::new(
                     algorithm,
@@ -878,7 +878,13 @@ impl<S: Stream> PacketStream<S> {
         };
 
         // Send shared secret image.
-        stream.write(shared_secret_image.as_bytes()).await
+        let mut buf: [u8; 32] = *shared_secret_image.as_bytes();
+
+        if let Some(encryptor) = &mut write_encryptor {
+            encryptor.apply(&mut buf);
+        }
+
+        stream.write(&buf).await
             .map_err(PacketStreamError::Stream)?;
 
         stream.flush().await
@@ -889,6 +895,10 @@ impl<S: Stream> PacketStream<S> {
 
         stream.read_exact(&mut buf).await
             .map_err(PacketStreamError::Stream)?;
+
+        if let Some(encryptor) = &mut read_encryptor {
+            encryptor.apply(&mut buf);
+        }
 
         if &buf != shared_secret_image.as_bytes() {
             return Err(PacketStreamError::InvalidSharedSecretImage);
