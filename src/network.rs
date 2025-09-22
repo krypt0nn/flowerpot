@@ -90,9 +90,19 @@ impl Transport for TcpSocket {
 
         let (stream, address) = listener.accept()?;
 
+        let local_address = stream.local_addr()?;
+        let remote_address = address;
+
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            ?local_address,
+            ?remote_address,
+            "tcp connection accepted"
+        );
+
         Ok(TcpStream {
-            local_address: stream.local_addr()?,
-            remote_address: address,
+            local_address,
+            remote_address,
             stream
         })
     }
@@ -103,9 +113,19 @@ impl Transport for TcpSocket {
     ) -> Result<Self::Stream, Self::Error> {
         let stream = std::net::TcpStream::connect(address)?;
 
+        let local_address = stream.local_addr()?;
+        let remote_address = stream.peer_addr()?;
+
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            ?local_address,
+            ?remote_address,
+            "tcp connection established"
+        );
+
         Ok(TcpStream {
-            local_address: stream.local_addr()?,
-            remote_address: stream.peer_addr()?,
+            local_address,
+            remote_address,
             stream
         })
     }
@@ -133,18 +153,38 @@ impl Stream for TcpStream {
 
     #[inline]
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        Ok(self.stream.read(buf)?)
+        let n = self.stream.read(buf)?;
+
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            len = buf.len(),
+            "read bytes from the tcp stream"
+        );
+
+        Ok(n)
     }
 
     #[inline]
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
         self.stream.read_exact(buf)?;
 
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            len = buf.len(),
+            "read bytes from the tcp stream"
+        );
+
         Ok(())
     }
 
     #[inline]
     async fn write(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            len = buf.len(),
+            "send bytes to the tcp stream"
+        );
+
         self.stream.write_all(buf)?;
 
         Ok(())

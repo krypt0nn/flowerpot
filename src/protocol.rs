@@ -743,11 +743,17 @@ impl<S: Stream> PacketStream<S> {
     /// This method will exchange some handshake info, read incoming data and
     /// if handshake was successful - provide simple interface to send and
     /// receive packets over the network.
-    pub async fn new(
+    pub async fn init(
         secret_key: &k256::ecdh::EphemeralSecret,
         options: PacketStreamOptions,
         mut stream: S
     ) -> Result<Self, PacketStreamError<S>> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            ?options,
+            "initializing packet stream connection"
+        );
+
         // Prepare public key for key exchange.
         let public_key = secret_key.public_key()
             .to_sec1_bytes();
@@ -904,6 +910,12 @@ impl<S: Stream> PacketStream<S> {
             return Err(PacketStreamError::InvalidSharedSecretImage);
         }
 
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            ?encryption_algorithm,
+            "packet stream connection initialized"
+        );
+
         Ok(Self {
             stream,
             endpoint_id: endpoint_id.into(),
@@ -944,6 +956,9 @@ impl<S: Stream> PacketStream<S> {
             return Err(PacketStreamError::PacketTooLarge);
         }
 
+        #[cfg(feature = "tracing")]
+        tracing::trace!(?length, "send packet");
+
         let mut length: [u8; 4] = (length as u32).to_le_bytes();
 
         if let Some(encryptor) = &mut self.write_encryptor {
@@ -976,6 +991,9 @@ impl<S: Stream> PacketStream<S> {
 
         let mut packet = vec![0; u32::from_le_bytes(length) as usize];
 
+        #[cfg(feature = "tracing")]
+        tracing::trace!(length = packet.len(), "recv packet");
+
         self.stream.read_exact(&mut packet).await
             .map_err(PacketStreamError::Stream)?;
 
@@ -996,16 +1014,16 @@ impl<S: Stream> PacketStream<S> {
     /// method.
     ///
     /// This method can be used to search for a requested packet.
-    pub async fn peek<F: Future<Output = bool>>(
+    pub async fn peek(
         &mut self,
-        mut callback: impl FnMut(&Packet) -> F
+        mut callback: impl FnMut(&Packet) -> bool
     ) -> Result<Packet, PacketStreamError<S>> {
         let mut peek_queue = Vec::new();
 
         loop {
             let packet = self.recv().await?;
 
-            if callback(&packet).await {
+            if callback(&packet) {
                 self.peek_queue.extend(peek_queue);
 
                 return Ok(packet);
