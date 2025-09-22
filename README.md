@@ -30,15 +30,18 @@ Some key points:
 
 - [ ] Transition to abstract transport protocols for communication
     - [x] Implement base protocol and transport abstraction
-    - [ ] Rewrite client code to use internal connection
-    - [ ] Rewrite shards pool to keep active connections as transport streams
-    - [ ] Implement batched protocol methods in the shards pool
+    - [ ] Rewrite client and shards into a single node client
+        - [x] Implement viewer struct for a packets stream
+        - [x] Implement blocks sync code which will aggregate blocks from all
+              the available connections and run the fork selection algorithm
+        - [ ] Implement method to receive new connections
+        - [ ] Implement method to process incoming packets
     - [ ] Rewrite validator code
-    - [ ] Rewrite shard code
 - [ ] Rework blocks and transactions
     - [ ] Remove zstd compression since it's not reliable
     - [ ] Make transactions have multiple types; implement `Mint` and `Data`
           type transactions
+    - [ ] Remove json serialization
 - [ ] Implement gas system
     - [ ] Calculate transaction gas usage (`ceil(size_in_bytes * alpha)`)
     - [ ] Calculate total block gas usage (sum of transactions' gas usage)
