@@ -16,6 +16,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use std::collections::VecDeque;
 use std::io::{Read, Cursor};
 
 use varint_rs::*;
@@ -702,7 +703,8 @@ pub struct PacketStream<S: Stream> {
     endpoint_id: [u8; 32],
     shared_secret: [u8; 32],
     read_encryptor: Option<PacketStreamEncryptor>,
-    write_encryptor: Option<PacketStreamEncryptor>
+    write_encryptor: Option<PacketStreamEncryptor>,
+    peek_queue: VecDeque<Packet>
 }
 
 impl<S: Stream> PacketStream<S> {
@@ -897,7 +899,8 @@ impl<S: Stream> PacketStream<S> {
             endpoint_id: endpoint_id.into(),
             shared_secret: shared_secret.into(),
             read_encryptor,
-            write_encryptor
+            write_encryptor,
+            peek_queue: VecDeque::new()
         })
     }
 
@@ -952,6 +955,10 @@ impl<S: Stream> PacketStream<S> {
 
     /// Receive packet.
     pub async fn recv(&mut self) -> Result<Packet, PacketStreamError<S>> {
+        if let Some(packet) = self.peek_queue.pop_front() {
+            return Ok(packet);
+        }
+
         let mut length = [0; 4];
 
         self.stream.read_exact(&mut length).await
@@ -971,6 +978,31 @@ impl<S: Stream> PacketStream<S> {
             .map_err(PacketStreamError::Packet)?;
 
         Ok(packet)
+    }
+
+    /// Receive packets and send them to the provided callback until it returns
+    /// `true`. Packet which got `true` from the callback will be returned by
+    /// this method. Other packets will be put into a queue of the `recv`
+    /// method.
+    ///
+    /// This method can be used to search for a requested packet.
+    pub async fn peek<F: Future<Output = bool>>(
+        &mut self,
+        mut callback: impl FnMut(&Packet) -> F
+    ) -> Result<Packet, PacketStreamError<S>> {
+        let mut peek_queue = Vec::new();
+
+        loop {
+            let packet = self.recv().await?;
+
+            if callback(&packet).await {
+                self.peek_queue.extend(peek_queue);
+
+                return Ok(packet);
+            }
+
+            peek_queue.push(packet);
+        }
     }
 }
 
