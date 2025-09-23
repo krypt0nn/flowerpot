@@ -16,7 +16,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use spin::RwLock;
 
 use crate::crypto::*;
 use crate::block::{Block, Error as BlockError};
@@ -86,8 +89,8 @@ impl Default for NodeOptions {
 pub struct Node<T: Stream, F: Storage> {
     root_block: Hash,
     streams: HashMap<[u8; 32], PacketStream<T>>,
-    stream_i: usize,
     storage: Option<F>,
+    is_synced: bool,
     history: Vec<Hash>,
     pending_blocks: HashMap<Hash, Block>,
     pending_transactions: HashMap<Hash, Transaction>
@@ -99,8 +102,8 @@ impl<T: Stream, F: Storage> Node<T, F> {
         Ok(Self {
             root_block: root_block.into(),
             streams: HashMap::new(),
-            stream_i: 0,
             storage: None,
+            is_synced: false,
             history: Vec::new(),
             pending_blocks: HashMap::new(),
             pending_transactions: HashMap::new()
@@ -154,6 +157,9 @@ impl<T: Stream, F: Storage> Node<T, F> {
     where
         F::Error: 'static
     {
+        #[cfg(feature = "tracing")]
+        tracing::info!("synchronizing node state");
+
         if self.streams.is_empty() {
             return Ok(());
         }
@@ -211,129 +217,243 @@ impl<T: Stream, F: Storage> Node<T, F> {
             history.push(block.hash);
         }
 
+        self.is_synced = true;
         self.history = history;
 
         Ok(())
     }
 
-    /// Read packet from connected streams and process it.
-    pub async fn listen(
-        &mut self,
-        options: &NodeOptions
-    ) -> Result<(), NodeError<T, F>> {
-        // Not using futures::select or similar methods here because they're not
-        // cancel safe. Some more complicated approach is needed.
+    /// Start the node server.
+    ///
+    /// This method will use the provided `spawner` callback to spawn background
+    /// async tasks which will be listening to the available packet streams and
+    /// process incoming packets. The method itself will be listening for new
+    /// connections and continue spawning the tasks.
+    ///
+    /// All the non-critical errors will be silenced and displayed in tracing
+    /// logs only.
+    pub async fn start(
+        mut self,
+        options: NodeOptions,
+        mut spawner: impl FnMut(Box<dyn std::future::Future<Output = ()>>)
+    ) -> Result<(), NodeError<T, F>>
+    where
+        T: 'static,
+        F: 'static
+    {
+        #[cfg(feature = "tracing")]
+        tracing::info!("starting the node");
 
-        let mut stream = self.streams.values_mut()
-            .nth(self.stream_i);
+        if !self.is_synced {
+            #[cfg(feature = "tracing")]
+            tracing::info!("syncing the node");
 
-        if stream.is_none() {
-            if self.stream_i == 0 {
-                return Ok(());
-            }
-
-            self.stream_i = 0;
-
-            stream = self.streams.values_mut().next();
+            self.sync().await?;
         }
 
-        let Some(stream) = stream else {
-            return Ok(());
-        };
+        let mut existing_streams = HashSet::new();
 
-        self.stream_i += 1;
+        let history = Arc::new(RwLock::new(self.history));
+        let pending_blocks = Arc::new(RwLock::new(self.pending_blocks));
+        let pending_transactions = Arc::new(RwLock::new(self.pending_transactions));
 
-        // TODO: timeout support
-        let packet = stream.recv().await
-            .map_err(NodeError::PacketStream)?;
+        for (endpoint_id, mut stream) in self.streams {
+            #[cfg(feature = "tracing")]
+            tracing::info!(
+                endpoint_id = base64_encode(endpoint_id),
+                "spawn endpoint listener"
+            );
 
-        match packet {
-            Packet::AskHistory {
-                root_block,
-                offset,
-                max_length
-            } if root_block == self.root_block => {
-                let history = self.history.iter()
-                    .skip(offset as usize)
-                    .take(options.max_history_length.min(max_length as usize))
-                    .copied()
-                    .collect();
+            existing_streams.insert(endpoint_id);
 
-                stream.send(Packet::History {
-                    root_block,
-                    offset,
-                    history
-                }).await.map_err(NodeError::PacketStream)?;
-            }
+            let root_block = self.root_block;
+            let storage = self.storage.clone();
 
-            Packet::AskPendingBlocks {
-                root_block
-            } if root_block == self.root_block => {
-                let pending_blocks = self.pending_blocks.iter()
-                    .map(|(hash, block)| {
-                        let approvals = block.approvals()
-                            .to_vec()
-                            .into_boxed_slice();
+            let history = history.clone();
+            let pending_blocks = pending_blocks.clone();
+            let pending_transactions = pending_transactions.clone();
 
-                        (*hash, approvals)
-                    })
-                    .collect();
+            spawner(Box::new(async move {
+                loop {
+                    // TODO: timeout support
+                    let packet = stream.recv().await;
 
-                stream.send(Packet::PendingBlocks {
-                    root_block,
-                    pending_blocks
-                }).await.map_err(NodeError::PacketStream)?;
-            }
+                    match packet {
+                        Ok(packet) => {
+                            match packet {
+                                Packet::AskHistory {
+                                    root_block: received_root_block,
+                                    offset,
+                                    max_length
+                                } if received_root_block == root_block => {
+                                    let history = history.read()
+                                        .iter()
+                                        .skip(offset as usize)
+                                        .take(options.max_history_length.min(max_length as usize))
+                                        .copied()
+                                        .collect();
 
-            Packet::AskPendingTransactions {
-                root_block
-            } if root_block == self.root_block => {
-                let pending_transactions = self.pending_transactions.keys()
-                    .copied()
-                    .collect();
+                                    if let Err(err) = stream.send(Packet::History {
+                                        root_block,
+                                        offset,
+                                        history
+                                    }).await {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::error!(
+                                            err = err.to_string(),
+                                            "failed to send packet to the packets stream"
+                                        );
 
-                stream.send(Packet::PendingTransactions {
-                    root_block,
-                    pending_transactions
-                }).await.map_err(NodeError::PacketStream)?;
-            }
+                                        break;
+                                    }
+                                }
 
-            Packet::AskBlock {
-                root_block,
-                target_block
-            } if root_block == self.root_block => {
-                if let Some(block) = self.pending_blocks.get(&target_block) {
-                    stream.send(Packet::Block {
-                        root_block,
-                        block: block.clone()
-                    }).await.map_err(NodeError::PacketStream)?;
+                                Packet::AskPendingBlocks {
+                                    root_block: received_root_block
+                                } if received_root_block == root_block => {
+                                    let pending_blocks = pending_blocks.read()
+                                        .iter()
+                                        .map(|(hash, block)| {
+                                            let approvals = block.approvals()
+                                                .to_vec()
+                                                .into_boxed_slice();
+
+                                            (*hash, approvals)
+                                        })
+                                        .collect();
+
+                                    if let Err(err) = stream.send(Packet::PendingBlocks {
+                                        root_block,
+                                        pending_blocks
+                                    }).await {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::error!(
+                                            err = err.to_string(),
+                                            "failed to send packet to the packets stream"
+                                        );
+
+                                        break;
+                                    }
+                                }
+
+                                Packet::AskPendingTransactions {
+                                    root_block: received_root_block
+                                } if received_root_block == root_block => {
+                                    let pending_transactions = pending_transactions.read()
+                                        .keys()
+                                        .copied()
+                                        .collect();
+
+                                    if let Err(err) = stream.send(Packet::PendingTransactions {
+                                        root_block,
+                                        pending_transactions
+                                    }).await {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::error!(
+                                            err = err.to_string(),
+                                            "failed to send packet to the packets stream"
+                                        );
+
+                                        break;
+                                    }
+                                }
+
+                                Packet::AskBlock {
+                                    root_block: received_root_block,
+                                    target_block
+                                } if received_root_block == root_block => {
+                                    if let Some(block) = pending_blocks.read().get(&target_block) {
+                                        if let Err(err) = stream.send(Packet::Block {
+                                            root_block,
+                                            block: block.clone()
+                                        }).await {
+                                            #[cfg(feature = "tracing")]
+                                            tracing::error!(
+                                                err = err.to_string(),
+                                                "failed to send packet to the packets stream"
+                                            );
+
+                                            break;
+                                        }
+                                    }
+
+                                    else if let Some(storage) = &storage {
+                                        match storage.read_block(&target_block) {
+                                            Ok(Some(block)) => {
+                                                if let Err(err) = stream.send(Packet::Block {
+                                                    root_block,
+                                                    block
+                                                }).await {
+                                                    #[cfg(feature = "tracing")]
+                                                    tracing::error!(
+                                                        err = err.to_string(),
+                                                        "failed to send packet to the packets stream"
+                                                    );
+
+                                                    break;
+                                                }
+                                            }
+
+                                            Ok(None) => (),
+
+                                            Err(err) => {
+                                                #[cfg(feature = "tracing")]
+                                                tracing::error!(
+                                                    ?err,
+                                                    "failed to read block from the storage"
+                                                );
+
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Packet::AskTransaction {
+                                    root_block: received_root_block,
+                                    transaction
+                                } if received_root_block == root_block => {
+                                    #[allow(clippy::collapsible_if)]
+                                    if let Some(transaction) = pending_transactions.read().get(&transaction) {
+                                        if let Err(err) = stream.send(Packet::Transaction {
+                                            root_block,
+                                            transaction: transaction.clone()
+                                        }).await {
+                                            #[cfg(feature = "tracing")]
+                                            tracing::error!(
+                                                err = err.to_string(),
+                                                "failed to send packet to the packets stream"
+                                            );
+
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                _ => ()
+                            }
+                        }
+
+                        Err(err) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::error!(
+                                err = err.to_string(),
+                                "failed to read packet from the packets stream"
+                            );
+
+                            break;
+                        }
+                    }
                 }
-
-                else if let Some(storage) = &self.storage
-                    && let Some(block) = storage.read_block(&target_block).map_err(NodeError::Storage)?
-                {
-                    stream.send(Packet::Block {
-                        root_block,
-                        block
-                    }).await.map_err(NodeError::PacketStream)?;
-                }
-            }
-
-            Packet::AskTransaction {
-                root_block,
-                transaction
-            } if root_block == self.root_block => {
-                if let Some(transaction) = self.pending_transactions.get(&transaction) {
-                    stream.send(Packet::Transaction {
-                        root_block,
-                        transaction: transaction.clone()
-                    }).await.map_err(NodeError::PacketStream)?;
-                }
-            }
-
-            _ => ()
+            }));
         }
 
         Ok(())
     }
+}
+
+/// A helper struct connected to the running node. It can be used to perform
+/// client-side operations like announcing transactions to the network.
+pub struct NodeHandler {
+
 }

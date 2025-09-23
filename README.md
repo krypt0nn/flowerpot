@@ -32,14 +32,25 @@ Some key points:
         - [x] Implement viewer struct for a packets stream
         - [x] Implement blocks sync code which will aggregate blocks from all
               the available connections and run the fork selection algorithm
-        - [ ] Implement method to receive new connections
-        - [ ] Implement method to process incoming packets
+        - [ ] Implement streams listening and packets processing
+        - [ ] Implement node handler to send new transactions and perform other
+              client-side actions
     - [ ] Rewrite validator code
 - [ ] Rework blocks and transactions
     - [x] Remove zstd compression since it's not reliable
     - [x] Remove json serialization
     - [ ] Make transactions have multiple types; implement `Mint` and `Data`
           type transactions
+- [ ] Rework project structure
+    - [ ] Rename github repository to `flowerpot`
+    - [ ] Move `libflowerpot` into a separate workspace
+    - [ ] Create `bouquet` CLI tool
+        - [ ] Create keypairs (public/secret keys)
+        - [ ] Create new transactions
+        - [ ] Send transactions to the network
+        - [ ] Create new blockchains
+        - [ ] Connect to a blockchain and monitor its activity
+        - [ ] Show blockchain status
 - [ ] Implement gas system
     - [ ] Calculate transaction gas usage (`ceil(size_in_bytes * alpha)`)
     - [ ] Calculate total block gas usage (sum of transactions' gas usage)
@@ -52,7 +63,7 @@ Some key points:
     - [ ] Implement PoW task based on the [DodoPoW](https://github.com/krypt0nn/dodopow)
     - [ ] Implement tasks verification and balance updating logic on transaction
           staging
-    - [ ] Make default mining software
+    - [ ] Add mining-related functionality to the `bouquet` CLI tool
 - [ ] Rework validators system
     - [ ] Remove different block types, keep only transactions list
     - [ ] Add new transaction type which will make its author a validator in
