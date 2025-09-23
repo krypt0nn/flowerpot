@@ -24,7 +24,7 @@ use crate::transaction::Transaction;
 use crate::storage::Storage;
 use crate::network::Stream;
 use crate::protocol::{Packet, PacketStream, PacketStreamError};
-use crate::viewer::{Viewer, ViewerError, ValidBlock};
+use crate::viewer::{BatchedViewer, ViewerError};
 
 #[derive(Debug,thiserror::Error)]
 pub enum NodeError<T: Stream, F: Storage> {
@@ -150,138 +150,65 @@ impl<T: Stream, F: Storage> Node<T, F> {
     ///    then it's forcely removed from the network. This is needed to prevent
     ///    people from creating validators which don't participate in the
     ///    network maintenance and break the 2/3 validators rule.
-    pub async fn sync(&mut self) -> Result<(), NodeError<T, F>> {
+    pub async fn sync(&mut self) -> Result<(), NodeError<T, F>>
+    where
+        F::Error: 'static
+    {
         if self.streams.is_empty() {
             return Ok(());
         }
 
-        let mut viewers = Vec::with_capacity(self.streams.len());
+        let mut viewer = match &self.storage {
+            Some(storage) => {
+                let viewer = BatchedViewer::open_from_storage(
+                    self.streams.values_mut(),
+                    storage
+                ).await.map_err(NodeError::Viewer)?;
 
-        for stream in self.streams.values_mut() {
-            let viewer = Viewer::open(stream, self.root_block).await
-                .map_err(NodeError::Viewer)?;
+                match viewer {
+                    Some(viewer) => viewer,
 
-            viewers.push(viewer);
-        }
+                    // Fallback to network viewer if storage is empty.
+                    None => {
+                        BatchedViewer::open(
+                            self.streams.values_mut(),
+                            self.root_block
+                        ).await.map_err(NodeError::Viewer)?
+                    }
+                }
+            }
 
-        // let mut viewers = BatchedViewer::open(
-        //     self.streams.values_mut(),
-        //     self.root_block
-        // ).await.map_err(NodeError::Viewer)?;
+            None => {
+                BatchedViewer::open(
+                    self.streams.values_mut(),
+                    self.root_block
+                ).await.map_err(NodeError::Viewer)?
+            }
+        };
 
-        // Iterate through all the available viewers and using these two
-        // block pointers synchronize the history.
-        let mut prev_block = self.root_block;
-        let mut curr_block: Option<ValidBlock> = None;
         let mut history = Vec::with_capacity(self.history.len());
 
+        history.push(self.root_block);
+
         loop {
-            history.push(prev_block);
+            let block = match &self.storage {
+                Some(storage) => viewer.forward_with_storage(storage).await
+                    .map_err(NodeError::Viewer)?,
 
-            // Select current block from all the available viewers.
-            for viewer in &mut viewers {
-                let block = viewer.forward().await
-                    .map_err(NodeError::Viewer)?;
+                None => viewer.forward().await
+                    .map_err(NodeError::Viewer)?
+            };
 
-                if let Some(block) = block {
-                    if block.block.previous() != &prev_block {
-                        // TODO: remove the viewer (has different history than us)
-
-                        continue;
-                    }
-
-                    if let Some(curr_block) = &mut curr_block {
-                        let curr_distance = crate::block_validator_distance(
-                            &prev_block,
-                            &curr_block.public_key
-                        );
-
-                        let new_distance = crate::block_validator_distance(
-                            &prev_block,
-                            &block.public_key
-                        );
-
-                        if new_distance < curr_distance {
-                            *curr_block = block;
-                        }
-                    }
-
-                    else {
-                        curr_block = Some(block);
-                    }
-                }
-            }
-
-            // If storage is available - then compare selected current block
-            // with the stored one, or write it to the storage if there's none.
-            if let Some(storage) = &self.storage {
-                let storage_block = storage.next_block(&prev_block)
-                    .map_err(NodeError::Storage)?
-                    .and_then(|block| {
-                        storage.read_block(&block)
-                            .transpose()
-                    })
-                    .transpose()
-                    .map_err(NodeError::Storage)?
-                    .map(|block| {
-                        match block.verify() {
-                            Ok((false, _, _)) => Ok(None),
-
-                            Ok((true, hash, public_key)) => {
-                                Ok(Some(ValidBlock {
-                                    block,
-                                    hash,
-                                    public_key
-                                }))
-                            }
-
-                            Err(err) => Err(err)
-                        }
-                    })
-                    .transpose()
-                    .map_err(NodeError::Block)?
-                    .flatten();
-
-                match (&mut curr_block, storage_block) {
-                    (Some(curr_block), Some(storage_block)) => {
-                        let curr_distance = crate::block_validator_distance(
-                            &prev_block,
-                            &curr_block.public_key
-                        );
-
-                        let new_distance = crate::block_validator_distance(
-                            &prev_block,
-                            &storage_block.public_key
-                        );
-
-                        if new_distance < curr_distance {
-                            *curr_block = storage_block;
-                        } else {
-                            storage.write_block(&curr_block.block)
-                                .map_err(NodeError::Storage)?;
-                        }
-                    }
-
-                    (Some(curr_block), None) => {
-                        storage.write_block(&curr_block.block)
-                            .map_err(NodeError::Storage)?;
-                    }
-
-                    (None, Some(storage_block)) => {
-                        curr_block = Some(storage_block);
-                    }
-
-                    (None, None) => ()
-                }
-            }
-
-            // Break the sync loop if no block found.
-            let Some(block) = curr_block else {
+            let Some(block) = block else {
                 break;
             };
 
-            prev_block = block.hash;
-            curr_block = None;
+            if let Some(storage) = &self.storage {
+                storage.write_block(&block.block)
+                    .map_err(NodeError::Storage)?;
+            }
+
+            history.push(block.hash);
         }
 
         self.history = history;
