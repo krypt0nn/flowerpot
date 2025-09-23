@@ -33,7 +33,7 @@ pub mod ram_storage;
 #[cfg(feature = "sqlite_storage")]
 pub mod sqlite_storage;
 
-pub trait Storage {
+pub trait Storage: Clone {
     type Error: std::error::Error;
 
     /// Get hash of the root block if it's available.

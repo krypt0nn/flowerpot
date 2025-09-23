@@ -17,7 +17,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::crypto::*;
 use crate::block::{Block, BlockContent, Error as BlockError};
@@ -33,11 +33,11 @@ pub enum Error {
     Block(#[from] BlockError)
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct RamStorage {
-    blocks: RwLock<HashMap<Hash, Block>>,
-    history: RwLock<Vec<Hash>>,
-    root_validator: RwLock<Option<PublicKey>>
+    blocks: Arc<RwLock<HashMap<Hash, Block>>>,
+    history: Arc<RwLock<Vec<Hash>>>,
+    root_validator: Arc<RwLock<Option<PublicKey>>>
 }
 
 impl RamStorage {
