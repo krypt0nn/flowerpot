@@ -57,6 +57,19 @@ pub struct NodeOptions {
     /// Default is `1024`.
     pub max_history_length: usize,
 
+    /// Maximal size in bytes of a transaction.
+    ///
+    /// Bigger transactions will be rejected immediately upon receiving.
+    ///
+    /// It is recommended to keep this value high enough because network nodes
+    /// spend gas to add transactions to the blockchain which already limits
+    /// how many data they can practically send to the network.
+    ///
+    /// > This is applied to the `Transaction` packets only.
+    ///
+    /// Default is `33554432` bytes (128 MB).
+    pub max_transaction_size: usize,
+
     /// Accept incoming pending blocks and store them in the memory until
     /// approved.
     ///
@@ -81,17 +94,35 @@ pub struct NodeOptions {
     /// This option is needed when you use blockchain for your own application
     /// and you want to accept blocks of special format only.
     ///
+    /// This filter function is applied to the `Block` packets only.
+    ///
     /// Default is `None`.
-    pub blocks_filter: Option<fn(&Hash, &PublicKey, &Block) -> bool>
+    pub blocks_filter: Option<fn(&Hash, &PublicKey, &Block) -> bool>,
+
+    /// When specified this function will be used to filter incoming
+    /// transactions and accept only those for which the provided function
+    /// returned `true`.
+    ///
+    /// This option is needed when you use blockchain for your own application
+    /// and you want to accept transactions of special format only.
+    ///
+    /// This filter function is applied to the `Transaction` packets only.
+    /// It is not applied to the blocks, so you'd need to specify the
+    /// `blocks_filter` as well.
+    ///
+    /// Default is `None`.
+    pub transactions_filter: Option<fn(&Hash, &PublicKey, &Transaction) -> bool>
 }
 
 impl Default for NodeOptions {
     fn default() -> Self {
         Self {
             max_history_length: 1024,
+            max_transaction_size: 32 * 1024 * 1024,
             accept_pending_blocks: true,
             accept_pending_transactions: true,
-            blocks_filter: None
+            blocks_filter: None,
+            transactions_filter: None
         }
     }
 }
@@ -639,6 +670,73 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                             break;
                                         }
                                     }
+                                }
+
+                                // If we received some transaction.
+                                Packet::Transaction {
+                                    root_block: received_root_block,
+                                    transaction
+                                } if received_root_block == root_block
+                                    && options.accept_pending_transactions => {
+                                    // TODO: check if this transaction is already
+                                    // stored in some block!!!!!!!!!
+
+                                    // Reject large transactions.
+                                    if transaction.data().len() > options.max_transaction_size {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::warn!(
+                                            ?endpoint_id,
+                                            "received too large transaction"
+                                        );
+
+                                        continue;
+                                    }
+
+                                    // Verify received transaction.
+                                    let (is_valid, hash, public_key) = match transaction.verify() {
+                                        Ok(result) => result,
+                                        Err(err) => {
+                                            #[cfg(feature = "tracing")]
+                                            tracing::error!(
+                                                ?err,
+                                                ?endpoint_id,
+                                                "failed to verify received transaction"
+                                            );
+
+                                            continue;
+                                        }
+                                    };
+
+                                    // Skip transaction if it's invalid.
+                                    if !is_valid {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::warn!(
+                                            ?endpoint_id,
+                                            hash = hash.to_base64(),
+                                            public_key = public_key.to_base64(),
+                                            "received invalid block"
+                                        );
+
+                                        continue;
+                                    }
+
+                                    // Check this transaction using the provided filter.
+                                    if let Some(filter) = &options.transactions_filter
+                                        && !filter(&hash, &public_key, &transaction)
+                                    {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::debug!(
+                                            ?endpoint_id,
+                                            hash = hash.to_base64(),
+                                            public_key = public_key.to_base64(),
+                                            "received block which was filtered out"
+                                        );
+
+                                        continue;
+                                    }
+
+                                    pending_transactions.write()
+                                        .insert(hash, transaction);
                                 }
 
                                 _ => ()
