@@ -18,6 +18,9 @@
 
 use std::collections::VecDeque;
 
+#[cfg(feature = "encryption-chacha20")]
+use chacha20::cipher::{KeyIvInit, StreamCipher};
+
 use crate::network::Stream;
 
 use super::{Packet, PacketError};
@@ -53,11 +56,14 @@ pub enum PacketStreamEncryption {
     ChaCha8
 }
 
-use chacha20::cipher::{KeyIvInit, StreamCipher};
-
 pub enum PacketStreamEncryptor {
+    #[cfg(feature = "encryption-chacha20")]
     ChaCha20(chacha20::ChaCha20),
+
+    #[cfg(feature = "encryption-chacha20")]
     ChaCha12(chacha20::ChaCha12),
+
+    #[cfg(feature = "encryption-chacha20")]
     ChaCha8(chacha20::ChaCha8)
 }
 
@@ -70,6 +76,7 @@ impl PacketStreamEncryptor {
         iv: &[u8]
     ) -> Option<Self> {
         match algorithm {
+            #[cfg(feature = "encryption-chacha20")]
             PacketStreamEncryption::ChaCha20 |
             PacketStreamEncryption::ChaCha12 |
             PacketStreamEncryption::ChaCha8 => {
@@ -117,15 +124,26 @@ impl PacketStreamEncryptor {
                     }
                 }
             }
+
+            #[allow(unreachable_patterns)]
+            _ => None
         }
     }
 
     /// Apply stream encryption to the provided buffer.
     pub fn apply(&mut self, buf: &mut [u8]) {
         match self {
+            #[cfg(feature = "encryption-chacha20")]
             Self::ChaCha20(encryptor) => encryptor.apply_keystream(buf),
+
+            #[cfg(feature = "encryption-chacha20")]
             Self::ChaCha12(encryptor) => encryptor.apply_keystream(buf),
-            Self::ChaCha8(encryptor)  => encryptor.apply_keystream(buf)
+
+            #[cfg(feature = "encryption-chacha20")]
+            Self::ChaCha8(encryptor)  => encryptor.apply_keystream(buf),
+
+            #[allow(unreachable_patterns)]
+            _ => ()
         }
     }
 }
@@ -218,9 +236,17 @@ impl<S: Stream> PacketStream<S> {
 
         for algorithm in &options.encryption_algorithms {
             options_byte |= match algorithm {
+                #[cfg(feature = "encryption-chacha20")]
                 PacketStreamEncryption::ChaCha20 => Self::V1_CHACHA20_ENCRYPTION,
+
+                #[cfg(feature = "encryption-chacha20")]
                 PacketStreamEncryption::ChaCha12 => Self::V1_CHACHA12_ENCRYPTION,
-                PacketStreamEncryption::ChaCha8  => Self::V1_CHACHA8_ENCRYPTION
+
+                #[cfg(feature = "encryption-chacha20")]
+                PacketStreamEncryption::ChaCha8  => Self::V1_CHACHA8_ENCRYPTION,
+
+                #[allow(unreachable_patterns)]
+                _ => 0
             };
         }
 
@@ -284,14 +310,17 @@ impl<S: Stream> PacketStream<S> {
         // Decode options.
         let mut supported_encryption = Vec::with_capacity(3);
 
+        #[cfg(feature = "encryption-chacha20")]
         if buf[0] & Self::V1_CHACHA20_ENCRYPTION == Self::V1_CHACHA20_ENCRYPTION {
             supported_encryption.push(PacketStreamEncryption::ChaCha20);
         }
 
+        #[cfg(feature = "encryption-chacha20")]
         if buf[0] & Self::V1_CHACHA12_ENCRYPTION == Self::V1_CHACHA12_ENCRYPTION {
             supported_encryption.push(PacketStreamEncryption::ChaCha12);
         }
 
+        #[cfg(feature = "encryption-chacha20")]
         if buf[0] & Self::V1_CHACHA8_ENCRYPTION == Self::V1_CHACHA8_ENCRYPTION {
             supported_encryption.push(PacketStreamEncryption::ChaCha8);
         }
