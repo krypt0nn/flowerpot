@@ -396,6 +396,37 @@ impl<'stream, S: Stream> BatchedViewer<'stream, S> {
         }))
     }
 
+    /// Get current block of the blockchain.
+    ///
+    /// This is the same block which was returned by the last `forward` pass.
+    #[inline]
+    pub const fn current_block(&self) -> &Hash {
+        &self.prev_block
+    }
+
+    /// Get list of current block validators.
+    pub fn current_validators(
+        &self
+    ) -> Result<Vec<PublicKey>, ViewerError<S>> {
+        let mut validators = Vec::new();
+
+        for viewer in &self.viewers {
+            let viewer_validators = viewer.current_validators()
+                .cloned()
+                .collect::<Vec<PublicKey>>();
+
+            if validators.is_empty() {
+                validators = viewer_validators;
+            }
+
+            else if validators != viewer_validators {
+                return Err(ViewerError::BatchedViewerOutOfSync);
+            }
+        }
+
+        Ok(validators)
+    }
+
     /// Request the next block of the blockchain history known to the underlying
     /// nodes, verify and return it. If we've reached the end of the known
     /// history then `Ok(None)` is returned.

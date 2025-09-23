@@ -22,7 +22,7 @@ use std::sync::Arc;
 use spin::RwLock;
 
 use crate::crypto::*;
-use crate::block::{Block, Error as BlockError};
+use crate::block::{Block, BlockStatus, Error as BlockError};
 use crate::transaction::Transaction;
 use crate::storage::Storage;
 use crate::network::Stream;
@@ -92,6 +92,7 @@ pub struct Node<T: Stream, F: Storage> {
     storage: Option<F>,
     is_synced: bool,
     history: Vec<Hash>,
+    validators: Vec<PublicKey>,
     pending_blocks: HashMap<Hash, Block>,
     pending_transactions: HashMap<Hash, Transaction>
 }
@@ -105,6 +106,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
             storage: None,
             is_synced: false,
             history: Vec::new(),
+            validators: Vec::new(),
             pending_blocks: HashMap::new(),
             pending_transactions: HashMap::new()
         })
@@ -217,8 +219,11 @@ impl<T: Stream, F: Storage> Node<T, F> {
             history.push(block.hash);
         }
 
-        self.is_synced = true;
+        self.validators = viewer.current_validators()
+            .map_err(NodeError::Viewer)?;
+
         self.history = history;
+        self.is_synced = true;
 
         Ok(())
     }
@@ -254,22 +259,26 @@ impl<T: Stream, F: Storage> Node<T, F> {
         let mut existing_streams = HashSet::new();
 
         let history = Arc::new(RwLock::new(self.history));
+        let validators = Arc::new(RwLock::new(self.validators));
         let pending_blocks = Arc::new(RwLock::new(self.pending_blocks));
         let pending_transactions = Arc::new(RwLock::new(self.pending_transactions));
 
         for (endpoint_id, mut stream) in self.streams {
+            existing_streams.insert(endpoint_id);
+
+            let endpoint_id = base64_encode(endpoint_id);
+
             #[cfg(feature = "tracing")]
             tracing::info!(
-                endpoint_id = base64_encode(endpoint_id),
+                ?endpoint_id,
                 "spawn endpoint listener"
             );
-
-            existing_streams.insert(endpoint_id);
 
             let root_block = self.root_block;
             let storage = self.storage.clone();
 
             let history = history.clone();
+            let validators = validators.clone();
             let pending_blocks = pending_blocks.clone();
             let pending_transactions = pending_transactions.clone();
 
@@ -281,11 +290,15 @@ impl<T: Stream, F: Storage> Node<T, F> {
                     match packet {
                         Ok(packet) => {
                             match packet {
+                                // If we were asked to share the blockchain
+                                // history.
                                 Packet::AskHistory {
                                     root_block: received_root_block,
                                     offset,
                                     max_length
                                 } if received_root_block == root_block => {
+                                    // Then read max allowed amount of blocks'
+                                    // hashes.
                                     let history = history.read()
                                         .iter()
                                         .skip(offset as usize)
@@ -293,6 +306,8 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         .copied()
                                         .collect();
 
+                                    // And try to send them back to the
+                                    // requester.
                                     if let Err(err) = stream.send(Packet::History {
                                         root_block,
                                         offset,
@@ -301,6 +316,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         #[cfg(feature = "tracing")]
                                         tracing::error!(
                                             err = err.to_string(),
+                                            ?endpoint_id,
                                             "failed to send packet to the packets stream"
                                         );
 
@@ -308,10 +324,13 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     }
                                 }
 
+                                // If we were asked to send the pending blocks
+                                // list.
                                 Packet::AskPendingBlocks {
                                     root_block: received_root_block
                                 } if received_root_block == root_block => {
                                     let pending_blocks = pending_blocks.read()
+                                    // Then collect their hashes and approvals.
                                         .iter()
                                         .map(|(hash, block)| {
                                             let approvals = block.approvals()
@@ -322,6 +341,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         })
                                         .collect();
 
+                                    // And try to send it back to the requester.
                                     if let Err(err) = stream.send(Packet::PendingBlocks {
                                         root_block,
                                         pending_blocks
@@ -329,6 +349,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         #[cfg(feature = "tracing")]
                                         tracing::error!(
                                             err = err.to_string(),
+                                            ?endpoint_id,
                                             "failed to send packet to the packets stream"
                                         );
 
@@ -336,14 +357,18 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     }
                                 }
 
+                                // If we were asked to send the pending
+                                // transactions list.
                                 Packet::AskPendingTransactions {
                                     root_block: received_root_block
                                 } if received_root_block == root_block => {
+                                    // Then collect their hashes.
                                     let pending_transactions = pending_transactions.read()
                                         .keys()
                                         .copied()
                                         .collect();
 
+                                    // And try to send it back to the requester.
                                     if let Err(err) = stream.send(Packet::PendingTransactions {
                                         root_block,
                                         pending_transactions
@@ -351,6 +376,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         #[cfg(feature = "tracing")]
                                         tracing::error!(
                                             err = err.to_string(),
+                                            ?endpoint_id,
                                             "failed to send packet to the packets stream"
                                         );
 
@@ -358,11 +384,15 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     }
                                 }
 
+                                // If we were asked to send a block of the
+                                // blockchain.
                                 Packet::AskBlock {
                                     root_block: received_root_block,
                                     target_block
                                 } if received_root_block == root_block => {
+                                    // If this block is pending.
                                     if let Some(block) = pending_blocks.read().get(&target_block) {
+                                        // Then try to send it back.
                                         if let Err(err) = stream.send(Packet::Block {
                                             root_block,
                                             block: block.clone()
@@ -370,6 +400,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                             #[cfg(feature = "tracing")]
                                             tracing::error!(
                                                 err = err.to_string(),
+                                                ?endpoint_id,
                                                 "failed to send packet to the packets stream"
                                             );
 
@@ -377,9 +408,13 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         }
                                     }
 
+                                    // Otherwise, if we have a storage available.
                                     else if let Some(storage) = &storage {
+                                        // Then try to read block from that storage.
                                         match storage.read_block(&target_block) {
+                                            // If we've found the block.
                                             Ok(Some(block)) => {
+                                                // Then try to send it back.
                                                 if let Err(err) = stream.send(Packet::Block {
                                                     root_block,
                                                     block
@@ -387,6 +422,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                                     #[cfg(feature = "tracing")]
                                                     tracing::error!(
                                                         err = err.to_string(),
+                                                        ?endpoint_id,
                                                         "failed to send packet to the packets stream"
                                                     );
 
@@ -394,12 +430,16 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                                 }
                                             }
 
+                                            // If block doesn't exist - then do
+                                            // nothing.
                                             Ok(None) => (),
 
+                                            // And if we failed - log it.
                                             Err(err) => {
                                                 #[cfg(feature = "tracing")]
                                                 tracing::error!(
                                                     ?err,
+                                                    ?endpoint_id,
                                                     "failed to read block from the storage"
                                                 );
 
@@ -409,12 +449,160 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     }
                                 }
 
+                                // If we received some block.
+                                Packet::Block {
+                                    root_block: received_root_block,
+                                    mut block
+                                } if received_root_block == root_block => {
+                                    // Verify the block and obtain its hash.
+                                    let (is_valid, hash, public_key) = match block.verify() {
+                                        Ok(result) => result,
+                                        Err(err) => {
+                                            #[cfg(feature = "tracing")]
+                                            tracing::error!(
+                                                ?err,
+                                                ?endpoint_id,
+                                                "failed to verify received block"
+                                            );
+
+                                            continue;
+                                        }
+                                    };
+
+                                    // Skip the block if it's invalid.
+                                    if !is_valid || !validators.read().contains(&public_key) {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::warn!(
+                                            ?endpoint_id,
+                                            hash = hash.to_base64(),
+                                            public_key = public_key.to_base64(),
+                                            "received invalid block"
+                                        );
+
+                                        continue;
+                                    }
+
+                                    // Check if we already have this block, and
+                                    // if we do - then merge approvals because
+                                    // already stored block can have more than
+                                    // in what we received.
+                                    if let Some(curr_block) = pending_blocks.read().get(&hash) {
+                                        for approval in curr_block.approvals() {
+                                            if !block.approvals.contains(approval) {
+                                                block.approvals.push(approval.clone());
+                                            }
+                                        }
+                                    }
+
+                                    // Check the block's approval status.
+                                    let status = BlockStatus::validate(
+                                        hash,
+                                        public_key,
+                                        block.approvals(),
+                                        validators.read().iter()
+                                    );
+
+                                    match status {
+                                        // Block is valid and approved by enough validators.
+                                        Ok(BlockStatus::Approved {
+                                            approvals,
+                                            ..
+                                        }) => {
+                                            // Update received block's approvals list
+                                            // to remove any invalid signatures.
+                                            block.approvals = approvals.into_iter()
+                                                .map(|(approval, _)| approval)
+                                                .collect();
+
+                                            let mut lock = history.write();
+                                            let n = lock.len();
+
+                                            // If this block is a continuation of the
+                                            // blockchain then we simply push it to
+                                            // the end of the history, update the storage
+                                            // and validators list, remove related
+                                            // pending transactions.
+                                            if &lock[n - 1] == block.previous() {
+                                                lock.push(hash);
+
+                                                todo!()
+                                            }
+
+                                            // If this block is a *replacement* for the
+                                            // last block of the blockchain - then we
+                                            // must compare its xor distance to decide
+                                            // what to do.
+                                            else if n > 1 && &lock[n - 1] == block.previous() {
+                                                todo!()
+                                            }
+                                        }
+
+                                        // Block is valid but not approved by enough validators.
+                                        Ok(BlockStatus::NotApproved {
+                                            approvals,
+                                            ..
+                                        }) => {
+                                            // Try to read the last block of the blockchain.
+                                            if let Some(last_block) = history.read().last() {
+                                                // Update received block's approvals list
+                                                // to remove any invalid signatures.
+                                                block.approvals = approvals.into_iter()
+                                                    .map(|(approval, _)| approval)
+                                                    .collect();
+
+                                                // If this block is the potential new block
+                                                // for the blockchain then, if options allow
+                                                // it, we should store it in the pending
+                                                // blocks pool.
+                                                if last_block == block.previous()
+                                                    && options.accept_pending_blocks
+                                                {
+                                                    pending_blocks.write()
+                                                        .insert(hash, block);
+
+                                                    // TODO: if we didn't have this block
+                                                    // stored before - then we should send
+                                                    // it to all the other connected nodes.
+                                                }
+                                            }
+                                        }
+
+                                        // Block is invalid.
+                                        Ok(BlockStatus::Invalid) => {
+                                            #[cfg(feature = "tracing")]
+                                            tracing::warn!(
+                                                ?endpoint_id,
+                                                hash = hash.to_base64(),
+                                                "received invalid block"
+                                            );
+                                        }
+
+                                        // Failed to check the block.
+                                        Err(err) => {
+                                            #[cfg(feature = "tracing")]
+                                            tracing::error!(
+                                                ?err,
+                                                ?endpoint_id,
+                                                hash = hash.to_base64(),
+                                                "failed to validate received block"
+                                            );
+                                        }
+                                    }
+                                }
+
+                                // If we were asked to send transaction.
                                 Packet::AskTransaction {
                                     root_block: received_root_block,
                                     transaction
                                 } if received_root_block == root_block => {
+                                    // If it is a pending transaction.
+                                    let transaction = pending_transactions.read()
+                                        .get(&transaction)
+                                        .cloned();
+
                                     #[allow(clippy::collapsible_if)]
-                                    if let Some(transaction) = pending_transactions.read().get(&transaction) {
+                                    if let Some(transaction) = transaction {
+                                        // Then try to send it back.
                                         if let Err(err) = stream.send(Packet::Transaction {
                                             root_block,
                                             transaction: transaction.clone()
@@ -422,6 +610,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                             #[cfg(feature = "tracing")]
                                             tracing::error!(
                                                 err = err.to_string(),
+                                                ?endpoint_id,
                                                 "failed to send packet to the packets stream"
                                             );
 
@@ -438,6 +627,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                             #[cfg(feature = "tracing")]
                             tracing::error!(
                                 err = err.to_string(),
+                                ?endpoint_id,
                                 "failed to read packet from the packets stream"
                             );
 
