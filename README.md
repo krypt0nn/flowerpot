@@ -74,6 +74,9 @@ Some key points:
           using these distances
     - [ ] Give validator which made a new block some gas fee
           (needs further thinking)
+- [ ] Pre-release preparations
+    - [ ] Resolve all the TODO and FIXME-s
+    - [ ] Test the library in production for some time
 
 Author: [Nikita Podvirnyi](https://github.com/krypt0nn)\
 Licensed under [GPL-3.0](LICENSE)

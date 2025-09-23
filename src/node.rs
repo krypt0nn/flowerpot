@@ -739,6 +739,56 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         .insert(hash, transaction);
                                 }
 
+                                // If we received block approval.
+                                Packet::ApproveBlock {
+                                    root_block: received_root_block,
+                                    target_block,
+                                    approval
+                                } if received_root_block == root_block => {
+                                    // Verify approval.
+                                    let (is_valid, public_key) = match approval.verify(target_block) {
+                                        Ok(result) => result,
+                                        Err(err) => {
+                                            #[cfg(feature = "tracing")]
+                                            tracing::error!(
+                                                ?err,
+                                                ?endpoint_id,
+                                                approval = approval.to_base64(),
+                                                "failed to verify received block approval"
+                                            );
+
+                                            continue;
+                                        }
+                                    };
+
+                                    // Skip approval if it's invalid.
+                                    if !is_valid || !validators.read().contains(&public_key) {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::warn!(
+                                            ?endpoint_id,
+                                            public_key = public_key.to_base64(),
+                                            "received invalid block approval"
+                                        );
+
+                                        continue;
+                                    }
+
+                                    // Add this approval to the block if we have it.
+                                    let mut lock = pending_blocks.write();
+
+                                    if let Some(block) = lock.get_mut(&target_block)
+                                        && !block.approvals.contains(&approval)
+                                    {
+                                        block.approvals.push(approval);
+
+                                        // TODO: check if this approval made the block
+                                        // fully valid and ready to be merged!!!
+
+                                        // TODO: resend this approval (or the block itself)
+                                        // to other connected nodes!!!
+                                    }
+                                }
+
                                 _ => ()
                             }
                         }
