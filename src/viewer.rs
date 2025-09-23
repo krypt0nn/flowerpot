@@ -20,6 +20,7 @@ use std::collections::VecDeque;
 
 use crate::crypto::*;
 use crate::block::{Block, BlockContent, BlockStatus, Error as BlockError};
+use crate::storage::Storage;
 use crate::network::Stream;
 use crate::protocol::{Packet, PacketStream, PacketStreamError};
 
@@ -31,11 +32,17 @@ pub enum ViewerError<S: Stream> {
     #[error(transparent)]
     Block(BlockError),
 
+    #[error("storage error: {0}")]
+    Storage(Box<dyn std::error::Error>),
+
     #[error("stream returned invalid block")]
     InvalidBlock,
 
     #[error("stream returned invalid history")]
-    InvalidHistory
+    InvalidHistory,
+
+    #[error("viewers within the batched viewer are out of sync")]
+    BatchedViewerOutOfSync
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +108,96 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
             pending_history: VecDeque::new(),
             validators: vec![(public_key, 0)]
         })
+    }
+
+    /// Open viewer using blocks stored in the provided storage. We will assume
+    /// that all the blocks in that storage are validates and that the provided
+    /// stream's endpoint has the same history.
+    ///
+    /// Return `Ok(None)` if storage doesn't have any blocks.
+    pub fn open_from_storage<T: Storage>(
+        stream: &'stream mut PacketStream<S>,
+        storage: &T
+    )  -> Result<Option<Self>, ViewerError<S>>
+    where
+        T::Error: 'static
+    {
+        // Try to read root block from the storage.
+        let root_block = storage.root_block()
+            .map_err(|err| ViewerError::Storage(err.into()))?;
+
+        let Some(root_block) = root_block else {
+            return Ok(None);
+        };
+
+        // Try to read tail block from the storage.
+        let tail_block = storage.tail_block()
+            .map_err(|err| ViewerError::Storage(err.into()))?;
+
+        let Some(mut tail_block) = tail_block else {
+            return Ok(None);
+        };
+
+        // If there's more than 1 block in the storage - then we will try to
+        // read the previous block from the tail one, because it's fixated and
+        // according to the protocol agreement cannot be modified, while tail
+        // block can be.
+        if root_block != tail_block {
+            tail_block = storage.prev_block(&tail_block)
+                .map_err(|err| ViewerError::Storage(err.into()))?
+                .unwrap_or(tail_block);
+        }
+
+        // Try to read list of validators after the selected tail block.
+        let validators = storage.get_validators_after_block(&tail_block)
+            .map_err(|err| ViewerError::Storage(err.into()))?;
+
+        let Some(validators) = validators else {
+            return Ok(None);
+        };
+
+        // Find the tail block's index.
+        let mut i = 0;
+
+        for hash in storage.history() {
+            let hash = hash.map_err(|err| ViewerError::Storage(err.into()))?;
+
+            if hash == tail_block {
+                break;
+            }
+
+            i += 1;
+        }
+
+        Ok(Some(Self {
+            stream,
+            root_block,
+            current_block: (i, tail_block),
+            pending_history: VecDeque::new(),
+            validators: validators.into_iter()
+                .map(|validator| (validator, 0)) // FIXME: 0 is not correct
+                .collect()
+        }))
+    }
+
+    /// Get root block of the viewer's blockchain.
+    #[inline]
+    pub const fn root_block(&self) -> &Hash {
+        &self.root_block
+    }
+
+    /// Get current block of the viewer's blockchain.
+    ///
+    /// This is the same block which was returned by the last `forward` pass.
+    #[inline]
+    pub const fn current_block(&self) -> &Hash {
+        &self.current_block.1
+    }
+
+    /// Get index of the viewer's current block.
+    #[inline]
+    pub const fn current_block_index(&self) -> u64 {
+        self.current_block.0
     }
 
     /// Get list of current block validators.
@@ -260,9 +357,48 @@ impl<'stream, S: Stream> BatchedViewer<'stream, S> {
         })
     }
 
+    /// Open batched viewer using blocks stored in the provided storage. We will
+    /// assume that all the blocks in that storage are validates and that the
+    /// provided streams' endpoints have the same history.
+    ///
+    /// Return `Ok(None)` if storage doesn't have any blocks.
+    pub async fn open_from_storage<T: Storage>(
+        streams: impl IntoIterator<Item = &'stream mut PacketStream<S>>,
+        storage: &T
+    )  -> Result<Option<Self>, ViewerError<S>>
+    where
+        T::Error: 'static
+    {
+        let mut viewers = Vec::new();
+
+        for stream in streams {
+            match Viewer::open_from_storage(stream, storage)? {
+                Some(viewer) => viewers.push(viewer),
+                None => return Ok(None)
+            }
+        }
+
+        let mut prev_block = Hash::default();
+
+        for viewer in &viewers {
+            let curr_block = *viewer.current_block();
+
+            if prev_block != Hash::default() && prev_block != curr_block {
+                return Err(ViewerError::BatchedViewerOutOfSync);
+            }
+
+            prev_block = curr_block;
+        }
+
+        Ok(Some(Self {
+            viewers,
+            prev_block
+        }))
+    }
+
     /// Request the next block of the blockchain history known to the underlying
     /// nodes, verify and return it. If we've reached the end of the known
-    /// history then `None` is returned.
+    /// history then `Ok(None)` is returned.
     pub async fn forward(
         &mut self
     ) -> Result<Option<ValidBlock>, ViewerError<S>> {
@@ -307,5 +443,73 @@ impl<'stream, S: Stream> BatchedViewer<'stream, S> {
         self.prev_block = block.hash;
 
         Ok(Some(block))
+    }
+
+    /// Request the next block of the blockchain history known to the underlying
+    /// nodes and provided storage, verify and return it. If we've reached the
+    /// end of the known history then `Ok(None)` is returned.
+    ///
+    /// > Note that this method does not modify the provided storage if new
+    /// > blocks are received from the network. Only read operations are used.
+    pub async fn forward_with_storage<T: Storage>(
+        &mut self,
+        storage: &T
+    ) -> Result<Option<ValidBlock>, ViewerError<S>>
+    where
+        T::Error: 'static
+    {
+        let storage_block = storage.next_block(&self.prev_block)
+            .map_err(|err| ViewerError::Storage(err.into()))?
+            .and_then(|block| {
+                storage.read_block(&block)
+                    .transpose()
+            })
+            .transpose()
+            .map_err(|err| ViewerError::Storage(err.into()))?
+            .map(|block| {
+                match block.verify() {
+                    Ok((false, _, _)) => Ok(None),
+
+                    Ok((true, hash, public_key)) => {
+                        Ok(Some(ValidBlock {
+                            block,
+                            hash,
+                            public_key
+                        }))
+                    }
+
+                    Err(err) => Err(err)
+                }
+            })
+            .transpose()
+            .map_err(ViewerError::Block)?
+            .flatten();
+
+        let network_block = self.forward().await?;
+
+        match (network_block, storage_block) {
+            (Some(network_block), Some(storage_block)) => {
+                let network_distance = crate::block_validator_distance(
+                    &self.prev_block,
+                    &network_block.public_key
+                );
+
+                let storage_distance = crate::block_validator_distance(
+                    &self.prev_block,
+                    &storage_block.public_key
+                );
+
+                if network_distance < storage_distance {
+                    Ok(Some(network_block))
+                } else {
+                    Ok(Some(storage_block))
+                }
+            }
+
+            (Some(block), None) |
+            (None, Some(block)) => Ok(Some(block)),
+
+            (None, None) => Ok(None)
+        }
     }
 }
