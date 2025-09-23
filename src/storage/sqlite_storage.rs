@@ -197,6 +197,24 @@ impl Storage for SqliteStorage {
         }
     }
 
+    fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error> {
+        let lock = self.0.lock();
+
+        let mut query = lock.prepare_cached("
+            SELECT previous_hash FROM v1_blocks WHERE current_hash = ?1
+        ")?;
+
+        let hash = query.query_row([hash.0], |row| {
+            row.get::<_, [u8; 32]>("previous_hash")
+        });
+
+        match hash {
+            Ok(hash) => Ok(Some(Hash::from(hash))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err)
+        }
+    }
+
     fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error> {
         let lock = self.0.lock();
 

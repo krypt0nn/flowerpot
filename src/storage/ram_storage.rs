@@ -96,26 +96,25 @@ impl Storage for RamStorage {
             return Err(Error::Lock);
         };
 
-        match history.len() {
-            // 0 => no blocks at all,
-            // 1 => root block, which is returned above.
-            0 | 1 => Ok(None),
+        match history.iter().position(|block| block == hash) {
+            Some(offset) => Ok(history.get(offset + 1).copied()),
+            None => Ok(None)
+        }
+    }
 
-            mut n => {
-                let mut i = 0;
+    fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error> {
+        if hash == &Hash::default() {
+            return Ok(None)
+        }
 
-                n -= 1;
+        let Ok(history) = self.history.read() else {
+            return Err(Error::Lock);
+        };
 
-                while i < n {
-                    if &history[i] == hash {
-                        return Ok(Some(history[i + 1]));
-                    }
-
-                    i += 1;
-                }
-
-                Ok(None)
-            }
+        match history.iter().position(|block| block == hash) {
+            Some(0) => Ok(Some(Hash::default())),
+            Some(offset) => Ok(Some(history[offset - 1])),
+            None => Ok(None)
         }
     }
 

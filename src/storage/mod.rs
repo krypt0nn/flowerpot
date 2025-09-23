@@ -59,6 +59,18 @@ pub trait Storage {
     /// ```
     fn next_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error>;
 
+    /// Get hash of a block previous to the one with provided hash. Return
+    /// `Ok(None)` if there's no block with provided hash.
+    ///
+    /// Previous block of the root block of the blockchain must be the
+    /// default hash (zeros).
+    fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error> {
+        match self.read_block(hash)? {
+            Some(block) => Ok(Some(*block.previous())),
+            None => Ok(None)
+        }
+    }
+
     /// Read block from its hash. Return `Ok(None)` if there's no such block.
     fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error>;
 
@@ -452,6 +464,11 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     assert_eq!(storage.next_block(&block_1_hash)?, Some(block_2_hash));
     assert_eq!(storage.next_block(&block_2_hash)?, Some(block_3_hash));
     assert!(storage.next_block(&block_3_hash)?.is_none());
+
+    assert!(storage.prev_block(&Hash::default())?.is_none());
+    assert_eq!(storage.prev_block(&block_1_hash)?, Some(Hash::default()));
+    assert_eq!(storage.prev_block(&block_2_hash)?, Some(block_1_hash));
+    assert_eq!(storage.prev_block(&block_3_hash)?, Some(block_2_hash));
 
     assert!(storage.read_block(&Hash::default())?.is_none());
     assert_eq!(storage.read_block(&block_1_hash)?, Some(block_1.clone()));
