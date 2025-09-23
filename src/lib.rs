@@ -25,8 +25,6 @@ pub mod protocol;
 pub mod viewer;
 pub mod node;
 
-pub mod security;
-
 use crypto::*;
 
 /// Calculate required amount of block approvals for provided amount of
