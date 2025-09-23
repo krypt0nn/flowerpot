@@ -44,7 +44,7 @@ pub enum NodeError<T: Stream, F: Storage> {
     Block(BlockError)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy)]
 pub struct NodeOptions {
     /// Maximal length of the `History` packet which will be sent as a response
     /// on the `AskHistory` packet.
@@ -73,7 +73,16 @@ pub struct NodeOptions {
     /// reduce overall network quality.
     ///
     /// Default is `true`.
-    pub accept_pending_transactions: bool
+    pub accept_pending_transactions: bool,
+
+    /// When specified this function will be used to filter incoming blocks
+    /// and accept only those for which the provided function returned `true`.
+    ///
+    /// This option is needed when you use blockchain for your own application
+    /// and you want to accept blocks of special format only.
+    ///
+    /// Default is `None`.
+    pub blocks_filter: Option<fn(&Hash, &PublicKey, &Block) -> bool>
 }
 
 impl Default for NodeOptions {
@@ -81,7 +90,8 @@ impl Default for NodeOptions {
         Self {
             max_history_length: 1024,
             accept_pending_blocks: true,
-            accept_pending_transactions: true
+            accept_pending_transactions: true,
+            blocks_filter: None
         }
     }
 }
@@ -130,9 +140,6 @@ impl<T: Stream, F: Storage> Node<T, F> {
 
     /// Synchronize blockchain history with all the available connections and,
     /// if provided, local blockchain storage.
-    ///
-    /// This method performs **full blockchain synchronization** starting from
-    /// the root block.
     ///
     /// Protocol agreements:
     ///
@@ -492,6 +499,21 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                                 block.approvals.push(approval.clone());
                                             }
                                         }
+                                    }
+
+                                    // Check this block using the provided filter.
+                                    if let Some(filter) = &options.blocks_filter
+                                        && !filter(&hash, &public_key, &block)
+                                    {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::debug!(
+                                            ?endpoint_id,
+                                            hash = hash.to_base64(),
+                                            public_key = public_key.to_base64(),
+                                            "received block which was filtered out"
+                                        );
+
+                                        continue;
                                     }
 
                                     // Check the block's approval status.
