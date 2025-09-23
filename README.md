@@ -1,30 +1,28 @@
-# 🪴 libflowerpot - a blockchain framework library written in rust
+# 🪴 libflowerpot - a rust-written blockchain for your decentralized app needs!
 
 > In development, not ready for production use until `v1.0.0` release!
 
-Libflowerpot is a rust library implementing a basic, foundational blockchain
-which can be extensively configured for your needs. Unlike other blockchains
-this one doesn't provide built-in cryptocurrency, PoW mechanisms or anything
-else.
+Libflowerpot is a rust library implementing a PoS/PoW-like blockchain.
+It features a built-in gas system which can be *mined* by blockchain users and
+used to store *raw bytes* in the blockchain as in a globally available data
+storage. This allows you, as a developer, to create decentralized apps which
+could store their data in a common storage which features data integrity,
+identical order of events for all the parties, and built-in decentralized
+networking code.
 
-The goal of the project is to provide a foundation for developers to easily
-create decentralized applications. Let's say you want to make a decentralized
-chat app. You'd need to implement a mechanism to synchronize messages between
-all the users of your chat. This library handles decentralized networking and
-organizes data equally to all the users of your app due to the nature of a
-blockchain. Moreover, users of your app don't need to download this blockchain,
-they can connect to public shards and use their HTTP API to fetch updates.
+Let's say you want to make a decentralized chat app. You'd need to implement
+a mechanism to synchronize messages between all the users of your chat.
+This library handles decentralized networking and organizes data identically
+to all the users of your app due to the nature of a blockchain.
 
 Some key points:
 
-- Transactions are raw byte slices with random seeds for unique hash values;
+- Transactions are raw bytes with random seeds for unique hash values;
 - secp256k1 curve for signing (same as in bitcoin);
-- 3 types of nodes: clients, shards and validators;
-- Public HTTP APIs, no need to self-host the blockchain;
-- 2/3 of validators must approve new blocks;
-- No cryptocurrency by design.
-
-<img src="./docs/network.png" />
+- 2/3 of validators must approve new blocks
+  (PoS mechanism for blocks creation speed);
+- Built-in PoW mechanism for gas usage
+  (users are forced to *mine* some "currency" to create transactions).
 
 # Roadmap to v1.0.0 release
 
@@ -38,10 +36,10 @@ Some key points:
         - [ ] Implement method to process incoming packets
     - [ ] Rewrite validator code
 - [ ] Rework blocks and transactions
-    - [ ] Remove zstd compression since it's not reliable
+    - [x] Remove zstd compression since it's not reliable
+    - [x] Remove json serialization
     - [ ] Make transactions have multiple types; implement `Mint` and `Data`
           type transactions
-    - [ ] Remove json serialization
 - [ ] Implement gas system
     - [ ] Calculate transaction gas usage (`ceil(size_in_bytes * alpha)`)
     - [ ] Calculate total block gas usage (sum of transactions' gas usage)
@@ -65,145 +63,6 @@ Some key points:
           using these distances
     - [ ] Give validator which made a new block some gas fee
           (needs further thinking)
-
-# HTTP Shards API v1 reference
-
-> TODO: in the first `v1.0.0` release it's planned to move to raw TCP
-> connections instead of using HTTP.
-
-## Node status
-
-API to check status of the shard node.
-
-### `GET /api/v1/heartbeat`
-
-Check if the shard is online. In that case `200 OK` response must be returned.
-
-## Transactions
-
-API to push new transactions to the network and monitor their status.
-
-### `GET /api/v1/transactions`
-
-Get list of all the pending transactions. These are transactions which weren't
-yet added to any block.
-
-Return list of hashes of pending transactions.
-
-```ts
-type Response = string[];
-```
-
-### `PUT /api/v1/transactions`
-
-Announce transaction to the network. This operation will ask network's shard
-to store your transaction in its pending transactions pool and share it with
-other shards it is connected to. In future your announced transaction can be
-validated and added to the blockchain, or, potentially, be removed after some
-time. Until transaction is validated you should monitor its status and act
-accordingly.
-
-```ts
-type Request = object; // Standard transaction JSON format
-```
-
-### `GET /api/v1/transactions/<hash>`
-
-Read content of a transaction with provided hash.
-
-If transaction with such hash is not found - then `404` status should be
-returned.
-
-```ts
-type Response = object; // Standard transaction JSON format
-```
-
-## Blocks
-
-API to push new blocks to the network and monitor their status.
-
-### `GET /api/v1/blocks`
-
-Get list of all the pending blocks. These are blocks which weren't yet validated
-and fixated in the blockchain.
-
-```ts
-type Response = {
-    block: {
-        current: string;
-        previous: string;
-    };
-    sign: string;
-    approvals: string[];
-}[];
-```
-
-### `PUT /api/v1/blocks`
-
-Announce block to the network. This block will first be added to the pending
-blocks pool, and then, if it's valid and enough approvals are available, will
-be written to the blockchain and fixated in the history.
-
-```ts
-type Request = object; // Standard block JSON format
-```
-
-### `GET /api/v1/blocks/<hash>`
-
-Read content of a block with provided hash.
-
-If block with such hash is not found - then `404` status should be returned.
-
-```ts
-type Response = object; // Standard block JSON format
-```
-
-### `PUT /api/v1/blocks/<hash>`
-
-Announce approval for a block with provided hash.
-
-```ts
-type Request = string;
-```
-
-## Sync
-
-API to synchronize blocks of the blockchain between the nodes of the network.
-
-### `GET /api/v1/sync[?after=<hash>][&max_blocks=<number>]`
-
-Get list of some blocks after a block with provided hash. If no `after` param
-provided then the first block of the blockchain will be assumed.
-
-Full blocks will be returned so that client can download them and validate
-locally.
-
-If selected `after` block is not a part of blockchain known to the shard then
-`404` status should be returned.
-
-```ts
-type Response = object[]; // Standard block JSON format
-```
-
-## Shards
-
-API to handle public nodes (shards) of the network.
-
-### `GET /api/v1/shards`
-
-Get list of shards the current shard is connected to.
-
-```ts
-type Response = string[];
-```
-
-### `PUT /api/v1/shards`
-
-Announce list of shards to another shard.
-
-```ts
-type Request = string[];
-```
 
 Author: [Nikita Podvirnyi](https://github.com/krypt0nn)\
 Licensed under [GPL-3.0](LICENSE)

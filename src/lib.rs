@@ -22,25 +22,10 @@ pub mod block;
 pub mod storage;
 pub mod network;
 pub mod protocol;
+pub mod viewer;
 pub mod node;
 
-#[cfg(feature = "client")]
-pub mod client;
-
-#[cfg(feature = "client")]
-pub mod viewer;
-
-#[cfg(feature = "client")]
-pub mod pool;
-
-#[cfg(any(feature = "shard", feature = "validator"))]
 pub mod security;
-
-#[cfg(feature = "shard")]
-pub mod shard;
-
-#[cfg(feature = "validator")]
-pub mod validator;
 
 use crypto::*;
 

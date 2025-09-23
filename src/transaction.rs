@@ -16,13 +16,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::io::Cursor;
-
-use serde_json::{json, Value as Json};
-
 use crate::crypto::*;
-
-const TRANSACTION_COMPRESSION_LEVEL: i32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transaction {
@@ -109,17 +103,12 @@ impl Transaction {
         bytes.extend(sign);                  // Fixed-size sign
         bytes.extend_from_slice(&self.data); // Transaction data
 
-        let bytes = zstd::encode_all(
-            Cursor::new(bytes),
-            TRANSACTION_COMPRESSION_LEVEL
-        )?;
-
         Ok(bytes.into_boxed_slice())
     }
 
     /// Decode transaction from bytes representation.
     pub fn from_bytes(bytes: impl AsRef<[u8]>) -> std::io::Result<Self> {
-        let bytes = zstd::decode_all(bytes.as_ref())?;
+        let bytes = bytes.as_ref();
 
         if bytes.len() < 74 {
             return Err(std::io::Error::other("invalid transaction bytes len"));
@@ -143,57 +132,6 @@ impl Transaction {
         Ok(Self {
             seed: u64::from_le_bytes(seed),
             data: bytes[74..].to_vec().into_boxed_slice(),
-            sign
-        })
-    }
-
-    /// Get standard JSON representation of the transaction.
-    pub fn to_json(&self) -> std::io::Result<Json> {
-        let data = zstd::encode_all(
-            Cursor::new(&self.data),
-            TRANSACTION_COMPRESSION_LEVEL
-        )?;
-
-        Ok(json!({
-            "format": 0,
-            "seed": format!("{:x}", self.seed),
-            "data": base64_encode(data),
-            "sign": self.sign.to_base64()
-        }))
-    }
-
-    /// Decode standard JSON representation of the transaction.
-    pub fn from_json(transaction: &Json) -> std::io::Result<Self> {
-        if transaction.get("format").and_then(Json::as_u64) != Some(0) {
-            return Err(std::io::Error::other("unknown transaction format"));
-        }
-
-        let Some(sign) = transaction.get("sign").and_then(Json::as_str) else {
-            return Err(std::io::Error::other("missing transaction sign"));
-        };
-
-        let sign = Signature::from_base64(sign)
-            .ok_or_else(|| std::io::Error::other("invalid signature format"))?;
-
-        let Some(seed) = transaction.get("seed").and_then(Json::as_str) else {
-            return Err(std::io::Error::other("missing transaction seed"));
-        };
-
-        let seed = u64::from_str_radix(seed, 16)
-            .map_err(|_| std::io::Error::other("invalid transaction seed"))?;
-
-        let Some(data) = transaction.get("data").and_then(Json::as_str) else {
-            return Err(std::io::Error::other("missing transaction data"));
-        };
-
-        let data = base64_decode(data)
-            .map_err(std::io::Error::other)?;
-
-        let data = zstd::decode_all(data.as_slice())?;
-
-        Ok(Self {
-            seed,
-            data: data.into_boxed_slice(),
             sign
         })
     }
@@ -238,17 +176,6 @@ mod tests {
         let (_, transaction) = get_transaction()?;
 
         let deserialized = Transaction::from_bytes(transaction.to_bytes()?)?;
-
-        assert_eq!(transaction, deserialized);
-
-        Ok(())
-    }
-
-    #[test]
-    fn serialize_json() -> Result<(), Box<dyn std::error::Error>> {
-        let (_, transaction) = get_transaction()?;
-
-        let deserialized = Transaction::from_json(&transaction.to_json()?)?;
 
         assert_eq!(transaction, deserialized);
 

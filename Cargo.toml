@@ -7,35 +7,15 @@ edition = "2024"
 publish = false
 
 [features]
-_http = ["dep:futures", "dep:reqwest"]
 tracing = ["dep:tracing"]
-
 ram_storage = []
 sqlite_storage = ["dep:rusqlite", "dep:spin"]
-
-client = ["_http"]
-shard = ["_http", "client", "dep:tokio", "dep:axum"]
-validator = ["_http", "client"]
 
 default = [
     "tracing",
     "ram_storage",
-    "sqlite_storage",
-    "client",
-    "shard",
-    "validator"
+    "sqlite_storage"
 ]
-
-[dependencies.tokio]
-version = "1.47"
-features = ["io-std", "macros"]
-optional = true
-
-[dependencies.reqwest]
-version = "0.12"
-features = ["socks", "h2", "http2", "rustls-tls", "rustls-tls-webpki-roots"]
-default-features = false
-optional = true
 
 [dependencies.rusqlite]
 version = "0.37"
@@ -46,16 +26,13 @@ optional = true
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-futures = { version = "0.3", optional = true }
-axum = { version = "0.8", optional = true }
 tracing = { version = "0.1", optional = true }
 spin = { version = "0.10", optional = true }
 varint-rs = "2.2"
 time = "0.3"
 blake3 = "1.8"
-k256 = { version = "0.13", features = ["ecdh"] }
 base64 = "0.22"
-zstd = "0.13"
+k256 = { version = "0.13", features = ["ecdh"] }
 chacha20 = "0.9"
 
 [dev-dependencies]
