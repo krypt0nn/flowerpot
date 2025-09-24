@@ -292,7 +292,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
         mut self,
         options: NodeOptions,
         mut spawner: impl FnMut(Box<dyn std::future::Future<Output = ()>>)
-    ) -> Result<(), NodeError<T, F>>
+    ) -> Result<NodeHandler, NodeError<T, F>>
     where
         T: 'static,
         F: 'static
@@ -307,7 +307,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
             self.sync().await?;
         }
 
-        let mut existing_streams = HashSet::new();
+        let mut existing_streams = HashMap::<[u8; 32], Sender<Packet>>::new();
 
         let history = Arc::new(RwLock::new(self.history));
         let validators = Arc::new(RwLock::new(self.validators));
@@ -316,8 +316,12 @@ impl<T: Stream, F: Storage> Node<T, F> {
         let pending_blocks = Arc::new(RwLock::new(self.pending_blocks));
         let pending_transactions = Arc::new(RwLock::new(self.pending_transactions));
 
+        let (handler_sender, handler_receiver) = std::sync::mpsc::channel::<Packet>();
+
         for (endpoint_id, mut stream) in self.streams {
-            existing_streams.insert(endpoint_id);
+            let (stream_sender, stream_receiver) = std::sync::mpsc::channel::<Packet>();
+
+            existing_streams.insert(endpoint_id, stream_sender);
 
             let endpoint_id = base64_encode(endpoint_id);
 
@@ -454,6 +458,19 @@ impl<T: Stream, F: Storage> Node<T, F> {
 
             spawner(Box::new(async move {
                 loop {
+                    while let Ok(packet) = stream_receiver.try_recv() {
+                        if let Err(err) = stream.send(packet).await {
+                            #[cfg(feature = "tracing")]
+                            tracing::error!(
+                                err = err.to_string(),
+                                ?endpoint_id,
+                                "failed to send packet to the packets stream"
+                            );
+
+                            break;
+                        }
+                    }
+
                     // TODO: timeout support
                     let packet = stream.recv().await;
 
@@ -1050,25 +1067,33 @@ impl<T: Stream, F: Storage> Node<T, F> {
             }));
         }
 
-        Ok(())
-    }
-}
+        spawner(Box::new(async move {
+            while let Ok(packet) = handler_receiver.recv() {
+                for sender in existing_streams.values() {
+                    let _ = sender.send(packet.clone());
+                }
+            }
+        }));
 
-#[derive(Debug, Clone)]
-pub enum NodeEvent {
-    SendTransaction(Transaction)
+        Ok(NodeHandler(handler_sender))
+    }
 }
 
 /// A helper struct connected to the running node. It can be used to perform
 /// client-side operations like announcing transactions to the network.
 #[derive(Debug, Clone)]
-pub struct NodeHandler(Sender<NodeEvent>);
+pub struct NodeHandler(Sender<Packet>);
 
 impl NodeHandler {
+    /// Send transaction to all the connected nodes.
     pub fn send_transaction(
         &self,
+        root_block: impl Into<Hash>,
         transaction: impl Into<Transaction>
     ) -> bool {
-        self.0.send(NodeEvent::SendTransaction(transaction.into())).is_ok()
+        self.0.send(Packet::Transaction {
+            root_block: root_block.into(),
+            transaction: transaction.into()
+        }).is_ok()
     }
 }
