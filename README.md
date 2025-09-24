@@ -28,12 +28,12 @@ Some key points:
 
 - [ ] Transition to abstract transport protocols for communication
     - [x] Implement base protocol and transport abstraction
-    - [ ] Rewrite client and shards into a single node client
+    - [x] Rewrite client and shards into a single node client
         - [x] Implement viewer struct for a packets stream
         - [x] Implement blocks sync code which will aggregate blocks from all
               the available connections and run the fork selection algorithm
-        - [ ] Implement streams listening and packets processing
-        - [ ] Implement node handler to send new transactions and perform other
+        - [x] Implement streams listening and packets processing
+        - [x] Implement node handler to send new transactions and perform other
               client-side actions
     - [ ] Rewrite validator code
 - [ ] Rework blocks and transactions
@@ -74,8 +74,8 @@ Some key points:
           using these distances
     - [ ] Give validator which made a new block some gas fee
           (needs further thinking)
-- [ ] Pre-release preparations
-    - [ ] Resolve all the TODO and FIXME-s
+- [ ] Release preparations
+    - [ ] Resolve all the TODO-s and FIXME-s
     - [ ] Prepare technical documentation and standardize the protocol
     - [ ] Test the library in production for some time
 

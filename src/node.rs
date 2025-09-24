@@ -31,15 +31,15 @@ use crate::protocol::{Packet, PacketStream, PacketStreamError};
 use crate::viewer::{BatchedViewer, ViewerError};
 
 #[derive(Debug,thiserror::Error)]
-pub enum NodeError<T: Stream, F: Storage> {
+pub enum NodeError<S: Storage> {
     #[error(transparent)]
-    PacketStream(PacketStreamError<T>),
+    PacketStream(PacketStreamError),
 
     #[error(transparent)]
-    Viewer(ViewerError<T>),
+    Viewer(ViewerError),
 
     #[error(transparent)]
-    Storage(F::Error),
+    Storage(S::Error),
 
     #[error(transparent)]
     Block(BlockError)
@@ -143,7 +143,7 @@ pub struct Node<T: Stream, F: Storage> {
 
 impl<T: Stream, F: Storage> Node<T, F> {
     /// Create new empty node.
-    pub fn new(root_block: impl Into<Hash>) -> Result<Self, NodeError<T, F>> {
+    pub fn new(root_block: impl Into<Hash>) -> Result<Self, NodeError<F>> {
         Ok(Self {
             root_block: root_block.into(),
             streams: HashMap::new(),
@@ -198,7 +198,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
     ///    then it's forcely removed from the network. This is needed to prevent
     ///    people from creating validators which don't participate in the
     ///    network maintenance and break the 2/3 validators rule.
-    pub async fn sync(&mut self) -> Result<(), NodeError<T, F>>
+    pub async fn sync(&mut self) -> Result<(), NodeError<F>>
     where
         F::Error: 'static
     {
@@ -292,7 +292,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
         mut self,
         options: NodeOptions,
         mut spawner: impl FnMut(Box<dyn std::future::Future<Output = ()>>)
-    ) -> Result<NodeHandler, NodeError<T, F>>
+    ) -> Result<NodeHandler, NodeError<F>>
     where
         T: 'static,
         F: 'static

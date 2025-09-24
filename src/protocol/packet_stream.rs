@@ -26,9 +26,9 @@ use crate::network::Stream;
 use super::{Packet, PacketError};
 
 #[derive(Debug, thiserror::Error)]
-pub enum PacketStreamError<S: Stream> {
-    #[error(transparent)]
-    Stream(S::Error),
+pub enum PacketStreamError {
+    #[error("stream error: {0}")]
+    Stream(std::io::Error),
 
     #[error(transparent)]
     Packet(#[from] PacketError),
@@ -214,7 +214,7 @@ impl<S: Stream> PacketStream<S> {
         secret_key: &k256::ecdh::EphemeralSecret,
         options: PacketStreamOptions,
         mut stream: S
-    ) -> Result<Self, PacketStreamError<S>> {
+    ) -> Result<Self, PacketStreamError> {
         #[cfg(feature = "tracing")]
         tracing::trace!(
             ?options,
@@ -343,7 +343,7 @@ impl<S: Stream> PacketStream<S> {
                     algorithm,
                     shared_secret.as_bytes(),
                     endpoint_id.as_bytes()
-                ).ok_or_else(|| PacketStreamError::EncryptorBuildFailed)?)
+                ).ok_or(PacketStreamError::EncryptorBuildFailed)?)
             }
 
             None => None
@@ -355,7 +355,7 @@ impl<S: Stream> PacketStream<S> {
                     algorithm,
                     shared_secret.as_bytes(),
                     endpoint_id.as_bytes()
-                ).ok_or_else(|| PacketStreamError::EncryptorBuildFailed)?)
+                ).ok_or(PacketStreamError::EncryptorBuildFailed)?)
             }
 
             None => None
@@ -423,7 +423,7 @@ impl<S: Stream> PacketStream<S> {
     pub async fn send(
         &mut self,
         packet: impl AsRef<Packet>
-    ) -> Result<(), PacketStreamError<S>> {
+    ) -> Result<(), PacketStreamError> {
         let mut packet = packet.as_ref()
             .to_bytes()
             .map_err(PacketStreamError::Packet)?;
@@ -457,7 +457,7 @@ impl<S: Stream> PacketStream<S> {
     }
 
     /// Receive packet.
-    pub async fn recv(&mut self) -> Result<Packet, PacketStreamError<S>> {
+    pub async fn recv(&mut self) -> Result<Packet, PacketStreamError> {
         if let Some(packet) = self.peek_queue.pop_front() {
             return Ok(packet);
         }
@@ -495,7 +495,7 @@ impl<S: Stream> PacketStream<S> {
     pub async fn peek(
         &mut self,
         mut callback: impl FnMut(&Packet) -> bool
-    ) -> Result<Packet, PacketStreamError<S>> {
+    ) -> Result<Packet, PacketStreamError> {
         let mut peek_queue = Vec::new();
 
         loop {

@@ -22,7 +22,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 /// Abstract client/listener transport.
 #[allow(async_fn_in_trait)]
 pub trait Transport {
-    type Stream: Stream<Error = Self::Error>;
+    type Stream: Stream;
     type Error: std::error::Error;
 
     /// Listen to incoming stream connections.
@@ -38,8 +38,6 @@ pub trait Transport {
 /// Abstract data transportation stream.
 #[allow(async_fn_in_trait)]
 pub trait Stream {
-    type Error: std::error::Error;
-
     /// Get socket address of the local endpoint.
     fn local_address(&self) -> &SocketAddr;
 
@@ -48,17 +46,17 @@ pub trait Stream {
 
     /// Read content from the network, write it to the `buf` writer. Return
     /// amount of read bytes.
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error>;
+    async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
 
     /// Read content from the network with exact length in bytes, write it
     /// to the `buf` writer.
-    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error>;
+    async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()>;
 
     /// Send content of the `buf` reader.
-    async fn write(&mut self, buf: &[u8]) -> Result<(), Self::Error>;
+    async fn write(&mut self, buf: &[u8]) -> std::io::Result<()>;
 
     /// Send all the buffered data if there's any.
-    async fn flush(&mut self) -> Result<(), Self::Error>;
+    async fn flush(&mut self) -> std::io::Result<()>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,8 +78,8 @@ impl TcpSocket {
 }
 
 impl Transport for TcpSocket {
-    type Stream = TcpStream;
     type Error = TcpSocketError;
+    type Stream = TcpStream;
 
     async fn listen(&self) -> Result<Self::Stream, Self::Error> {
         let Some(listener) = &self.0 else {
@@ -139,8 +137,6 @@ pub struct TcpStream {
 }
 
 impl Stream for TcpStream {
-    type Error = TcpSocketError;
-
     #[inline(always)]
     fn local_address(&self) -> &SocketAddr {
         &self.local_address
@@ -152,7 +148,7 @@ impl Stream for TcpStream {
     }
 
     #[inline]
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+    async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.stream.read(buf)?;
 
         #[cfg(feature = "tracing")]
@@ -165,7 +161,7 @@ impl Stream for TcpStream {
     }
 
     #[inline]
-    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
+    async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
         self.stream.read_exact(buf)?;
 
         #[cfg(feature = "tracing")]
@@ -178,7 +174,7 @@ impl Stream for TcpStream {
     }
 
     #[inline]
-    async fn write(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
+    async fn write(&mut self, buf: &[u8]) -> std::io::Result<()> {
         #[cfg(feature = "tracing")]
         tracing::trace!(
             len = buf.len(),
@@ -191,7 +187,7 @@ impl Stream for TcpStream {
     }
 
     #[inline]
-    async fn flush(&mut self) -> Result<(), Self::Error> {
+    async fn flush(&mut self) -> std::io::Result<()> {
         self.stream.flush()?;
 
         Ok(())

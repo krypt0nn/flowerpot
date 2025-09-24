@@ -25,9 +25,9 @@ use crate::network::Stream;
 use crate::protocol::{Packet, PacketStream, PacketStreamError};
 
 #[derive(Debug, thiserror::Error)]
-pub enum ViewerError<S: Stream> {
+pub enum ViewerError {
     #[error(transparent)]
-    PacketStream(PacketStreamError<S>),
+    PacketStream(PacketStreamError),
 
     #[error(transparent)]
     Block(BlockError),
@@ -70,7 +70,7 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
     pub async fn open(
         stream: &'stream mut PacketStream<S>,
         root_block: Hash
-    ) -> Result<Self, ViewerError<S>> {
+    ) -> Result<Self, ViewerError> {
         // Ask for the root block of the blockchain.
         stream.send(&Packet::AskBlock {
             root_block,
@@ -118,7 +118,7 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
     pub fn open_from_storage<T: Storage>(
         stream: &'stream mut PacketStream<S>,
         storage: &T
-    )  -> Result<Option<Self>, ViewerError<S>>
+    )  -> Result<Option<Self>, ViewerError>
     where
         T::Error: 'static
     {
@@ -210,7 +210,7 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
     /// Request the next block of the blockchain history known to the underlying
     /// node, verify and return it. If we've reached the end of the known
     /// history then `None` is returned.
-    pub async fn forward(&mut self) -> Result<Option<ValidBlock>, ViewerError<S>> {
+    pub async fn forward(&mut self) -> Result<Option<ValidBlock>, ViewerError> {
         // Ask for the blockchain history if the history pool is empty.
         let pending_hash = if let Some(hash) = self.pending_history.pop_front() {
             hash
@@ -344,7 +344,7 @@ impl<'stream, S: Stream> BatchedViewer<'stream, S> {
     pub async fn open(
         streams: impl IntoIterator<Item = &'stream mut PacketStream<S>>,
         root_block: Hash
-    ) -> Result<Self, ViewerError<S>> {
+    ) -> Result<Self, ViewerError> {
         let mut viewers = Vec::new();
 
         for stream in streams {
@@ -365,7 +365,7 @@ impl<'stream, S: Stream> BatchedViewer<'stream, S> {
     pub async fn open_from_storage<T: Storage>(
         streams: impl IntoIterator<Item = &'stream mut PacketStream<S>>,
         storage: &T
-    )  -> Result<Option<Self>, ViewerError<S>>
+    )  -> Result<Option<Self>, ViewerError>
     where
         T::Error: 'static
     {
@@ -407,7 +407,7 @@ impl<'stream, S: Stream> BatchedViewer<'stream, S> {
     /// Get list of current block validators.
     pub fn current_validators(
         &self
-    ) -> Result<Vec<PublicKey>, ViewerError<S>> {
+    ) -> Result<Vec<PublicKey>, ViewerError> {
         let mut validators = Vec::new();
 
         for viewer in &self.viewers {
@@ -432,7 +432,7 @@ impl<'stream, S: Stream> BatchedViewer<'stream, S> {
     /// history then `Ok(None)` is returned.
     pub async fn forward(
         &mut self
-    ) -> Result<Option<ValidBlock>, ViewerError<S>> {
+    ) -> Result<Option<ValidBlock>, ViewerError> {
         let mut curr_block: Option<ValidBlock> = None;
 
         for viewer in &mut self.viewers {
@@ -485,7 +485,7 @@ impl<'stream, S: Stream> BatchedViewer<'stream, S> {
     pub async fn forward_with_storage<T: Storage>(
         &mut self,
         storage: &T
-    ) -> Result<Option<ValidBlock>, ViewerError<S>>
+    ) -> Result<Option<ValidBlock>, ViewerError>
     where
         T::Error: 'static
     {
