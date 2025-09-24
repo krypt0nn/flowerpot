@@ -76,6 +76,7 @@ Some key points:
           (needs further thinking)
 - [ ] Pre-release preparations
     - [ ] Resolve all the TODO and FIXME-s
+    - [ ] Prepare technical documentation and standardize the protocol
     - [ ] Test the library in production for some time
 
 Author: [Nikita Podvirnyi](https://github.com/krypt0nn)\

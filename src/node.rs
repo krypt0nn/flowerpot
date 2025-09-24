@@ -17,12 +17,13 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
-use spin::RwLock;
+use spin::{RwLock, RwLockWriteGuard};
 
 use crate::crypto::*;
-use crate::block::{Block, BlockStatus, Error as BlockError};
+use crate::block::{Block, BlockContent, BlockStatus, Error as BlockError};
 use crate::transaction::Transaction;
 use crate::storage::Storage;
 use crate::network::Stream;
@@ -134,6 +135,8 @@ pub struct Node<T: Stream, F: Storage> {
     is_synced: bool,
     history: Vec<Hash>,
     validators: Vec<PublicKey>,
+    current_distance: [u8; 32],
+    indexed_transactions: HashSet<Hash>,
     pending_blocks: HashMap<Hash, Block>,
     pending_transactions: HashMap<Hash, Transaction>
 }
@@ -148,6 +151,8 @@ impl<T: Stream, F: Storage> Node<T, F> {
             is_synced: false,
             history: Vec::new(),
             validators: Vec::new(),
+            current_distance: [0xFF; 32],
+            indexed_transactions: HashSet::new(),
             pending_blocks: HashMap::new(),
             pending_transactions: HashMap::new()
         })
@@ -249,6 +254,14 @@ impl<T: Stream, F: Storage> Node<T, F> {
                 break;
             };
 
+            // Index stored transactions.
+            if let BlockContent::Transactions(transactions) = block.block.content() {
+                for transaction in transactions {
+                    self.indexed_transactions.insert(transaction.hash());
+                }
+            }
+
+            // If storage is available - then update it.
             if let Some(storage) = &self.storage {
                 storage.write_block(&block.block)
                     .map_err(NodeError::Storage)?;
@@ -298,6 +311,8 @@ impl<T: Stream, F: Storage> Node<T, F> {
 
         let history = Arc::new(RwLock::new(self.history));
         let validators = Arc::new(RwLock::new(self.validators));
+        let current_distance = Arc::new(RwLock::new(self.current_distance));
+        let indexed_transactions = Arc::new(RwLock::new(self.indexed_transactions));
         let pending_blocks = Arc::new(RwLock::new(self.pending_blocks));
         let pending_transactions = Arc::new(RwLock::new(self.pending_transactions));
 
@@ -317,8 +332,125 @@ impl<T: Stream, F: Storage> Node<T, F> {
 
             let history = history.clone();
             let validators = validators.clone();
+            let current_distance = current_distance.clone();
+            let indexed_transactions = indexed_transactions.clone();
             let pending_blocks = pending_blocks.clone();
             let pending_transactions = pending_transactions.clone();
+
+            /// Try to write provided block to the blockchain. This function
+            /// does not verify the block and only performs the writing itself.
+            ///
+            /// Before writing the block it will be compared with the current
+            /// one to attempt unfixed block replacement.
+            #[allow(clippy::too_many_arguments)]
+            fn try_write_block<S: Storage>(
+                block: Block,
+                hash: Hash,
+                public_key: &PublicKey,
+                mut history: RwLockWriteGuard<'_, Vec<Hash>>,
+                mut validators: RwLockWriteGuard<'_, Vec<PublicKey>>,
+                mut current_distance: RwLockWriteGuard<'_, [u8; 32]>,
+                mut indexed_transactions: RwLockWriteGuard<'_, HashSet<Hash>>,
+                mut pending_blocks: RwLockWriteGuard<'_, HashMap<Hash, Block>>,
+                mut pending_transactions: RwLockWriteGuard<'_, HashMap<Hash, Transaction>>,
+                storage: Option<&S>
+            ) {
+                let n = history.len();
+
+                // Distance between the previous block and the new block's
+                // author.
+                let new_distance = crate::block_validator_distance(
+                    &history[n - 2],
+                    public_key
+                );
+
+                // If this block is a *replacement* for the last block of the
+                // blockchain - then we must compare its xor distance to decide
+                // what to do.
+                if n > 1 && &history[n - 2] == block.previous() {
+                    // Reject new block if the current one is closer to the
+                    // previous one.
+                    if  *current_distance <= new_distance
+                        || (*current_distance == new_distance && history[n - 2] <= hash)
+                    {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            hash = hash.to_base64(),
+                            "attempted to modify the blockchain history with more distant block"
+                        );
+
+                        return;
+                    }
+                }
+
+                // If this block is a continuation of the blockchain then we
+                // simply push it to the end of the history, update the storage
+                // and validators list, remove related pending transactions.
+                //
+                // Otherwise we are not allowed to modify the blockchain history
+                // and thus just abort this function.
+                else if &history[n - 1] != block.previous() {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        hash = hash.to_base64(),
+                        "attempted to modify the blockchain history or write out of the known history (out of sync node?)"
+                    );
+
+                    return;
+                }
+
+                // Try to write this block to the blockchain storage.
+                if let Some(storage) = storage {
+                    match storage.write_block(&block) {
+                        Ok(true) => (),
+
+                        Ok(false) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::warn!(
+                                hash = hash.to_base64(),
+                                "attempted to write new block to the blockchain storage but history was not modified"
+                            );
+
+                            return;
+                        }
+
+                        Err(err) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::error!(
+                                ?err,
+                                hash = hash.to_base64(),
+                                "failed to write new block to the blockchain storage"
+                            );
+
+                            return;
+                        }
+                    }
+                }
+
+                // Update in-RAM blocks history.
+                history.push(hash);
+
+                // Update validators list.
+                if let BlockContent::Validators(new_validators) = block.content() {
+                    *validators = new_validators.to_vec();
+                }
+
+                // Update current block's distance.
+                *current_distance = new_distance;
+
+                // Remove this block from the pending blocks pool.
+                pending_blocks.remove(&hash);
+
+                // Remove related pending transactions.
+                if let BlockContent::Transactions(transactions) = block.content() {
+                    for transaction in transactions {
+                        let hash = transaction.hash();
+
+                        pending_transactions.remove(&hash);
+                        indexed_transactions.insert(hash);
+                    }
+                }
+            }
 
             spawner(Box::new(async move {
                 loop {
@@ -558,6 +690,8 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     match status {
                                         // Block is valid and approved by enough validators.
                                         Ok(BlockStatus::Approved {
+                                            hash,
+                                            public_key,
                                             approvals,
                                             ..
                                         }) => {
@@ -567,27 +701,19 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                                 .map(|(approval, _)| approval)
                                                 .collect();
 
-                                            let mut lock = history.write();
-                                            let n = lock.len();
-
-                                            // If this block is a continuation of the
-                                            // blockchain then we simply push it to
-                                            // the end of the history, update the storage
-                                            // and validators list, remove related
-                                            // pending transactions.
-                                            if &lock[n - 1] == block.previous() {
-                                                lock.push(hash);
-
-                                                todo!()
-                                            }
-
-                                            // If this block is a *replacement* for the
-                                            // last block of the blockchain - then we
-                                            // must compare its xor distance to decide
-                                            // what to do.
-                                            else if n > 1 && &lock[n - 1] == block.previous() {
-                                                todo!()
-                                            }
+                                            // Try to write this block.
+                                            try_write_block(
+                                                block,
+                                                hash,
+                                                &public_key,
+                                                history.write(),
+                                                validators.write(),
+                                                current_distance.write(),
+                                                indexed_transactions.write(),
+                                                pending_blocks.write(),
+                                                pending_transactions.write(),
+                                                storage.as_ref()
+                                            );
                                         }
 
                                         // Block is valid but not approved by enough validators.
@@ -714,7 +840,22 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                             ?endpoint_id,
                                             hash = hash.to_base64(),
                                             public_key = public_key.to_base64(),
-                                            "received invalid block"
+                                            "received invalid transaction"
+                                        );
+
+                                        continue;
+                                    }
+
+                                    // Reject already indexed transactions.
+                                    if indexed_transactions.read().contains(&hash)
+                                        || pending_transactions.read().contains_key(&hash)
+                                    {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::trace!(
+                                            ?endpoint_id,
+                                            hash = hash.to_base64(),
+                                            public_key = public_key.to_base64(),
+                                            "received already indexed transaction"
                                         );
 
                                         continue;
@@ -729,7 +870,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                             ?endpoint_id,
                                             hash = hash.to_base64(),
                                             public_key = public_key.to_base64(),
-                                            "received block which was filtered out"
+                                            "received transaction which was filtered out"
                                         );
 
                                         continue;
@@ -753,6 +894,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                             tracing::error!(
                                                 ?err,
                                                 ?endpoint_id,
+                                                target_block = target_block.to_base64(),
                                                 approval = approval.to_base64(),
                                                 "failed to verify received block approval"
                                             );
@@ -766,6 +908,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         #[cfg(feature = "tracing")]
                                         tracing::warn!(
                                             ?endpoint_id,
+                                            target_block = target_block.to_base64(),
                                             public_key = public_key.to_base64(),
                                             "received invalid block approval"
                                         );
@@ -775,18 +918,117 @@ impl<T: Stream, F: Storage> Node<T, F> {
 
                                     // Add this approval to the block if we have it.
                                     let mut lock = pending_blocks.write();
+                                    let mut write_block = None;
 
                                     if let Some(block) = lock.get_mut(&target_block)
                                         && !block.approvals.contains(&approval)
                                     {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::info!(
+                                            ?endpoint_id,
+                                            target_block = target_block.to_base64(),
+                                            public_key = public_key.to_base64(),
+                                            "added new approval to the pending block"
+                                        );
+
                                         block.approvals.push(approval);
 
-                                        // TODO: check if this approval made the block
-                                        // fully valid and ready to be merged!!!
+                                        // Verify this block (mainly to obtain
+                                        // its public key).
+                                        let (is_valid, hash, public_key) = match block.verify() {
+                                            Ok(result) => result,
+                                            Err(err) => {
+                                                #[cfg(feature = "tracing")]
+                                                tracing::error!(
+                                                    ?err,
+                                                    ?endpoint_id,
+                                                    "failed to verify block"
+                                                );
 
-                                        // TODO: resend this approval (or the block itself)
-                                        // to other connected nodes!!!
+                                                continue;
+                                            }
+                                        };
+
+                                        // Skip the block if it's invalid.
+                                        if !is_valid || !validators.read().contains(&public_key) {
+                                            #[cfg(feature = "tracing")]
+                                            tracing::error!(
+                                                ?endpoint_id,
+                                                hash = hash.to_base64(),
+                                                public_key = public_key.to_base64(),
+                                                "approved a pending block which turned to be invalid (how did it get here?)"
+                                            );
+
+                                            continue;
+                                        }
+
+                                        // Validate the block.
+                                        let status = BlockStatus::validate(
+                                            hash,
+                                            public_key,
+                                            block.approvals(),
+                                            validators.read().as_slice()
+                                        );
+
+                                        match status {
+                                            Ok(BlockStatus::Approved {
+                                                hash,
+                                                public_key,
+                                                approvals,
+                                                ..
+                                            }) => {
+                                                // Update block's approvals list
+                                                // to remove any invalid signatures.
+                                                block.approvals = approvals.into_iter()
+                                                    .map(|(approval, _)| approval)
+                                                    .collect();
+
+                                                // Order this block to be written.
+                                                write_block = Some((hash, public_key));
+                                            }
+
+                                            Err(err) => {
+                                                #[cfg(feature = "tracing")]
+                                                tracing::warn!(
+                                                    ?err,
+                                                    ?endpoint_id,
+                                                    hash = hash.to_base64(),
+                                                    "failed to validate newly approved block"
+                                                );
+
+                                                continue;
+                                            }
+
+                                            _ => ()
+                                        }
                                     }
+
+                                    drop(lock);
+
+                                    // If we've approved that this block can now
+                                    // be written to the blockchain storage.
+                                    if let Some((hash, public_key)) = write_block {
+                                        let mut pending_blocks = pending_blocks.write();
+
+                                        // Try to write this block.
+                                        if let Some(block) = pending_blocks.remove(&hash) {
+                                            try_write_block(
+                                                block,
+                                                hash,
+                                                &public_key,
+                                                history.write(),
+                                                validators.write(),
+                                                current_distance.write(),
+                                                indexed_transactions.write(),
+                                                pending_blocks,
+                                                pending_transactions.write(),
+                                                storage.as_ref()
+                                            );
+                                        }
+                                    }
+
+                                    // TODO: resend this approval (or the block itself)
+                                    // to other connected nodes!!!
                                 }
 
                                 _ => ()
@@ -812,8 +1054,21 @@ impl<T: Stream, F: Storage> Node<T, F> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum NodeEvent {
+    SendTransaction(Transaction)
+}
+
 /// A helper struct connected to the running node. It can be used to perform
 /// client-side operations like announcing transactions to the network.
-pub struct NodeHandler {
+#[derive(Debug, Clone)]
+pub struct NodeHandler(Sender<NodeEvent>);
 
+impl NodeHandler {
+    pub fn send_transaction(
+        &self,
+        transaction: impl Into<Transaction>
+    ) -> bool {
+        self.0.send(NodeEvent::SendTransaction(transaction.into())).is_ok()
+    }
 }
