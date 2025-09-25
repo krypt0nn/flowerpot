@@ -457,7 +457,36 @@ impl<T: Stream, F: Storage> Node<T, F> {
             }
 
             spawner(Box::new(async move {
+                // Ask remote node to share pending blocks and transactions.
+                if let Err(err) = stream.send(Packet::AskPendingTransactions {
+                    root_block
+                }).await {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(
+                        err = err.to_string(),
+                        ?endpoint_id,
+                        "failed to send packet to the packets stream"
+                    );
+
+                    return;
+                }
+
+                if let Err(err) = stream.send(Packet::AskPendingBlocks {
+                    root_block
+                }).await {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(
+                        err = err.to_string(),
+                        ?endpoint_id,
+                        "failed to send packet to the packets stream"
+                    );
+
+                    return;
+                }
+
+                // Process incoming packets in a loop.
                 loop {
+                    // Send packets to the remote node.
                     while let Ok(packet) = stream_receiver.try_recv() {
                         if let Err(err) = stream.send(packet).await {
                             #[cfg(feature = "tracing")]
@@ -471,9 +500,11 @@ impl<T: Stream, F: Storage> Node<T, F> {
                         }
                     }
 
+                    // Read packet from the remote endpoint.
                     // TODO: timeout support
                     let packet = stream.recv().await;
 
+                    // Process received packet.
                     match packet {
                         Ok(packet) => {
                             match packet {
