@@ -1,39 +1,5 @@
-[package]
-name = "libflowerpot"
-version = "0.1.0"
-authors = ["Nikita Podvirnyi <krypt0nn@vk.com>"]
-license = "GPL-3.0-or-later"
-edition = "2024"
-publish = false
-
-[features]
-tracing = ["dep:tracing"]
-ram_storage = []
-sqlite_storage = ["dep:rusqlite"]
-encryption-chacha20 = ["dep:chacha20"]
-
-default = [
-    "tracing",
-    "ram_storage",
-    "sqlite_storage",
-    "encryption-chacha20"
+[workspace]
+resolver = "3"
+members = [
+    "libflowerpot"
 ]
-
-[dependencies.rusqlite]
-version = "0.37"
-features = ["bundled"]
-optional = true
-
-[dependencies]
-thiserror = "2.0"
-tracing = { version = "0.1", optional = true }
-spin = "0.10"
-varint-rs = "2.2"
-time = "0.3"
-blake3 = "1.8"
-base64 = "0.22"
-k256 = { version = "0.13", features = ["ecdh"] }
-chacha20 = { version = "0.9", optional = true }
-
-[dev-dependencies]
-rand_chacha = "0.3"
