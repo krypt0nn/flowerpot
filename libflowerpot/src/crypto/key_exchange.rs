@@ -78,7 +78,7 @@ pub struct PublicKey(k256::PublicKey);
 
 impl PublicKey {
     /// Bytes length of the key exchange protocol's public key.
-    pub const SIZE: usize = 32;
+    pub const SIZE: usize = 33;
 
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let buf = self.0.to_sec1_bytes();

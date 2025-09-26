@@ -100,7 +100,7 @@ impl BlockStatus {
 
         for approval in approvals {
             // Verify that approval is correct.
-            let (valid, approval_public_key) = approval.verify(block_hash.as_bytes())
+            let (valid, approval_public_key) = approval.verify(block_hash)
                 .map_err(Error::Verify)?;
 
             // Reject invalid approval, approvals from non-validators and
@@ -167,9 +167,7 @@ impl Block {
         hasher.update(timestamp.unix_timestamp().to_le_bytes());
         hasher.update(content.to_bytes().map_err(Error::Serialize)?);
 
-        let hash = hasher.finalize();
-
-        let sign = Signature::create(validator, hash.as_bytes())
+        let sign = Signature::create(validator, hasher.finalize())
             .map_err(Error::Sign)?;
 
         Ok(Self {
@@ -237,10 +235,10 @@ impl Block {
 
             self.precomputed_hash = Some(hash);
 
-            let (is_valid, verifying_key) = approval.verify(hash.as_bytes())
+            let (is_valid, verifying_key) = approval.verify(hash)
                 .map_err(Error::Verify)?;
 
-            let (_, curr_verifying_key) = self.sign.verify(hash.as_bytes())
+            let (_, curr_verifying_key) = self.sign.verify(hash)
                 .map_err(Error::Verify)?;
 
             if !is_valid || verifying_key == curr_verifying_key {
@@ -265,14 +263,14 @@ impl Block {
 
         self.precomputed_hash = Some(hash);
 
-        let approval = Signature::create(signing_key.as_ref(), hash.as_bytes())
+        let approval = Signature::create(signing_key.as_ref(), hash)
             .map_err(Error::Sign)?;
 
         if !self.approvals.contains(&approval) {
-            let (is_valid, verifying_key) = approval.verify(hash.as_bytes())
+            let (is_valid, verifying_key) = approval.verify(hash)
                 .map_err(Error::Verify)?;
 
-            let (_, curr_verifying_key) = self.sign.verify(hash.as_bytes())
+            let (_, curr_verifying_key) = self.sign.verify(hash)
                 .map_err(Error::Verify)?;
 
             if !is_valid || verifying_key == curr_verifying_key {
@@ -292,7 +290,7 @@ impl Block {
     pub fn verify(&self) -> Result<(bool, Hash, VerifyingKey), Error> {
         let hash = self.hash()?;
 
-        self.sign.verify(hash.as_bytes())
+        self.sign.verify(hash)
             .map(|(valid, public_key)| (valid, hash, public_key))
             .map_err(Error::Verify)
     }

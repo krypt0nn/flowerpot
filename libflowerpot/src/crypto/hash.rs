@@ -144,5 +144,8 @@ fn test() {
 
     assert_eq!(hasher.finalize(), Hash::calc([1, 2, 3, 4, 5, 6]));
 
-    assert_eq!(Hash::calc(b"Hello, World!").to_base64(), "");
+    assert_eq!(
+        Hash::calc(b"Hello, World!").to_base64(),
+        "mpt18kxS7F1J3exKiC-Ig0ZmQy69wgNfIu7rdBkDct4="
+    );
 }

@@ -628,12 +628,12 @@ fn test_serialize() -> Result<(), PacketError> {
             pending_blocks: Box::new([
                 (Hash::calc(b"Block 1"), Box::new([])),
                 (Hash::calc(b"Block 2"), Box::new([
-                    Signature::create(&signing_key, [1; 32]).unwrap(),
-                    Signature::create(&signing_key, [2; 32]).unwrap(),
-                    Signature::create(&signing_key, [3; 32]).unwrap()
+                    Signature::create(&signing_key, Hash::calc(b"test 1")).unwrap(),
+                    Signature::create(&signing_key, Hash::calc(b"test 2")).unwrap(),
+                    Signature::create(&signing_key, Hash::calc(b"test 3")).unwrap()
                 ])),
                 (Hash::calc(b"Block 3"), Box::new([
-                    Signature::create(&signing_key, [4; 32]).unwrap()
+                    Signature::create(&signing_key, Hash::calc(b"test 4")).unwrap()
                 ]))
             ])
         },
@@ -683,7 +683,7 @@ fn test_serialize() -> Result<(), PacketError> {
             target_block: Hash::calc(b"Test"),
             approval: Signature::create(
                 &signing_key,
-                b"test"
+                Hash::calc(b"test")
             ).unwrap()
         }
     );

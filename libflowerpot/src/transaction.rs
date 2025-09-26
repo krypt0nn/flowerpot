@@ -40,7 +40,7 @@ impl Transaction {
 
         let sign = Signature::create(
             signing_key,
-            Hash::calc(&data).as_bytes()
+            Hash::calc(&data)
         )?;
 
         Ok(Self {
@@ -73,7 +73,7 @@ impl Transaction {
     ) -> Result<(bool, Hash, VerifyingKey), k256::ecdsa::Error> {
         let hash = self.hash();
 
-        self.sign.verify(hash.as_bytes())
+        self.sign.verify(hash)
             .map(|(is_valid, public_key)| (is_valid, hash, public_key))
     }
 
@@ -151,7 +151,7 @@ mod tests {
         let (is_valid, hash, author) = transaction.verify()?;
 
         assert!(is_valid);
-        assert_eq!(hash.to_base64(), "bpoXoSDXtInY79Eqrdw7lTpUF6-FQH7xs2tH-BP5j5c=");
+        assert_eq!(hash.to_base64(), "vkhPqCNXEhkbIzEYoEuoXKLwdRCjHpk9yGjncZlOQLs=");
         assert_eq!(author, signing_key.verifying_key());
         assert_eq!(transaction.data(), b"hello, world!");
 

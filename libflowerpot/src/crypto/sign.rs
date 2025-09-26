@@ -19,6 +19,7 @@
 use k256::ecdsa::signature::hazmat::PrehashVerifier;
 
 use super::base64;
+use super::hash::Hash;
 
 /// Signature signing key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,10 +172,10 @@ impl Signature {
     /// Sign provided data using signing key.
     pub fn create(
         signing_key: impl AsRef<SigningKey>,
-        data: impl AsRef<[u8]>
+        hash: impl AsRef<Hash>
     ) -> Result<Self, k256::ecdsa::Error> {
         let (sign, id) = signing_key.as_ref().0
-            .sign_prehash_recoverable(data.as_ref())?;
+            .sign_prehash_recoverable(hash.as_ref().as_bytes())?;
 
         Ok(Self(sign, id))
     }
@@ -183,18 +184,18 @@ impl Signature {
     /// its author's verifying key.
     pub fn verify(
         &self,
-        data: impl AsRef<[u8]>
+        hash: impl AsRef<Hash>
     ) -> Result<(bool, VerifyingKey), k256::ecdsa::Error> {
-        let data = data.as_ref();
+        let hash = hash.as_ref();
 
         let public_key = k256::ecdsa::VerifyingKey::recover_from_prehash(
-            data,
+            hash.as_bytes(),
             &self.0,
             self.1
         )?;
 
         let is_valid = public_key.verify_prehash(
-            data,
+            hash.as_bytes(),
             &self.0
         ).is_ok();
 
@@ -204,7 +205,7 @@ impl Signature {
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let buf = self.0.to_vec();
 
-        debug_assert_eq!(buf.len(), Self::SIZE);
+        debug_assert_eq!(buf.len(), Self::SIZE - 1);
 
         let mut sign = [0; Self::SIZE];
 
@@ -261,11 +262,12 @@ fn test() -> Result<(), k256::ecdsa::Error> {
     let signing_key = SigningKey::from_base64(signing_key.to_base64()).unwrap();
     let verifying_key = VerifyingKey::from_base64(verifying_key.to_base64()).unwrap();
 
-    let sign = Signature::create(signing_key, b"test")?;
+    let hash = Hash::calc(b"test");
 
+    let sign = Signature::create(signing_key, hash)?;
     let sign = Signature::from_base64(sign.to_base64()).unwrap();
 
-    assert_eq!(sign.verify(b"test")?, (true, verifying_key));
+    assert_eq!(sign.verify(hash)?, (true, verifying_key));
 
     Ok(())
 }

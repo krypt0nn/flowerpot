@@ -17,6 +17,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 
 #[cfg(feature = "encryption-chacha20")]
 use chacha20::cipher::{KeyIvInit, StreamCipher};
@@ -384,6 +385,18 @@ impl<S: Stream> PacketStream<S> {
             write_encryptor,
             peek_queue: VecDeque::new()
         })
+    }
+
+    /// Get socket address of the local endpoint.
+    #[inline]
+    pub fn local_address(&self) -> &SocketAddr {
+        self.stream.local_address()
+    }
+
+    /// Get socket address of the remote endpoint.
+    #[inline]
+    pub fn remote_address(&self) -> &SocketAddr {
+        self.stream.remote_address()
     }
 
     /// Get unique identifier of the stream's remote endpoint.

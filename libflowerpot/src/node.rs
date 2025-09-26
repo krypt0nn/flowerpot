@@ -927,7 +927,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     approval
                                 } if received_root_block == root_block => {
                                     // Verify approval.
-                                    let (is_valid, verifying_key) = match approval.verify(target_block.as_bytes()) {
+                                    let (is_valid, verifying_key) = match approval.verify(target_block) {
                                         Ok(result) => result,
                                         Err(err) => {
                                             #[cfg(feature = "tracing")]

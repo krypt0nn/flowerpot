@@ -7,13 +7,17 @@ use clap::{Parser, Subcommand};
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 
+use libflowerpot::crypto::base64;
 use libflowerpot::crypto::hash::Hash;
-use libflowerpot::crypto::sign::{SigningKey, VerifyingKey, Signature};
+use libflowerpot::crypto::sign::SigningKey;
+use libflowerpot::crypto::key_exchange::SecretKey;
 use libflowerpot::block::{Block, BlockContent};
 use libflowerpot::storage::Storage;
 use libflowerpot::storage::sqlite_storage::SqliteStorage;
 use libflowerpot::network::{Transport, TcpSocket};
-use libflowerpot::protocol::{PacketStream, PacketStreamEncryption};
+use libflowerpot::protocol::{
+    PacketStream, PacketStreamOptions, PacketStreamEncryption
+};
 use libflowerpot::node::Node;
 
 #[derive(Parser)]
@@ -44,14 +48,14 @@ enum KeypairCommands {
     Create {
         /// Seed for random numbers generator. If unset, then system-provided
         /// entropy is used.
-        #[arg(long)]
+        #[arg(short = 'r', long, alias = "rand", alias = "random")]
         seed: Option<u64>
     },
 
     /// Export verifying key from the flowerpot's signing key.
     Export {
         /// Signing key of the flowerpot blockchain.
-        #[arg(long)]
+        #[arg(short = 'k', long, alias = "secret", alias = "key")]
         signing_key: Option<String>
     }
 }
@@ -62,35 +66,44 @@ enum BlockchainCommands {
     Create {
         /// Seed for random numbers generator. If unset, then system-provided
         /// entropy is used.
-        #[arg(long)]
+        #[arg(short = 'r', long, alias = "rand", alias = "random")]
         seed: Option<u64>,
 
-        /// Secret key used to create the blockchain.
+        /// Signing key used to create the blockchain.
         ///
         /// If not specified then randomly generated key is used.
-        #[arg(long, alias = "--secret")]
-        secret_key: Option<String>,
+        #[arg(short = 'k', long, alias = "secret", alias = "key")]
+        signing_key: Option<String>,
 
         /// Path to the sqlite storage database.
-        #[arg(long)]
+        #[arg(short = 's', long, alias = "path")]
         storage: PathBuf
     },
 
     /// Serve flowerpot blockchain.
     Serve {
+        /// Seed for random numbers generator. If unset, then system-provided
+        /// entropy is used.
+        #[arg(short = 'r', long, alias = "rand", alias = "random")]
+        seed: Option<u64>,
+
         /// Hash of the root block of the flowerpot blockchain. If unset,
         /// root block of the provided storage will be used.
-        #[arg(long)]
+        #[arg(short = 'b', long, alias = "root")]
         root_block: Option<String>,
 
         /// Path to the sqlite storage database. If unset, thin client
         /// is started.
-        #[arg(long)]
+        #[arg(short = 's', long, alias = "path")]
         storage: Option<PathBuf>,
 
         /// Address of remote node to connect to.
-        #[arg(long = "--node", alias = "--connect")]
-        nodes: Vec<String>
+        #[arg(short = 'n', long = "node", alias = "connect")]
+        nodes: Vec<String>,
+
+        /// Disable streams encryption.
+        #[arg(long, alias = "disable-encryption")]
+        no_encryption: bool
     }
 }
 
@@ -112,33 +125,39 @@ async fn main() -> anyhow::Result<()> {
             KeypairCommands::Export { signing_key } => {
                 let signing_key = match signing_key {
                     Some(signing_key) => {
-                        match SigningKey::from_base64(secret_key) {
+                        match SigningKey::from_base64(signing_key) {
                             Some(secret_key) => secret_key,
-                            None => anyhow::bail!("invalid secret key")
+                            None => anyhow::bail!("invalid signing key")
                         }
                     }
 
                     None => {
-                        let mut secret_key = Vec::new();
+                        let mut signing_key = Vec::new();
 
-                        std::io::stdin().read_to_end(&mut secret_key)?;
+                        std::io::stdin().read_to_end(&mut signing_key)?;
 
-                        match SigningKey::from_base64(&secret_key) {
-                            Some(secret_key) => secret_key,
-                            None => SigningKey::from_bytes(secret_key.trim_ascii())
-                                .ok_or_else(|| anyhow::anyhow!("invalid secret key"))?
+                        match SigningKey::from_base64(&signing_key) {
+                            Some(signing_key) => signing_key,
+                            None => {
+                                let mut buf = [0; SigningKey::SIZE];
+
+                                buf.copy_from_slice(signing_key.trim_ascii());
+
+                                SigningKey::from_bytes(&buf)
+                                    .ok_or_else(|| anyhow::anyhow!("invalid signing key"))?
+                            }
                         }
                     }
                 };
 
-                let public_key = secret_key.public_key();
+                let verifying_key = signing_key.verifying_key();
 
-                std::io::stdout().write_all(public_key.to_base64().as_bytes())?;
+                std::io::stdout().write_all(verifying_key.to_base64().as_bytes())?;
             }
         }
 
         Commands::Blockchain { command } => match command {
-            BlockchainCommands::Create { seed, secret_key, storage } => {
+            BlockchainCommands::Create { seed, signing_key, storage } => {
                 if storage.exists() {
                     anyhow::bail!("storage database already exists");
                 }
@@ -153,15 +172,15 @@ async fn main() -> anyhow::Result<()> {
                     None => ChaCha20Rng::from_entropy()
                 };
 
-                let secret_key = match secret_key {
-                    Some(secret_key) => {
-                        match SecretKey::from_base64(secret_key) {
-                            Some(secret_key) => secret_key,
-                            None => anyhow::bail!("invalid secret key")
+                let signing_key = match signing_key {
+                    Some(signing_key) => {
+                        match SigningKey::from_base64(signing_key) {
+                            Some(signing_key) => signing_key,
+                            None => anyhow::bail!("invalid signing key")
                         }
                     }
 
-                    None => SecretKey::random(&mut rng)
+                    None => SigningKey::random(&mut rng)
                 };
 
                 let storage = SqliteStorage::open(storage)
@@ -172,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
                 rng.fill_bytes(&mut root_block_seed);
 
                 let block = Block::new(
-                    &secret_key,
+                    &signing_key,
                     Hash::default(),
                     BlockContent::data(root_block_seed)
                 ).context("failed to create new block")?;
@@ -184,12 +203,18 @@ async fn main() -> anyhow::Result<()> {
                     .context("failed to write new block to the database storage")?;
 
                 println!("New blockchain created!");
-                println!("  Root block: {}", hash.to_base64());
-                println!("  Secret key: {}", secret_key.to_base64());
-                println!("  Public key: {}", secret_key.public_key().to_base64());
+                println!("     Root block: {}", hash.to_base64());
+                println!("    Signing key: {}", signing_key.to_base64());
+                println!("  Verifying key: {}", signing_key.verifying_key().to_base64());
             }
 
-            BlockchainCommands::Serve { root_block, storage, nodes } => {
+            BlockchainCommands::Serve {
+                seed,
+                root_block,
+                storage,
+                nodes,
+                no_encryption
+            } => {
                 let storage = match storage {
                     Some(storage) => {
                         if !storage.exists() {
@@ -218,22 +243,49 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
-                let mut connections = Vec::with_capacity(nodes.len());
+                let mut rng = match seed {
+                    Some(seed) => ChaCha20Rng::seed_from_u64(seed),
+                    None => ChaCha20Rng::from_entropy()
+                };
 
+                let secret_key = SecretKey::random(&mut rng);
                 let socket = TcpSocket::default();
 
-                for node in nodes {
-                    println!("connecting to {node}...");
+                let options = PacketStreamOptions {
+                    encryption_algorithms: if no_encryption {
+                        vec![]
+                    } else {
+                        vec![
+                            PacketStreamEncryption::ChaCha20,
+                            PacketStreamEncryption::ChaCha12,
+                            PacketStreamEncryption::ChaCha8
+                        ]
+                    }
+                };
 
-                    let connection = socket.connect(node).await
+                let mut node = Node::new(root_block);
+
+                for address in nodes {
+                    println!("connecting to {address}...");
+
+                    let stream = socket.connect(address).await
                         .context("failed to connect to the node")?;
 
-                    let stream = PacketStream::init(secret_key, options, stream)
+                    let stream = PacketStream::init(&secret_key, options.clone(), stream).await
+                        .context("failed to initialize packet stream with the node")?;
 
-                    connections.push(connection);
+                    println!(
+                        "connected to {} [{}]",
+                        stream.remote_address(),
+                        base64::encode(stream.endpoint_id())
+                    );
+
+                    node.add_connection(stream);
                 }
 
-                let node = Node::new(root_block);
+                if let Some(storage) = storage {
+                    node.attach_storage(storage);
+                }
             }
         }
     }
