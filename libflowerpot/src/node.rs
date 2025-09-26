@@ -143,8 +143,8 @@ pub struct Node<T: Stream, F: Storage> {
 
 impl<T: Stream, F: Storage> Node<T, F> {
     /// Create new empty node.
-    pub fn new(root_block: impl Into<Hash>) -> Result<Self, NodeError<F>> {
-        Ok(Self {
+    pub fn new(root_block: impl Into<Hash>) -> Self {
+        Self {
             root_block: root_block.into(),
             streams: HashMap::new(),
             storage: None,
@@ -155,7 +155,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
             indexed_transactions: HashSet::new(),
             pending_blocks: HashMap::new(),
             pending_transactions: HashMap::new()
-        })
+        }
     }
 
     /// Add new connection.
