@@ -152,7 +152,7 @@ mod tests {
 
         assert!(is_valid);
         assert_eq!(hash.to_base64(), "bpoXoSDXtInY79Eqrdw7lTpUF6-FQH7xs2tH-BP5j5c=");
-        assert_eq!(author, signing_key.public_key());
+        assert_eq!(author, signing_key.verifying_key());
         assert_eq!(transaction.data(), b"hello, world!");
 
         Ok(())

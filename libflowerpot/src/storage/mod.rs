@@ -481,7 +481,7 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     assert_eq!(
         storage.get_current_validators()?,
-        vec![signing_key.public_key()]
+        vec![signing_key.verifying_key()]
     );
 
     // 4. Tail block modification.
@@ -595,7 +595,7 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     assert_eq!(
         storage.get_current_validators()?,
-        vec![signing_key_alt.public_key()]
+        vec![signing_key_alt.verifying_key()]
     );
 
     // Prepare validator blocks.
@@ -607,7 +607,7 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     let block_2_alt = Block::new(
         &signing_key_alt,
         block_1_alt_hash,
-        BlockContent::validators([validator_1.public_key()])
+        BlockContent::validators([validator_1.verifying_key()])
     ).unwrap();
 
     let block_2_alt_hash = block_2_alt.hash().unwrap();
@@ -616,8 +616,8 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
         &validator_1,
         block_2_alt_hash,
         BlockContent::validators([
-            validator_2.public_key(),
-            validator_3.public_key()
+            validator_2.verifying_key(),
+            validator_3.verifying_key()
         ])
     ).unwrap();
 
@@ -631,36 +631,36 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     // Block 1 (root)
     assert_eq!(
         storage.get_validators_before_block(&block_1_alt_hash)?,
-        Some(vec![signing_key_alt.public_key()])
+        Some(vec![signing_key_alt.verifying_key()])
     );
 
     assert_eq!(
         storage.get_validators_after_block(&block_1_alt_hash)?,
-        Some(vec![signing_key_alt.public_key()])
+        Some(vec![signing_key_alt.verifying_key()])
     );
 
     // Block 2 (root -> validator 1)
     assert_eq!(
         storage.get_validators_before_block(&block_2_alt_hash)?,
-        Some(vec![signing_key_alt.public_key()])
+        Some(vec![signing_key_alt.verifying_key()])
     );
 
     assert_eq!(
         storage.get_validators_after_block(&block_2_alt_hash)?,
-        Some(vec![validator_1.public_key()])
+        Some(vec![validator_1.verifying_key()])
     );
 
     // Block 3 (validator 1 -> validators 2 and 3)
     assert_eq!(
         storage.get_validators_before_block(&block_3_alt_hash)?,
-        Some(vec![validator_1.public_key()])
+        Some(vec![validator_1.verifying_key()])
     );
 
     assert_eq!(
         storage.get_validators_after_block(&block_3_alt_hash)?,
         Some(vec![
-            validator_2.public_key(),
-            validator_3.public_key()
+            validator_2.verifying_key(),
+            validator_3.verifying_key()
         ])
     );
 
@@ -668,8 +668,8 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     assert_eq!(
         storage.get_current_validators()?,
         vec![
-            validator_2.public_key(),
-            validator_3.public_key()
+            validator_2.verifying_key(),
+            validator_3.verifying_key()
         ]
     );
 

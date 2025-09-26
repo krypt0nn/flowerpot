@@ -19,3 +19,4 @@
 pub mod base64;
 pub mod hash;
 pub mod sign;
+pub mod key_exchange;

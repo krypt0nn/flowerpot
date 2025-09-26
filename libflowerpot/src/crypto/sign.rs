@@ -29,12 +29,13 @@ impl SigningKey {
     pub const SIZE: usize = 32;
 
     /// Generate new random signature signing key.
+    #[inline]
     pub fn random(rng: &mut impl k256::schnorr::CryptoRngCore) -> Self {
         Self(k256::ecdsa::SigningKey::random(rng))
     }
 
     #[inline]
-    pub fn public_key(&self) -> VerifyingKey {
+    pub fn verifying_key(&self) -> VerifyingKey {
         VerifyingKey(*self.0.verifying_key())
     }
 
@@ -90,6 +91,7 @@ impl From<k256::ecdsa::SigningKey> for SigningKey {
 }
 
 impl std::fmt::Display for SigningKey {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.to_base64())
     }
@@ -245,4 +247,25 @@ impl std::fmt::Display for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.to_base64())
     }
+}
+
+#[test]
+fn test() -> Result<(), k256::ecdsa::Error> {
+    use rand_chacha::rand_core::SeedableRng;
+
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(123);
+
+    let signing_key = SigningKey::random(&mut rng);
+    let verifying_key = signing_key.verifying_key();
+
+    let signing_key = SigningKey::from_base64(signing_key.to_base64()).unwrap();
+    let verifying_key = VerifyingKey::from_base64(verifying_key.to_base64()).unwrap();
+
+    let sign = Signature::create(signing_key, b"test")?;
+
+    let sign = Signature::from_base64(sign.to_base64()).unwrap();
+
+    assert_eq!(sign.verify(b"test")?, (true, verifying_key));
+
+    Ok(())
 }

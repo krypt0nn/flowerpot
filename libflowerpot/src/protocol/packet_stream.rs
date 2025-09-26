@@ -21,6 +21,7 @@ use std::collections::VecDeque;
 #[cfg(feature = "encryption-chacha20")]
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 
+use crate::crypto::key_exchange::{SecretKey, PublicKey};
 use crate::network::Stream;
 
 use super::{Packet, PacketError};
@@ -190,14 +191,7 @@ impl<S: Stream> PacketStream<S> {
         127, 246, 157, 130, 236, 197, 255,  50
     ];
 
-    pub const V1_SHARED_SECRET_SALT1: [u8; 32] = [
-         20, 160,  28, 119, 111,  25, 178, 249,
-        152, 100, 103,  76, 168, 239, 116, 134,
-        137, 241, 219, 175, 196, 216,  61, 227,
-        170, 192, 145, 228,  73,   7, 150, 224
-    ];
-
-    pub const V1_SHARED_SECRET_SALT2: [u8; 32] = [
+    pub const V1_SHARED_SECRET_IMAGE_SALT: [u8; 32] = [
         235, 214, 153, 167,  37, 128, 221,  65,
         240, 229, 201,  26,  23, 135,  48, 161,
         107, 251, 212,  57, 252,  55, 131,  60,
@@ -211,7 +205,7 @@ impl<S: Stream> PacketStream<S> {
     /// if handshake was successful - provide simple interface to send and
     /// receive packets over the network.
     pub async fn init(
-        secret_key: &k256::ecdh::EphemeralSecret,
+        secret_key: impl AsRef<SecretKey>,
         options: PacketStreamOptions,
         mut stream: S
     ) -> Result<Self, PacketStreamError> {
@@ -222,14 +216,8 @@ impl<S: Stream> PacketStream<S> {
         );
 
         // Prepare public key for key exchange.
-        let public_key = secret_key.public_key()
-            .to_sec1_bytes();
-
-        let public_key_len = public_key.len();
-
-        assert!(public_key_len <= u8::MAX as usize);
-
-        let public_key_len = public_key_len as u8;
+        let secret_key = secret_key.as_ref();
+        let public_key = secret_key.public_key().to_bytes();
 
         // Prepare options byte.
         let mut options_byte = 0b00000000;
@@ -250,11 +238,10 @@ impl<S: Stream> PacketStream<S> {
             };
         }
 
-        // Send header, options and public key length.
+        // Send header and options.
         stream.write(&[
             Self::V1_HEADER,
-            options_byte,
-            public_key_len
+            options_byte
         ]).await.map_err(PacketStreamError::Stream)?;
 
         // Send public key.
@@ -274,14 +261,14 @@ impl<S: Stream> PacketStream<S> {
             return Err(PacketStreamError::UnsupportedProtocolVersion(buf[0]));
         }
 
-        // Read options and public key length.
-        let mut buf = [0; 2];
+        // Read options.
+        let mut buf = [0; 1];
 
         stream.read_exact(&mut buf).await
             .map_err(PacketStreamError::Stream)?;
 
         // Read public key.
-        let mut public_key = vec![0; buf[1] as usize];
+        let mut public_key = [0; PublicKey::SIZE];
 
         stream.read_exact(&mut public_key).await
             .map_err(PacketStreamError::Stream)?;
@@ -291,20 +278,15 @@ impl<S: Stream> PacketStream<S> {
             &public_key
         );
 
-        let public_key = k256::PublicKey::from_sec1_bytes(&public_key)
-            .map_err(|_| PacketStreamError::InvalidPublicKey)?;
+        let public_key = PublicKey::from_bytes(&public_key)
+            .ok_or(PacketStreamError::InvalidPublicKey)?;
 
         // Prepare shared secret.
-        let shared_secret = secret_key.diffie_hellman(&public_key);
-
-        let shared_secret = blake3::keyed_hash(
-            &Self::V1_SHARED_SECRET_SALT1,
-            shared_secret.raw_secret_bytes()
-        );
+        let shared_secret = secret_key.shared_secret(&public_key);
 
         let shared_secret_image = blake3::keyed_hash(
-            &Self::V1_SHARED_SECRET_SALT2,
-            shared_secret.as_bytes()
+            &Self::V1_SHARED_SECRET_IMAGE_SALT,
+            &shared_secret
         );
 
         // Decode options.
@@ -341,7 +323,7 @@ impl<S: Stream> PacketStream<S> {
             Some(algorithm) => {
                 Some(PacketStreamEncryptor::new(
                     algorithm,
-                    shared_secret.as_bytes(),
+                    &shared_secret,
                     endpoint_id.as_bytes()
                 ).ok_or(PacketStreamError::EncryptorBuildFailed)?)
             }
@@ -353,7 +335,7 @@ impl<S: Stream> PacketStream<S> {
             Some(algorithm) => {
                 Some(PacketStreamEncryptor::new(
                     algorithm,
-                    shared_secret.as_bytes(),
+                    &shared_secret,
                     endpoint_id.as_bytes()
                 ).ok_or(PacketStreamError::EncryptorBuildFailed)?)
             }
@@ -397,7 +379,7 @@ impl<S: Stream> PacketStream<S> {
         Ok(Self {
             stream,
             endpoint_id: endpoint_id.into(),
-            shared_secret: shared_secret.into(),
+            shared_secret,
             read_encryptor,
             write_encryptor,
             peek_queue: VecDeque::new()
