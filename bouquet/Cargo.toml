@@ -1,0 +1,14 @@
+[package]
+name = "bouquet"
+version = "0.1.0"
+authors = ["Nikita Podvirnyi <krypt0nn@vk.com>"]
+license = "GPL-3.0-or-later"
+edition = "2024"
+publish = false
+
+[dependencies]
+libflowerpot = { path = "../libflowerpot" }
+tokio = { version = "1.47", features = ["rt-multi-thread", "macros"] }
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+rand_chacha = "0.3"

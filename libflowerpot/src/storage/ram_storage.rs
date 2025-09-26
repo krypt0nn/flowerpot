@@ -19,7 +19,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::crypto::*;
+use crate::crypto::hash::Hash;
+use crate::crypto::sign::VerifyingKey;
 use crate::block::{Block, BlockContent, Error as BlockError};
 
 use super::Storage;
@@ -37,7 +38,7 @@ pub enum Error {
 pub struct RamStorage {
     blocks: Arc<RwLock<HashMap<Hash, Block>>>,
     history: Arc<RwLock<Vec<Hash>>>,
-    root_validator: Arc<RwLock<Option<PublicKey>>>
+    root_validator: Arc<RwLock<Option<VerifyingKey>>>
 }
 
 impl RamStorage {
@@ -219,7 +220,7 @@ impl Storage for RamStorage {
     fn get_validators_before_block(
         &self,
         hash: &Hash
-    ) -> Result<Option<Vec<PublicKey>>, Self::Error> {
+    ) -> Result<Option<Vec<VerifyingKey>>, Self::Error> {
         let (
             Ok(blocks),
             Ok(history)
@@ -273,7 +274,7 @@ impl Storage for RamStorage {
     fn get_validators_after_block(
         &self,
         hash: &Hash
-    ) -> Result<Option<Vec<PublicKey>>, Self::Error> {
+    ) -> Result<Option<Vec<VerifyingKey>>, Self::Error> {
         let (
             Ok(blocks),
             Ok(history)

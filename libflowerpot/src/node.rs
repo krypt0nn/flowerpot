@@ -22,9 +22,11 @@ use std::sync::Arc;
 
 use spin::{RwLock, RwLockWriteGuard};
 
-use crate::crypto::*;
-use crate::block::{Block, BlockContent, BlockStatus, Error as BlockError};
+use crate::crypto::base64;
+use crate::crypto::hash::Hash;
+use crate::crypto::sign::VerifyingKey;
 use crate::transaction::Transaction;
+use crate::block::{Block, BlockContent, BlockStatus, Error as BlockError};
 use crate::storage::Storage;
 use crate::network::Stream;
 use crate::protocol::{Packet, PacketStream, PacketStreamError};
@@ -89,17 +91,6 @@ pub struct NodeOptions {
     /// Default is `true`.
     pub accept_pending_transactions: bool,
 
-    /// When specified this function will be used to filter incoming blocks
-    /// and accept only those for which the provided function returned `true`.
-    ///
-    /// This option is needed when you use blockchain for your own application
-    /// and you want to accept blocks of special format only.
-    ///
-    /// This filter function is applied to the `Block` packets only.
-    ///
-    /// Default is `None`.
-    pub blocks_filter: Option<fn(&Hash, &PublicKey, &Block) -> bool>,
-
     /// When specified this function will be used to filter incoming
     /// transactions and accept only those for which the provided function
     /// returned `true`.
@@ -112,7 +103,18 @@ pub struct NodeOptions {
     /// `blocks_filter` as well.
     ///
     /// Default is `None`.
-    pub transactions_filter: Option<fn(&Hash, &PublicKey, &Transaction) -> bool>
+    pub transactions_filter: Option<fn(&Hash, &VerifyingKey, &Transaction) -> bool>,
+
+    /// When specified this function will be used to filter incoming blocks
+    /// and accept only those for which the provided function returned `true`.
+    ///
+    /// This option is needed when you use blockchain for your own application
+    /// and you want to accept blocks of special format only.
+    ///
+    /// This filter function is applied to the `Block` packets only.
+    ///
+    /// Default is `None`.
+    pub blocks_filter: Option<fn(&Hash, &VerifyingKey, &Block) -> bool>
 }
 
 impl Default for NodeOptions {
@@ -133,7 +135,7 @@ pub struct Node<T: Stream, F: Storage> {
     streams: HashMap<[u8; 32], PacketStream<T>>,
     storage: Option<F>,
     history: Vec<Hash>,
-    validators: Vec<PublicKey>,
+    validators: Vec<VerifyingKey>,
     current_distance: [u8; 32],
     indexed_transactions: HashSet<Hash>,
     pending_blocks: HashMap<Hash, Block>,
@@ -286,7 +288,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
     /// All the non-critical errors will be silenced and displayed in tracing
     /// logs only.
     pub async fn start(
-        mut self,
+        self,
         options: NodeOptions,
         mut spawner: impl FnMut(Box<dyn std::future::Future<Output = ()>>)
     ) -> Result<NodeHandler, NodeError<F>>
@@ -313,7 +315,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
 
             existing_streams.insert(endpoint_id, stream_sender);
 
-            let endpoint_id = base64_encode(endpoint_id);
+            let endpoint_id = base64::encode(endpoint_id);
 
             #[cfg(feature = "tracing")]
             tracing::info!(
@@ -340,9 +342,9 @@ impl<T: Stream, F: Storage> Node<T, F> {
             fn try_write_block<S: Storage>(
                 block: Block,
                 hash: Hash,
-                public_key: &PublicKey,
+                verifying_key: &VerifyingKey,
                 mut history: RwLockWriteGuard<'_, Vec<Hash>>,
-                mut validators: RwLockWriteGuard<'_, Vec<PublicKey>>,
+                mut validators: RwLockWriteGuard<'_, Vec<VerifyingKey>>,
                 mut current_distance: RwLockWriteGuard<'_, [u8; 32]>,
                 mut indexed_transactions: RwLockWriteGuard<'_, HashSet<Hash>>,
                 mut pending_blocks: RwLockWriteGuard<'_, HashMap<Hash, Block>>,
@@ -355,7 +357,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                 // author.
                 let new_distance = crate::block_validator_distance(
                     &history[n - 2],
-                    public_key
+                    verifying_key
                 );
 
                 // If this block is a *replacement* for the last block of the
@@ -663,7 +665,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     mut block
                                 } if received_root_block == root_block => {
                                     // Verify the block and obtain its hash.
-                                    let (is_valid, hash, public_key) = match block.verify() {
+                                    let (is_valid, hash, verifying_key) = match block.verify() {
                                         Ok(result) => result,
                                         Err(err) => {
                                             #[cfg(feature = "tracing")]
@@ -678,12 +680,12 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     };
 
                                     // Skip the block if it's invalid.
-                                    if !is_valid || !validators.read().contains(&public_key) {
+                                    if !is_valid || !validators.read().contains(&verifying_key) {
                                         #[cfg(feature = "tracing")]
                                         tracing::warn!(
                                             ?endpoint_id,
                                             hash = hash.to_base64(),
-                                            public_key = public_key.to_base64(),
+                                            verifying_key = verifying_key.to_base64(),
                                             "received invalid block"
                                         );
 
@@ -704,13 +706,13 @@ impl<T: Stream, F: Storage> Node<T, F> {
 
                                     // Check this block using the provided filter.
                                     if let Some(filter) = &options.blocks_filter
-                                        && !filter(&hash, &public_key, &block)
+                                        && !filter(&hash, &verifying_key, &block)
                                     {
                                         #[cfg(feature = "tracing")]
                                         tracing::debug!(
                                             ?endpoint_id,
                                             hash = hash.to_base64(),
-                                            public_key = public_key.to_base64(),
+                                            verifying_key = verifying_key.to_base64(),
                                             "received block which was filtered out"
                                         );
 
@@ -720,7 +722,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     // Check the block's approval status.
                                     let status = BlockStatus::validate(
                                         hash,
-                                        public_key,
+                                        verifying_key,
                                         block.approvals(),
                                         validators.read().iter()
                                     );
@@ -729,7 +731,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         // Block is valid and approved by enough validators.
                                         Ok(BlockStatus::Approved {
                                             hash,
-                                            public_key,
+                                            verifying_key,
                                             approvals,
                                             ..
                                         }) => {
@@ -743,7 +745,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                             try_write_block(
                                                 block,
                                                 hash,
-                                                &public_key,
+                                                &verifying_key,
                                                 history.write(),
                                                 validators.write(),
                                                 current_distance.write(),
@@ -857,7 +859,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     }
 
                                     // Verify received transaction.
-                                    let (is_valid, hash, public_key) = match transaction.verify() {
+                                    let (is_valid, hash, verifying_key) = match transaction.verify() {
                                         Ok(result) => result,
                                         Err(err) => {
                                             #[cfg(feature = "tracing")]
@@ -877,7 +879,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         tracing::warn!(
                                             ?endpoint_id,
                                             hash = hash.to_base64(),
-                                            public_key = public_key.to_base64(),
+                                            verifying_key = verifying_key.to_base64(),
                                             "received invalid transaction"
                                         );
 
@@ -892,7 +894,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         tracing::trace!(
                                             ?endpoint_id,
                                             hash = hash.to_base64(),
-                                            public_key = public_key.to_base64(),
+                                            verifying_key = verifying_key.to_base64(),
                                             "received already indexed transaction"
                                         );
 
@@ -901,13 +903,13 @@ impl<T: Stream, F: Storage> Node<T, F> {
 
                                     // Check this transaction using the provided filter.
                                     if let Some(filter) = &options.transactions_filter
-                                        && !filter(&hash, &public_key, &transaction)
+                                        && !filter(&hash, &verifying_key, &transaction)
                                     {
                                         #[cfg(feature = "tracing")]
                                         tracing::debug!(
                                             ?endpoint_id,
                                             hash = hash.to_base64(),
-                                            public_key = public_key.to_base64(),
+                                            verifying_key = verifying_key.to_base64(),
                                             "received transaction which was filtered out"
                                         );
 
@@ -925,7 +927,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     approval
                                 } if received_root_block == root_block => {
                                     // Verify approval.
-                                    let (is_valid, public_key) = match approval.verify(target_block) {
+                                    let (is_valid, verifying_key) = match approval.verify(target_block.as_bytes()) {
                                         Ok(result) => result,
                                         Err(err) => {
                                             #[cfg(feature = "tracing")]
@@ -942,12 +944,12 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     };
 
                                     // Skip approval if it's invalid.
-                                    if !is_valid || !validators.read().contains(&public_key) {
+                                    if !is_valid || !validators.read().contains(&verifying_key) {
                                         #[cfg(feature = "tracing")]
                                         tracing::warn!(
                                             ?endpoint_id,
                                             target_block = target_block.to_base64(),
-                                            public_key = public_key.to_base64(),
+                                            verifying_key = verifying_key.to_base64(),
                                             "received invalid block approval"
                                         );
 
@@ -965,7 +967,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         tracing::info!(
                                             ?endpoint_id,
                                             target_block = target_block.to_base64(),
-                                            public_key = public_key.to_base64(),
+                                            verifying_key = verifying_key.to_base64(),
                                             "added new approval to the pending block"
                                         );
 
@@ -973,7 +975,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
 
                                         // Verify this block (mainly to obtain
                                         // its public key).
-                                        let (is_valid, hash, public_key) = match block.verify() {
+                                        let (is_valid, hash, verifying_key) = match block.verify() {
                                             Ok(result) => result,
                                             Err(err) => {
                                                 #[cfg(feature = "tracing")]
@@ -988,12 +990,12 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         };
 
                                         // Skip the block if it's invalid.
-                                        if !is_valid || !validators.read().contains(&public_key) {
+                                        if !is_valid || !validators.read().contains(&verifying_key) {
                                             #[cfg(feature = "tracing")]
                                             tracing::error!(
                                                 ?endpoint_id,
                                                 hash = hash.to_base64(),
-                                                public_key = public_key.to_base64(),
+                                                verifying_key = verifying_key.to_base64(),
                                                 "approved a pending block which turned to be invalid (how did it get here?)"
                                             );
 
@@ -1003,7 +1005,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         // Validate the block.
                                         let status = BlockStatus::validate(
                                             hash,
-                                            public_key,
+                                            verifying_key,
                                             block.approvals(),
                                             validators.read().as_slice()
                                         );
@@ -1011,7 +1013,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         match status {
                                             Ok(BlockStatus::Approved {
                                                 hash,
-                                                public_key,
+                                                verifying_key,
                                                 approvals,
                                                 ..
                                             }) => {
@@ -1022,7 +1024,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                                     .collect();
 
                                                 // Order this block to be written.
-                                                write_block = Some((hash, public_key));
+                                                write_block = Some((hash, verifying_key));
                                             }
 
                                             Err(err) => {

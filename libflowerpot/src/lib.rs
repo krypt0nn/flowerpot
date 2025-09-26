@@ -16,6 +16,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+pub mod varint;
 pub mod crypto;
 pub mod transaction;
 pub mod block;
@@ -25,7 +26,8 @@ pub mod protocol;
 pub mod viewer;
 pub mod node;
 
-use crypto::*;
+use crypto::hash::Hash;
+use crypto::sign::VerifyingKey;
 
 /// Calculate required amount of block approvals for provided amount of
 /// blockchain validators at the current moment.
@@ -53,7 +55,7 @@ pub fn calc_required_approvals(validators: usize) -> usize {
 /// This distance is used to determine approved blocks priority.
 pub fn block_validator_distance(
     block: &Hash,
-    validator: &PublicKey
+    validator: &VerifyingKey
 ) -> [u8; 32] {
     let mut dist = *blake3::hash(&validator.to_bytes()).as_bytes();
 
@@ -73,7 +75,7 @@ pub fn block_validator_distance(
 /// prioritized equal amount of times.
 pub fn rank_validators(
     prev_block_hash: &Hash,
-    validators: &mut [PublicKey]
+    validators: &mut [VerifyingKey]
 ) {
     validators.sort_by(|a, b| {
         let a = block_validator_distance(prev_block_hash, a);

@@ -18,7 +18,8 @@
 
 use std::collections::VecDeque;
 
-use crate::crypto::*;
+use crate::crypto::hash::Hash;
+use crate::crypto::sign::VerifyingKey;
 use crate::block::{Block, BlockContent, BlockStatus, Error as BlockError};
 use crate::storage::Storage;
 use crate::network::Stream;
@@ -49,7 +50,7 @@ pub enum ViewerError {
 pub struct ValidBlock {
     pub block: Block,
     pub hash: Hash,
-    pub public_key: PublicKey
+    pub verifying_key: VerifyingKey
 }
 
 /// Viewer is a helper struct which uses the underlying packet stream connection
@@ -59,7 +60,7 @@ pub struct Viewer<'stream, S: Stream> {
     root_block: Hash,
     current_block: (u64, Hash),
     pending_history: VecDeque<Hash>,
-    validators: Vec<(PublicKey, u8)>
+    validators: Vec<(VerifyingKey, u8)>
 }
 
 impl<'stream, S: Stream> Viewer<'stream, S> {
@@ -203,7 +204,7 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
     /// Get list of current block validators.
     pub fn current_validators(
         &self
-    ) -> impl ExactSizeIterator<Item = &PublicKey> {
+    ) -> impl ExactSizeIterator<Item = &VerifyingKey> {
         self.validators.iter().map(|(validator, _)| validator)
     }
 
@@ -286,7 +287,7 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
 
         let BlockStatus::Approved {
             hash,
-            public_key,
+            verifying_key,
             approvals,
             ..
         } = status else {
@@ -294,8 +295,8 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
         };
 
         // Update validators last seen counters.
-        for (public_key, counter) in &mut self.validators {
-            if approvals.iter().any(|(_, validator)| validator == public_key) {
+        for (verifying_key, counter) in &mut self.validators {
+            if approvals.iter().any(|(_, validator)| validator == verifying_key) {
                 *counter = 0;
             } else {
                 *counter = counter.saturating_add(1);
@@ -325,7 +326,7 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
         Ok(Some(ValidBlock {
             block,
             hash,
-            public_key
+            verifying_key
         }))
     }
 }
@@ -407,13 +408,13 @@ impl<'stream, S: Stream> BatchedViewer<'stream, S> {
     /// Get list of current block validators.
     pub fn current_validators(
         &self
-    ) -> Result<Vec<PublicKey>, ViewerError> {
+    ) -> Result<Vec<VerifyingKey>, ViewerError> {
         let mut validators = Vec::new();
 
         for viewer in &self.viewers {
             let viewer_validators = viewer.current_validators()
                 .cloned()
-                .collect::<Vec<PublicKey>>();
+                .collect::<Vec<VerifyingKey>>();
 
             if validators.is_empty() {
                 validators = viewer_validators;
@@ -448,12 +449,12 @@ impl<'stream, S: Stream> BatchedViewer<'stream, S> {
                 if let Some(curr_block) = &mut curr_block {
                     let curr_distance = crate::block_validator_distance(
                         &self.prev_block,
-                        &curr_block.public_key
+                        &curr_block.verifying_key
                     );
 
                     let new_distance = crate::block_validator_distance(
                         &self.prev_block,
-                        &block.public_key
+                        &block.verifying_key
                     );
 
                     if new_distance < curr_distance {
@@ -501,11 +502,11 @@ impl<'stream, S: Stream> BatchedViewer<'stream, S> {
                 match block.verify() {
                     Ok((false, _, _)) => Ok(None),
 
-                    Ok((true, hash, public_key)) => {
+                    Ok((true, hash, verifying_key)) => {
                         Ok(Some(ValidBlock {
                             block,
                             hash,
-                            public_key
+                            verifying_key
                         }))
                     }
 
@@ -522,12 +523,12 @@ impl<'stream, S: Stream> BatchedViewer<'stream, S> {
             (Some(network_block), Some(storage_block)) => {
                 let network_distance = crate::block_validator_distance(
                     &self.prev_block,
-                    &network_block.public_key
+                    &network_block.verifying_key
                 );
 
                 let storage_distance = crate::block_validator_distance(
                     &self.prev_block,
-                    &storage_block.public_key
+                    &storage_block.verifying_key
                 );
 
                 if network_distance < storage_distance {

@@ -18,11 +18,12 @@
 
 use std::io::{Read, Cursor};
 
-use varint_rs::*;
+use varint_rs::{VarintReader, VarintWriter};
 
-use crate::crypto::*;
-use crate::block::Block;
+use crate::crypto::hash::Hash;
+use crate::crypto::sign::Signature;
 use crate::transaction::Transaction;
+use crate::block::Block;
 
 mod packet_stream;
 
@@ -206,7 +207,7 @@ impl Packet {
             }
 
             Self::AskPendingBlocks { root_block } => {
-                let mut buf = [0; 33];
+                let mut buf = [0; Hash::SIZE + 1];
 
                 buf[0] = Self::V1_ASK_PENDING_BLOCKS;
 
@@ -236,7 +237,7 @@ impl Packet {
             }
 
             Self::AskPendingTransactions { root_block } => {
-                let mut buf = [0; 33];
+                let mut buf = [0; Hash::SIZE + 1];
 
                 buf[0] = Self::V1_ASK_PENDING_TRANSACTIONS;
 
@@ -260,12 +261,12 @@ impl Packet {
             }
 
             Self::AskBlock { root_block, target_block } => {
-                let mut buf = [0; 65];
+                let mut buf = [0; Hash::SIZE * 2 + 1];
 
                 buf[0] = Self::V1_ASK_BLOCK;
 
-                buf[1..33].copy_from_slice(&root_block.0);
-                buf[33..65].copy_from_slice(&target_block.0);
+                buf[1..Hash::SIZE + 1].copy_from_slice(&root_block.0);
+                buf[Hash::SIZE + 1..65].copy_from_slice(&target_block.0);
 
                 Ok(Box::new(buf))
             }
@@ -282,12 +283,12 @@ impl Packet {
             }
 
             Self::AskTransaction { root_block, transaction } => {
-                let mut buf = [0; 65];
+                let mut buf = [0; Hash::SIZE * 2 + 1];
 
                 buf[0] = Self::V1_ASK_TRANSACTION;
 
-                buf[1..33].copy_from_slice(&root_block.0);
-                buf[33..].copy_from_slice(&transaction.0);
+                buf[1..Hash::SIZE + 1].copy_from_slice(&root_block.0);
+                buf[Hash::SIZE + 1..].copy_from_slice(&transaction.0);
 
                 Ok(Box::new(buf))
             }
@@ -298,7 +299,7 @@ impl Packet {
                 buf.push(Self::V1_TRANSACTION);
 
                 buf.extend_from_slice(&root_block.0);
-                buf.extend(transaction.to_bytes()?);
+                buf.extend(transaction.to_bytes());
 
                 Ok(buf.into_boxed_slice())
             }
@@ -308,13 +309,13 @@ impl Packet {
                 target_block,
                 approval
             } => {
-                let mut buf = [0; 130];
+                let mut buf = [0; Hash::SIZE * 2 + Signature::SIZE + 1];
 
                 buf[0] = Self::V1_APPROVE_BLOCK;
 
-                buf[1..33].copy_from_slice(&root_block.0);
-                buf[33..65].copy_from_slice(&target_block.0);
-                buf[65..].copy_from_slice(&approval.to_bytes());
+                buf[1..Hash::SIZE + 1].copy_from_slice(&root_block.0);
+                buf[Hash::SIZE + 1..Hash::SIZE * 2 + 1].copy_from_slice(&target_block.0);
+                buf[Hash::SIZE * 2 + 1..].copy_from_slice(&approval.to_bytes());
 
                 Ok(Box::new(buf))
             }
@@ -333,15 +334,15 @@ impl Packet {
             Self::V1_HEARTBEAT => Ok(Self::Heartbeat),
 
             Self::V1_ASK_HISTORY => {
-                if bytes.len() < 35 {
+                if bytes.len() < Hash::SIZE + 3 {
                     return Err(PacketError::PacketTooShort);
                 }
 
-                let mut root_block = [0; 32];
+                let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..33]);
+                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
 
-                let mut bytes = Cursor::new(bytes[33..].to_vec());
+                let mut bytes = Cursor::new(bytes[Hash::SIZE + 1..].to_vec());
 
                 let offset = bytes.read_u64_varint()?;
                 let max_length = bytes.read_u64_varint()?;
@@ -354,20 +355,20 @@ impl Packet {
             }
 
             Self::V1_HISTORY => {
-                if bytes.len() < 33 {
+                if bytes.len() < Hash::SIZE + 1 {
                     return Err(PacketError::PacketTooShort);
                 }
 
-                let mut root_block = [0; 32];
+                let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..33]);
+                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
 
-                let mut bytes = Cursor::new(bytes[33..].to_vec());
+                let mut bytes = Cursor::new(bytes[Hash::SIZE + 1..].to_vec());
 
                 let offset = bytes.read_u64_varint()?;
 
                 let mut history = Vec::new();
-                let mut hash = [0; 32];
+                let mut hash = [0; Hash::SIZE];
 
                 while bytes.read_exact(&mut hash).is_ok() {
                     history.push(Hash::from(hash));
@@ -381,13 +382,13 @@ impl Packet {
             }
 
             Self::V1_ASK_PENDING_BLOCKS => {
-                if bytes.len() < 33 {
+                if bytes.len() < Hash::SIZE + 1 {
                     return Err(PacketError::PacketTooShort);
                 }
 
-                let mut root_block = [0; 32];
+                let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..33]);
+                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
 
                 Ok(Self::AskPendingBlocks {
                     root_block: Hash::from(root_block)
@@ -395,18 +396,18 @@ impl Packet {
             },
 
             Self::V1_PENDING_BLOCKS => {
-                if bytes.len() < 33 {
+                if bytes.len() < Hash::SIZE + 1 {
                     return Err(PacketError::PacketTooShort);
                 }
 
-                let mut root_block = [0; 32];
+                let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..33]);
+                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
 
-                let mut bytes = Cursor::new(bytes[33..].to_vec());
+                let mut bytes = Cursor::new(bytes[Hash::SIZE + 1..].to_vec());
 
-                let mut hash = [0; 32];
-                let mut approval = [0; 65];
+                let mut hash = [0; Hash::SIZE];
+                let mut approval = [0; Signature::SIZE];
 
                 let mut blocks = Vec::new();
 
@@ -418,7 +419,7 @@ impl Packet {
                     for _ in 0..len {
                         bytes.read_exact(&mut approval)?;
 
-                        let Some(approval) = Signature::from_bytes(approval) else {
+                        let Some(approval) = Signature::from_bytes(&approval) else {
                             return Err(PacketError::InvalidSignature);
                         };
 
@@ -438,13 +439,13 @@ impl Packet {
             }
 
             Self::V1_ASK_PENDING_TRANSACTIONS => {
-                if bytes.len() < 33 {
+                if bytes.len() < Hash::SIZE + 1 {
                     return Err(PacketError::PacketTooShort);
                 }
 
-                let mut root_block = [0; 32];
+                let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..33]);
+                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
 
                 Ok(Self::AskPendingTransactions {
                     root_block: Hash::from(root_block)
@@ -452,16 +453,16 @@ impl Packet {
             }
 
             Self::V1_PENDING_TRANSACTIONS => {
-                if bytes.len() < 33 {
+                if bytes.len() < Hash::SIZE + 1 {
                     return Err(PacketError::PacketTooShort);
                 }
 
-                let mut root_block = [0; 32];
+                let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..33]);
+                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
 
-                let mut bytes = Cursor::new(bytes[33..].to_vec());
-                let mut hash = [0; 32];
+                let mut bytes = Cursor::new(bytes[Hash::SIZE + 1..].to_vec());
+                let mut hash = [0; Hash::SIZE];
 
                 let mut transactions = Vec::new();
 
@@ -476,15 +477,15 @@ impl Packet {
             }
 
             Self::V1_ASK_BLOCK => {
-                if bytes.len() < 65 {
+                if bytes.len() < Hash::SIZE * 2 + 1 {
                     return Err(PacketError::PacketTooShort);
                 }
 
-                let mut root_block = [0; 32];
-                let mut target_block = [0; 32];
+                let mut root_block = [0; Hash::SIZE];
+                let mut target_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..33]);
-                target_block.copy_from_slice(&bytes[33..65]);
+                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+                target_block.copy_from_slice(&bytes[Hash::SIZE + 1..]);
 
                 Ok(Self::AskBlock {
                     root_block: Hash::from(root_block),
@@ -493,30 +494,30 @@ impl Packet {
             }
 
             Self::V1_BLOCK => {
-                if bytes.len() < 33 {
+                if bytes.len() < Hash::SIZE + 1 {
                     return Err(PacketError::PacketTooShort);
                 }
 
-                let mut root_block = [0; 32];
+                let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..33]);
+                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
 
                 Ok(Self::Block {
                     root_block: Hash::from(root_block),
-                    block: Block::from_bytes(&bytes[33..])?
+                    block: Block::from_bytes(&bytes[Hash::SIZE + 1..])?
                 })
             }
 
             Self::V1_ASK_TRANSACTION => {
-                if bytes.len() < 65 {
+                if bytes.len() < Hash::SIZE * 2 + 1 {
                     return Err(PacketError::PacketTooShort);
                 }
 
-                let mut root_block = [0; 32];
-                let mut transaction = [0; 32];
+                let mut root_block = [0; Hash::SIZE];
+                let mut transaction = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..33]);
-                transaction.copy_from_slice(&bytes[33..65]);
+                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+                transaction.copy_from_slice(&bytes[Hash::SIZE + 1..]);
 
                 Ok(Self::AskTransaction {
                     root_block: Hash::from(root_block),
@@ -525,34 +526,34 @@ impl Packet {
             }
 
             Self::V1_TRANSACTION => {
-                if bytes.len() < 33 {
+                if bytes.len() < Hash::SIZE + 1 {
                     return Err(PacketError::PacketTooShort);
                 }
 
-                let mut root_block = [0; 32];
+                let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..33]);
+                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
 
                 Ok(Self::Transaction {
                     root_block: Hash::from(root_block),
-                    transaction: Transaction::from_bytes(&bytes[33..])?
+                    transaction: Transaction::from_bytes(&bytes[Hash::SIZE + 1..])?
                 })
             }
 
             Self::V1_APPROVE_BLOCK => {
-                if bytes.len() < 130 {
+                if bytes.len() < Hash::SIZE * 2 + Signature::SIZE + 1 {
                     return Err(PacketError::PacketTooShort);
                 }
 
-                let mut root_block = [0; 32];
-                let mut target_block = [0; 32];
-                let mut approval = [0; 65];
+                let mut root_block = [0; Hash::SIZE];
+                let mut target_block = [0; Hash::SIZE];
+                let mut approval = [0; Signature::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..33]);
-                target_block.copy_from_slice(&bytes[33..65]);
-                approval.copy_from_slice(&bytes[65..]);
+                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+                target_block.copy_from_slice(&bytes[Hash::SIZE + 1..Hash::SIZE * 2 + 1]);
+                approval.copy_from_slice(&bytes[Hash::SIZE * 2 + 1..]);
 
-                let Some(approval) = Signature::from_bytes(approval) else {
+                let Some(approval) = Signature::from_bytes(&approval) else {
                     return Err(PacketError::InvalidSignature);
                 };
 
@@ -580,11 +581,12 @@ fn test_serialize() -> Result<(), PacketError> {
     use rand_chacha::ChaCha8Rng;
     use rand_chacha::rand_core::SeedableRng;
 
+    use crate::crypto::sign::SigningKey;
     use crate::block::BlockContent;
 
     let mut rng = ChaCha8Rng::seed_from_u64(123);
 
-    let secret_key = SecretKey::random(&mut rng);
+    let signing_key = SigningKey::random(&mut rng);
 
     // ---------------------------------------------------------------
 
@@ -602,87 +604,86 @@ fn test_serialize() -> Result<(), PacketError> {
         Packet::Heartbeat,
 
         Packet::AskHistory {
-            root_block: Hash::from_slice(b"Hello, World!"),
+            root_block: Hash::calc(b"Hello, World!"),
             offset: u16::MAX as u64,
             max_length: u32::MAX as u64
         },
 
         Packet::History {
-            root_block: Hash::from_slice(b"Hello, World!"),
+            root_block: Hash::calc(b"Hello, World!"),
             offset: 376415,
             history: Box::new([
-                Hash::from_slice(b"Test 1"),
-                Hash::from_slice(b"Test 2"),
-                Hash::from_slice(b"Test 3")
+                Hash::calc(b"Test 1"),
+                Hash::calc(b"Test 2"),
+                Hash::calc(b"Test 3")
             ])
         },
 
         Packet::AskPendingBlocks {
-            root_block: Hash::from_slice(b"Hello, World!")
+            root_block: Hash::calc(b"Hello, World!")
         },
 
         Packet::PendingBlocks {
-            root_block: Hash::from_slice(b"Hello, World!"),
+            root_block: Hash::calc(b"Hello, World!"),
             pending_blocks: Box::new([
-                (Hash::from_slice(b"Block 1"), Box::new([])),
-                (Hash::from_slice(b"Block 2"), Box::new([
-                    Signature::create(&secret_key, [1; 32]).unwrap(),
-                    Signature::create(&secret_key, [2; 32]).unwrap(),
-                    Signature::create(&secret_key, [3; 32]).unwrap()
+                (Hash::calc(b"Block 1"), Box::new([])),
+                (Hash::calc(b"Block 2"), Box::new([
+                    Signature::create(&signing_key, [1; 32]).unwrap(),
+                    Signature::create(&signing_key, [2; 32]).unwrap(),
+                    Signature::create(&signing_key, [3; 32]).unwrap()
                 ])),
-                (Hash::from_slice(b"Block 3"), Box::new([
-                    Signature::create(&secret_key, [4; 32]).unwrap()
+                (Hash::calc(b"Block 3"), Box::new([
+                    Signature::create(&signing_key, [4; 32]).unwrap()
                 ]))
             ])
         },
 
         Packet::AskPendingTransactions {
-            root_block: Hash::from_slice(b"Hello, World!")
+            root_block: Hash::calc(b"Hello, World!")
         },
 
         Packet::PendingTransactions {
-            root_block: Hash::from_slice(b"Hello, World!"),
+            root_block: Hash::calc(b"Hello, World!"),
             pending_transactions: Box::new([
-                Hash::from_slice(b"Test 1"),
-                Hash::from_slice(b"Test 2"),
-                Hash::from_slice(b"Test 3")
+                Hash::calc(b"Test 1"),
+                Hash::calc(b"Test 2"),
+                Hash::calc(b"Test 3")
             ])
         },
 
         Packet::AskBlock {
-            root_block: Hash::from_slice(b"Hello, World!"),
-            target_block: Hash::from_slice(b"Test")
+            root_block: Hash::calc(b"Hello, World!"),
+            target_block: Hash::calc(b"Test")
         },
 
         Packet::Block {
-            root_block: Hash::from_slice(b"Hello, World!"),
+            root_block: Hash::calc(b"Hello, World!"),
             block: Block::new(
-                &secret_key,
+                &signing_key,
                 Hash::default(),
                 BlockContent::data([1, 2, 3])
             ).unwrap()
         },
 
         Packet::AskTransaction {
-            root_block: Hash::from_slice(b"Hello, World!"),
-            transaction: Hash::from_slice(b"Test")
+            root_block: Hash::calc(b"Hello, World!"),
+            transaction: Hash::calc(b"Test")
         },
 
         Packet::Transaction {
-            root_block: Hash::from_slice(b"Hello, World!"),
+            root_block: Hash::calc(b"Hello, World!"),
             transaction: Transaction::create(
-                &secret_key,
-                283764,
+                &signing_key,
                 [1, 2, 3]
             ).unwrap()
         },
 
         Packet::ApproveBlock {
-            root_block: Hash::from_slice(b"Hello, World!"),
-            target_block: Hash::from_slice(b"Test"),
+            root_block: Hash::calc(b"Hello, World!"),
+            target_block: Hash::calc(b"Test"),
             approval: Signature::create(
-                &secret_key,
-                Hash::from([123; 32])
+                &signing_key,
+                b"test"
             ).unwrap()
         }
     );

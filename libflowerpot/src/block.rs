@@ -21,16 +21,14 @@ use std::io::{Read, Cursor};
 use time::UtcDateTime;
 use varint_rs::{VarintReader, VarintWriter};
 
-use crate::crypto::*;
+use crate::crypto::hash::*;
+use crate::crypto::sign::*;
 use crate::transaction::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("failed to serialize block to bytes: {0}")]
-    SerializeBytes(#[source] std::io::Error),
-
-    #[error("failed to calculate hash of the block: {0}")]
-    Hash(#[source] std::io::Error),
+    Serialize(#[source] std::io::Error),
 
     #[error("failed to sign new block: {0}")]
     Sign(#[source] k256::ecdsa::Error),
@@ -47,14 +45,14 @@ pub enum BlockStatus {
         /// Hash of the block.
         hash: Hash,
 
-        /// Public key of the block's author.
-        public_key: PublicKey,
+        /// Verifying key of the block's author.
+        verifying_key: VerifyingKey,
 
         /// Amount of required approvals.
         required_approvals: usize,
 
-        /// List of valid approvals and their signer's public key.
-        approvals: Vec<(Signature, PublicKey)>
+        /// List of valid approvals and their signer's verifying key.
+        approvals: Vec<(Signature, VerifyingKey)>
     },
 
     /// Block is valid but not approved by enough amount of validators.
@@ -62,14 +60,14 @@ pub enum BlockStatus {
         /// Hash of the block.
         hash: Hash,
 
-        /// Public key of the block's author.
-        public_key: PublicKey,
+        /// Verifying key of the block's author.
+        verifying_key: VerifyingKey,
 
         /// Amount of required approvals.
         required_approvals: usize,
 
-        /// List of valid approvals and their signer's public key.
-        approvals: Vec<(Signature, PublicKey)>
+        /// List of valid approvals and their signer's verifying key.
+        approvals: Vec<(Signature, VerifyingKey)>
     },
 
     /// Block is not valid.
@@ -83,16 +81,17 @@ impl BlockStatus {
     /// verify the block itself.
     pub fn validate<'a>(
         block_hash: impl Into<Hash>,
-        public_key: impl Into<PublicKey>,
+        verifying_key: impl Into<VerifyingKey>,
         approvals: impl IntoIterator<Item = &'a Signature>,
-        validators: impl AsRef<[PublicKey]>
+        validators: impl AsRef<[VerifyingKey]>
     ) -> Result<Self, Error> {
         let block_hash: Hash = block_hash.into();
-        let public_key: PublicKey = public_key.into();
+        let verifying_key: VerifyingKey = verifying_key.into();
+
         let validators = validators.as_ref();
 
         // Immediately reject the block if its signer is not a validator.
-        if !validators.is_empty() && !validators.contains(&public_key) {
+        if !validators.is_empty() && !validators.contains(&verifying_key) {
             return Ok(BlockStatus::Invalid);
         }
 
@@ -101,14 +100,14 @@ impl BlockStatus {
 
         for approval in approvals {
             // Verify that approval is correct.
-            let (valid, approval_public_key) = approval.verify(block_hash)
+            let (valid, approval_public_key) = approval.verify(block_hash.as_bytes())
                 .map_err(Error::Verify)?;
 
             // Reject invalid approval, approvals from non-validators and
             // self-approvals from the block's author.
             if !valid
-                || (!validators.is_empty() && !validators.contains(&public_key))
-                || approval_public_key == public_key
+                || (!validators.is_empty() && !validators.contains(&verifying_key))
+                || approval_public_key == verifying_key
             {
                 continue;
             }
@@ -122,7 +121,7 @@ impl BlockStatus {
         if valid_approvals.len() < required_approvals {
             return Ok(Self::NotApproved {
                 hash: block_hash,
-                public_key,
+                verifying_key,
                 required_approvals,
                 approvals: valid_approvals
             });
@@ -130,7 +129,7 @@ impl BlockStatus {
 
         Ok(Self::Approved {
             hash: block_hash,
-            public_key,
+            verifying_key,
             required_approvals,
             approvals: valid_approvals
         })
@@ -143,14 +142,15 @@ pub struct Block {
     pub(crate) timestamp: UtcDateTime,
     pub(crate) content: BlockContent,
     pub(crate) sign: Signature,
-    pub(crate) approvals: Vec<Signature>
+    pub(crate) approvals: Vec<Signature>,
+    pub(crate) precomputed_hash: Option<Hash>
 }
 
 impl Block {
     /// Create new block from provided previous block's hash and content using
-    /// validator's secret key.
+    /// validator's signing key.
     pub fn new(
-        validator: &SecretKey,
+        validator: impl AsRef<SigningKey>,
         previous: impl Into<Hash>,
         content: impl Into<BlockContent>
     ) -> Result<Self, Error> {
@@ -161,15 +161,15 @@ impl Block {
             .replace_nanosecond(0)
             .unwrap_or_else(|_| UtcDateTime::now());
 
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = Hasher::new();
 
-        hasher.update(&previous.0);
-        hasher.update(&timestamp.unix_timestamp().to_le_bytes());
-        hasher.update(&content.to_bytes().map_err(Error::SerializeBytes)?);
+        hasher.update(previous.as_bytes());
+        hasher.update(timestamp.unix_timestamp().to_le_bytes());
+        hasher.update(content.to_bytes().map_err(Error::Serialize)?);
 
-        let hash = Hash::from(hasher.finalize());
+        let hash = hasher.finalize();
 
-        let sign = Signature::create(validator, hash)
+        let sign = Signature::create(validator, hash.as_bytes())
             .map_err(Error::Sign)?;
 
         Ok(Self {
@@ -177,27 +177,28 @@ impl Block {
             timestamp,
             content,
             sign,
-            approvals: vec![]
+            approvals: vec![],
+            precomputed_hash: None
         })
     }
 
     #[inline(always)]
-    pub fn previous(&self) -> &Hash {
+    pub const fn previous(&self) -> &Hash {
         &self.previous
     }
 
     #[inline(always)]
-    pub fn timestamp(&self) -> &UtcDateTime {
+    pub const fn timestamp(&self) -> &UtcDateTime {
         &self.timestamp
     }
 
     #[inline(always)]
-    pub fn content(&self) -> &BlockContent {
+    pub const fn content(&self) -> &BlockContent {
         &self.content
     }
 
     #[inline(always)]
-    pub fn sign(&self) -> &Signature {
+    pub const fn sign(&self) -> &Signature {
         &self.sign
     }
 
@@ -214,13 +215,17 @@ impl Block {
 
     /// Calculate hash of the current block.
     pub fn hash(&self) -> Result<Hash, Error> {
-        let mut hasher = blake3::Hasher::new();
+        if let Some(hash) = self.precomputed_hash {
+            return Ok(hash);
+        }
 
-        hasher.update(&self.previous.0);
-        hasher.update(&self.timestamp.unix_timestamp().to_le_bytes());
-        hasher.update(&self.content.to_bytes().map_err(Error::SerializeBytes)?);
+        let mut hasher = Hasher::new();
 
-        Ok(Hash::from(hasher.finalize()))
+        hasher.update(self.previous.as_bytes());
+        hasher.update(self.timestamp.unix_timestamp().to_le_bytes());
+        hasher.update(self.content.to_bytes().map_err(Error::Serialize)?);
+
+        Ok(hasher.finalize())
     }
 
     /// Add approval signature to the block.
@@ -230,13 +235,15 @@ impl Block {
         if !self.approvals.contains(&approval) {
             let hash = self.hash()?;
 
-            let (is_valid, public_key) = approval.verify(hash)
+            self.precomputed_hash = Some(hash);
+
+            let (is_valid, verifying_key) = approval.verify(hash.as_bytes())
                 .map_err(Error::Verify)?;
 
-            let (_, curr_public_key) = self.sign.verify(hash)
+            let (_, curr_verifying_key) = self.sign.verify(hash.as_bytes())
                 .map_err(Error::Verify)?;
 
-            if !is_valid || public_key == curr_public_key {
+            if !is_valid || verifying_key == curr_verifying_key {
                 return Ok(false);
             }
 
@@ -250,20 +257,25 @@ impl Block {
     ///
     /// Return `Ok(false)` if newly created approval is already attached to the
     /// block.
-    pub fn approve_with(&mut self, secret_key: &SecretKey) -> Result<bool, Error> {
+    pub fn approve_with(
+        &mut self,
+        signing_key: impl AsRef<SigningKey>
+    ) -> Result<bool, Error> {
         let hash = self.hash()?;
 
-        let approval = Signature::create(secret_key, hash)
+        self.precomputed_hash = Some(hash);
+
+        let approval = Signature::create(signing_key.as_ref(), hash.as_bytes())
             .map_err(Error::Sign)?;
 
         if !self.approvals.contains(&approval) {
-            let (is_valid, public_key) = approval.verify(hash)
+            let (is_valid, verifying_key) = approval.verify(hash.as_bytes())
                 .map_err(Error::Verify)?;
 
-            let (_, curr_public_key) = self.sign.verify(hash)
+            let (_, curr_verifying_key) = self.sign.verify(hash.as_bytes())
                 .map_err(Error::Verify)?;
 
-            if !is_valid || public_key == curr_public_key {
+            if !is_valid || verifying_key == curr_verifying_key {
                 return Ok(false);
             }
 
@@ -277,10 +289,10 @@ impl Block {
     ///
     /// This method *does not* validate the block's approvals. This must be done
     /// outside of this method using the blockchain's storage.
-    pub fn verify(&self) -> Result<(bool, Hash, PublicKey), Error> {
+    pub fn verify(&self) -> Result<(bool, Hash, VerifyingKey), Error> {
         let hash = self.hash()?;
 
-        self.sign.verify(hash)
+        self.sign.verify(hash.as_bytes())
             .map(|(valid, public_key)| (valid, hash, public_key))
             .map_err(Error::Verify)
     }
@@ -291,7 +303,7 @@ impl Block {
     /// to do this twice.
     pub fn validate(
         &self,
-        validators: &[PublicKey]
+        validators: &[VerifyingKey]
     ) -> Result<BlockStatus, Error> {
         // Verify the block and obtain its hash and signer.
         let (valid, hash, public_key) = self.verify()?;
@@ -336,8 +348,8 @@ impl Block {
     pub fn from_bytes(block: impl AsRef<[u8]>) -> std::io::Result<Self> {
         let block = block.as_ref();
 
-        if block.is_empty() {
-            return Err(std::io::Error::other("invalid block length"));
+        if block.len() < Hash::SIZE + Signature::SIZE + 3 {
+            return Err(std::io::Error::other("block is too short"));
         }
 
         if block[0] != 0 {
@@ -353,14 +365,14 @@ impl Block {
         let timestamp = block.read_i64_varint()?;
 
         let timestamp = UtcDateTime::from_unix_timestamp(timestamp)
-            .map_err(|_| std::io::Error::other("invalid timestamp format"))?;
+            .map_err(|_| std::io::Error::other("invalid timestamp"))?;
 
-        let mut sign = [0; 65];
+        let mut sign = [0; Signature::SIZE];
 
         block.read_exact(&mut sign)?;
 
-        let sign = Signature::from_bytes(sign)
-            .ok_or_else(|| std::io::Error::other("invalid signature format"))?;
+        let sign = Signature::from_bytes(&sign)
+            .ok_or_else(|| std::io::Error::other("invalid signature"))?;
 
         let approvals_num = block.read_usize_varint()?;
 
@@ -370,8 +382,8 @@ impl Block {
         for _ in 0..approvals_num {
             block.read_exact(&mut approval)?;
 
-            let approval = Signature::from_bytes(approval)
-                .ok_or_else(|| std::io::Error::other("invalid approval format"))?;
+            let approval = Signature::from_bytes(&approval)
+                .ok_or_else(|| std::io::Error::other("invalid approval"))?;
 
             approvals.push(approval);
         }
@@ -385,7 +397,8 @@ impl Block {
             timestamp,
             content: BlockContent::from_bytes(content)?,
             sign,
-            approvals
+            approvals,
+            precomputed_hash: None
         })
     }
 }
@@ -399,7 +412,7 @@ pub enum BlockContent {
     Transactions(Box<[Transaction]>),
 
     /// List of approved validators' public keys.
-    Validators(Box<[PublicKey]>)
+    Validators(Box<[VerifyingKey]>)
 }
 
 impl BlockContent {
@@ -421,7 +434,7 @@ impl BlockContent {
     }
 
     /// Create new validators block.
-    pub fn validators<T: Into<PublicKey>>(
+    pub fn validators<T: Into<VerifyingKey>>(
         public_keys: impl IntoIterator<Item = T>
     ) -> Self {
         Self::Validators(public_keys.into_iter().map(T::into).collect())
@@ -441,7 +454,7 @@ impl BlockContent {
                 content.push(Self::V1_TRANSACTIONS_BLOCK);
 
                 for transaction in transactions {
-                    let transaction = transaction.to_bytes()?;
+                    let transaction = transaction.to_bytes();
 
                     content.write_usize_varint(transaction.len())?;
                     content.extend(transaction);
@@ -466,7 +479,7 @@ impl BlockContent {
         let n = content.len();
 
         if n == 0 {
-            return Err(std::io::Error::other("block's content can't be empty"));
+            return Err(std::io::Error::other("block content cannot be empty"));
         }
 
         match content[0] {
@@ -479,7 +492,7 @@ impl BlockContent {
             }
 
             Self::V1_TRANSACTIONS_BLOCK => {
-                // empty transactions block
+                // Empty transactions block
                 if n == 1 {
                     return Ok(Self::Transactions(Box::new([])));
                 }
@@ -510,13 +523,17 @@ impl BlockContent {
                 let mut validators = Vec::with_capacity((n - 1) / 33);
                 let mut i = 1;
 
+                let mut validator = [0; VerifyingKey::SIZE];
+
                 while i < n {
-                    let validator = PublicKey::from_bytes(&content[i..i + 33])
-                        .ok_or_else(|| std::io::Error::other("invalid validator's public key format"))?;
+                    validator.copy_from_slice(&content[i..i + VerifyingKey::SIZE]);
+
+                    let validator = VerifyingKey::from_bytes(&validator)
+                        .ok_or_else(|| std::io::Error::other("invalid validator key"))?;
 
                     validators.push(validator);
 
-                    i += 33;
+                    i += VerifyingKey::SIZE;
                 }
 
                 Ok(Self::Validators(validators.into_boxed_slice()))

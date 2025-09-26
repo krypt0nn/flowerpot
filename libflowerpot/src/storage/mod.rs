@@ -18,7 +18,8 @@
 
 use std::iter::FusedIterator;
 
-use crate::crypto::*;
+use crate::crypto::hash::Hash;
+use crate::crypto::sign::VerifyingKey;
 use crate::block::{Block, BlockContent};
 
 // FIXME: `write_block` must update the same block if the new variant has more
@@ -132,7 +133,7 @@ pub trait Storage: Clone {
     fn get_validators_before_block(
         &self,
         hash: &Hash
-    ) -> Result<Option<Vec<PublicKey>>, Self::Error> {
+    ) -> Result<Option<Vec<VerifyingKey>>, Self::Error> {
         let Some(block) = self.read_block(hash)? else {
             return Ok(None);
         };
@@ -175,7 +176,7 @@ pub trait Storage: Clone {
     fn get_validators_after_block(
         &self,
         hash: &Hash
-    ) -> Result<Option<Vec<PublicKey>>, Self::Error> {
+    ) -> Result<Option<Vec<VerifyingKey>>, Self::Error> {
         if !self.has_block(hash)? {
             return Ok(None);
         }
@@ -208,7 +209,7 @@ pub trait Storage: Clone {
     /// Get list of current blockchain validators.
     ///
     /// By default the root block's signer is the only existing validator.
-    fn get_current_validators(&self) -> Result<Vec<PublicKey>, Self::Error> {
+    fn get_current_validators(&self) -> Result<Vec<VerifyingKey>, Self::Error> {
         let Some(tail_block) = self.tail_block()? else {
             // No tail block => blockchain is empty, no validators available.
             return Ok(vec![]);
@@ -323,6 +324,7 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     use rand_chacha::ChaCha8Rng;
     use rand_chacha::rand_core::SeedableRng;
 
+    use crate::crypto::sign::SigningKey;
     use crate::block::BlockContent;
 
     // Obvious checks for empty storage.
@@ -339,10 +341,10 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     let mut rng = ChaCha8Rng::seed_from_u64(123);
 
-    let secret_key = SecretKey::random(&mut rng);
+    let signing_key = SigningKey::random(&mut rng);
 
     let block_1 = Block::new(
-        &secret_key,
+        &signing_key,
         Hash::default(),
         BlockContent::data("Block 1".as_bytes())
     ).unwrap();
@@ -352,7 +354,7 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     let block_1_hash = block_1.hash().unwrap();
 
     let block_2 = Block::new(
-        &secret_key,
+        &signing_key,
         block_1_hash,
         BlockContent::data("Block 2".as_bytes())
     ).unwrap();
@@ -360,7 +362,7 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     let block_2_hash = block_2.hash().unwrap();
 
     let block_3 = Block::new(
-        &secret_key,
+        &signing_key,
         block_2_hash,
         BlockContent::data("Block 3".as_bytes())
     ).unwrap();
@@ -369,10 +371,10 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     // Prepare alternative test blocks.
 
-    let secret_key_alt = SecretKey::random(&mut rng);
+    let signing_key_alt = SigningKey::random(&mut rng);
 
     let block_1_alt = Block::new(
-        &secret_key_alt,
+        &signing_key_alt,
         Hash::default(),
         BlockContent::data("Alternative block 1".as_bytes())
     ).unwrap();
@@ -382,7 +384,7 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     let block_1_alt_hash = block_1_alt.hash().unwrap();
 
     let block_2_alt = Block::new(
-        &secret_key_alt,
+        &signing_key_alt,
         block_1_hash,
         BlockContent::data("Alternative block 2".as_bytes())
     ).unwrap();
@@ -390,7 +392,7 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     let block_2_alt_hash = block_2_alt.hash().unwrap();
 
     let block_3_alt = Block::new(
-        &secret_key_alt,
+        &signing_key_alt,
         block_2_hash,
         BlockContent::data("Alternative block 3".as_bytes())
     ).unwrap();
@@ -479,7 +481,7 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     assert_eq!(
         storage.get_current_validators()?,
-        vec![secret_key.public_key()]
+        vec![signing_key.public_key()]
     );
 
     // 4. Tail block modification.
@@ -593,17 +595,17 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     assert_eq!(
         storage.get_current_validators()?,
-        vec![secret_key_alt.public_key()]
+        vec![signing_key_alt.public_key()]
     );
 
     // Prepare validator blocks.
 
-    let validator_1 = SecretKey::random(&mut rng);
-    let validator_2 = SecretKey::random(&mut rng);
-    let validator_3 = SecretKey::random(&mut rng);
+    let validator_1 = SigningKey::random(&mut rng);
+    let validator_2 = SigningKey::random(&mut rng);
+    let validator_3 = SigningKey::random(&mut rng);
 
     let block_2_alt = Block::new(
-        &secret_key_alt,
+        &signing_key_alt,
         block_1_alt_hash,
         BlockContent::validators([validator_1.public_key()])
     ).unwrap();
@@ -629,18 +631,18 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     // Block 1 (root)
     assert_eq!(
         storage.get_validators_before_block(&block_1_alt_hash)?,
-        Some(vec![secret_key_alt.public_key()])
+        Some(vec![signing_key_alt.public_key()])
     );
 
     assert_eq!(
         storage.get_validators_after_block(&block_1_alt_hash)?,
-        Some(vec![secret_key_alt.public_key()])
+        Some(vec![signing_key_alt.public_key()])
     );
 
     // Block 2 (root -> validator 1)
     assert_eq!(
         storage.get_validators_before_block(&block_2_alt_hash)?,
-        Some(vec![secret_key_alt.public_key()])
+        Some(vec![signing_key_alt.public_key()])
     );
 
     assert_eq!(

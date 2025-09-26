@@ -23,9 +23,10 @@ use rusqlite::Connection;
 use spin::{Mutex, MutexGuard};
 use time::UtcDateTime;
 
-use crate::crypto::*;
-use crate::block::{Block, BlockContent};
+use crate::crypto::hash::Hash;
+use crate::crypto::sign::{VerifyingKey, Signature};
 use crate::transaction::Transaction;
+use crate::block::{Block, BlockContent};
 
 use super::Storage;
 
@@ -132,7 +133,6 @@ impl SqliteStorage {
             CREATE TABLE IF NOT EXISTS v1_block_transactions (
                 block_id INTEGER NOT NULL,
                 hash     BLOB    NOT NULL UNIQUE,
-                seed     BLOB    NOT NULL,
                 data     BLOB    NOT NULL,
                 sign     BLOB    NOT NULL,
 
@@ -186,8 +186,8 @@ impl Storage for SqliteStorage {
             SELECT current_hash FROM v1_blocks WHERE previous_hash = ?1
         ")?;
 
-        let hash = query.query_row([hash.0], |row| {
-            row.get::<_, [u8; 32]>("current_hash")
+        let hash = query.query_row([hash.as_bytes()], |row| {
+            row.get::<_, [u8; Hash::SIZE]>("current_hash")
         });
 
         match hash {
@@ -204,8 +204,8 @@ impl Storage for SqliteStorage {
             SELECT previous_hash FROM v1_blocks WHERE current_hash = ?1
         ")?;
 
-        let hash = query.query_row([hash.0], |row| {
-            row.get::<_, [u8; 32]>("previous_hash")
+        let hash = query.query_row([hash.as_bytes()], |row| {
+            row.get::<_, [u8; Hash::SIZE]>("previous_hash")
         });
 
         match hash {
@@ -229,12 +229,12 @@ impl Storage for SqliteStorage {
             WHERE current_hash = ?1
         ")?;
 
-        let result = query.query_row([hash.0], |row| {
+        let result = query.query_row([hash.as_bytes()], |row| {
             Ok((
                 row.get::<_, i64>("id")?,
-                row.get::<_, [u8; 32]>("previous_hash")?,
+                row.get::<_, [u8; Hash::SIZE]>("previous_hash")?,
                 row.get::<_, i64>("timestamp")?,
-                row.get::<_, [u8; 65]>("sign")?,
+                row.get::<_, [u8; Signature::SIZE]>("sign")?,
                 row.get::<_, u8>("type")?
             ))
         });
@@ -257,7 +257,6 @@ impl Storage for SqliteStorage {
                     1 => {
                         let mut query = lock.prepare_cached("
                             SELECT
-                                seed,
                                 data,
                                 sign
                             FROM v1_block_transactions
@@ -266,21 +265,19 @@ impl Storage for SqliteStorage {
 
                         let rows = query.query_map([id], |row| {
                             Ok((
-                                row.get::<_, [u8; 8]>("seed")?,
                                 row.get::<_, Box<[u8]>>("data")?,
-                                row.get::<_, [u8; 65]>("sign")?
+                                row.get::<_, [u8; Signature::SIZE]>("sign")?
                             ))
                         })?;
 
                         let mut transactions = Vec::new();
 
                         for row in rows {
-                            let (seed, data, sign) = row?;
+                            let (data, sign) = row?;
 
                             transactions.push(Transaction {
-                                seed: u64::from_le_bytes(seed),
                                 data,
-                                sign: Signature::from_bytes(sign)
+                                sign: Signature::from_bytes(&sign)
                                     .ok_or_else(|| rusqlite::Error::InvalidQuery)?
                             });
                         }
@@ -296,13 +293,13 @@ impl Storage for SqliteStorage {
                         ")?;
 
                         let rows = query.query_map([id], |row| {
-                            row.get::<_, [u8; 33]>("public_key")
+                            row.get::<_, [u8; VerifyingKey::SIZE]>("public_key")
                         })?;
 
                         let mut validators = Vec::new();
 
                         for row in rows {
-                            let public_key = PublicKey::from_bytes(row?)
+                            let public_key = VerifyingKey::from_bytes(&row?)
                                 .ok_or_else(|| rusqlite::Error::InvalidQuery)?;
 
                             validators.push(public_key);
@@ -321,13 +318,13 @@ impl Storage for SqliteStorage {
                 ")?;
 
                 let rows = query.query_map([id], |row| {
-                    row.get::<_, [u8; 65]>("approval")
+                    row.get::<_, [u8; Signature::SIZE]>("approval")
                 })?;
 
                 let mut approvals = Vec::new();
 
                 for row in rows {
-                    let approval = Signature::from_bytes(row?)
+                    let approval = Signature::from_bytes(&row?)
                         .ok_or_else(|| rusqlite::Error::InvalidQuery)?;
 
                     approvals.push(approval);
@@ -338,9 +335,10 @@ impl Storage for SqliteStorage {
                     timestamp: UtcDateTime::from_unix_timestamp(timestamp)
                         .map_err(|_| rusqlite::Error::InvalidQuery)?,
                     content,
-                    sign: Signature::from_bytes(sign)
+                    sign: Signature::from_bytes(&sign)
                         .ok_or_else(|| rusqlite::Error::InvalidQuery)?,
-                    approvals
+                    approvals,
+                    precomputed_hash: None
                 }))
             }
 
@@ -402,17 +400,15 @@ impl Storage for SqliteStorage {
                         INSERT INTO v1_block_transactions (
                             block_id,
                             hash,
-                            seed,
                             data,
                             sign
-                        ) VALUES (?1, ?2, ?3, ?4, ?5)
+                        ) VALUES (?1, ?2, ?3, ?4)
                     ")?;
 
                     for transaction in transactions {
                         query.execute((
                             block_id,
                             transaction.hash().0,
-                            transaction.seed().to_le_bytes(),
                             transaction.data(),
                             transaction.sign().to_bytes()
                         ))?;
