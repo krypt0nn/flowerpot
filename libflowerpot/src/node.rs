@@ -132,7 +132,6 @@ pub struct Node<T: Stream, F: Storage> {
     root_block: Hash,
     streams: HashMap<[u8; 32], PacketStream<T>>,
     storage: Option<F>,
-    is_synced: bool,
     history: Vec<Hash>,
     validators: Vec<PublicKey>,
     current_distance: [u8; 32],
@@ -148,7 +147,6 @@ impl<T: Stream, F: Storage> Node<T, F> {
             root_block: root_block.into(),
             streams: HashMap::new(),
             storage: None,
-            is_synced: false,
             history: Vec::new(),
             validators: Vec::new(),
             current_distance: [0xFF; 32],
@@ -274,7 +272,6 @@ impl<T: Stream, F: Storage> Node<T, F> {
             .map_err(NodeError::Viewer)?;
 
         self.history = history;
-        self.is_synced = true;
 
         Ok(())
     }
@@ -299,13 +296,6 @@ impl<T: Stream, F: Storage> Node<T, F> {
     {
         #[cfg(feature = "tracing")]
         tracing::info!("starting the node");
-
-        if !self.is_synced {
-            #[cfg(feature = "tracing")]
-            tracing::info!("syncing the node");
-
-            self.sync().await?;
-        }
 
         let mut existing_streams = HashMap::<[u8; 32], Sender<Packet>>::new();
 
