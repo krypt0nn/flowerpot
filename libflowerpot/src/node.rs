@@ -17,7 +17,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Sender, TryRecvError};
 use std::sync::Arc;
 
 use spin::{RwLock, RwLockWriteGuard};
@@ -479,16 +479,32 @@ impl<T: Stream, F: Storage> Node<T, F> {
                 // Process incoming packets in a loop.
                 loop {
                     // Send packets to the remote node.
-                    while let Ok(packet) = stream_receiver.try_recv() {
-                        if let Err(err) = stream.send(packet).await {
-                            #[cfg(feature = "tracing")]
-                            tracing::error!(
-                                err = err.to_string(),
-                                ?endpoint_id,
-                                "failed to send packet to the packets stream"
-                            );
+                    loop {
+                        match stream_receiver.try_recv() {
+                            Ok(packet) => {
+                                if let Err(err) = stream.send(packet).await {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::error!(
+                                        err = err.to_string(),
+                                        ?endpoint_id,
+                                        "failed to send packet to the packets stream"
+                                    );
 
-                            break;
+                                    return;
+                                }
+                            }
+
+                            Err(TryRecvError::Disconnected) => {
+                                #[cfg(feature = "tracing")]
+                                tracing::info!(
+                                    ?endpoint_id,
+                                    "local node went offline, terminating connection"
+                                );
+
+                                return;
+                            }
+
+                            Err(TryRecvError::Empty) => break
                         }
                     }
 
