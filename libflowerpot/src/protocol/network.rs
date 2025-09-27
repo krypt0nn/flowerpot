@@ -208,7 +208,7 @@ impl PacketStream {
     /// receive packets over the network.
     pub fn init(
         secret_key: impl AsRef<SecretKey>,
-        options: PacketStreamOptions,
+        options: &PacketStreamOptions,
         mut stream: TcpStream
     ) -> Result<Self, PacketStreamError> {
         #[cfg(feature = "tracing")]

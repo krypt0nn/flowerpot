@@ -45,10 +45,10 @@ Some key points:
     - [x] Rename github repository to `flowerpot`
     - [x] Move `libflowerpot` into a separate workspace
     - [ ] Create `bouquet` CLI tool
-        - [ ] Create keypairs (public/secret keys)
-        - [ ] Create new transactions
+        - [x] Create keypairs (public/secret keys)
+        - [x] Create new transactions
         - [ ] Send transactions to the network
-        - [ ] Create new blockchains
+        - [x] Create new blockchains
         - [ ] Connect to a blockchain and monitor its activity
         - [ ] Show blockchain status
 - [ ] Implement gas system

@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Sender, TryRecvError};
 use std::sync::Arc;
 
-use spin::{RwLock, RwLockWriteGuard};
+use spin::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
@@ -138,8 +138,8 @@ pub struct Node<S: Storage> {
     validators: Vec<VerifyingKey>,
     current_distance: [u8; 32],
     indexed_transactions: HashSet<Hash>,
-    pending_blocks: HashMap<Hash, Block>,
-    pending_transactions: HashMap<Hash, Transaction>
+    pending_transactions: HashMap<Hash, Transaction>,
+    pending_blocks: HashMap<Hash, Block>
 }
 
 impl<S: Storage> Node<S> {
@@ -153,8 +153,8 @@ impl<S: Storage> Node<S> {
             validators: Vec::new(),
             current_distance: [0xFF; 32],
             indexed_transactions: HashSet::new(),
-            pending_blocks: HashMap::new(),
-            pending_transactions: HashMap::new()
+            pending_transactions: HashMap::new(),
+            pending_blocks: HashMap::new()
         }
     }
 
@@ -304,10 +304,8 @@ impl<S: Storage> Node<S> {
         let validators = Arc::new(RwLock::new(self.validators));
         let current_distance = Arc::new(RwLock::new(self.current_distance));
         let indexed_transactions = Arc::new(RwLock::new(self.indexed_transactions));
-        let pending_blocks = Arc::new(RwLock::new(self.pending_blocks));
         let pending_transactions = Arc::new(RwLock::new(self.pending_transactions));
-
-        let (handler_sender, handler_receiver) = std::sync::mpsc::channel::<Packet>();
+        let pending_blocks = Arc::new(RwLock::new(self.pending_blocks));
 
         for (endpoint_id, mut stream) in self.streams {
             let (stream_sender, stream_receiver) = std::sync::mpsc::channel::<Packet>();
@@ -329,8 +327,8 @@ impl<S: Storage> Node<S> {
             let validators = validators.clone();
             let current_distance = current_distance.clone();
             let indexed_transactions = indexed_transactions.clone();
-            let pending_blocks = pending_blocks.clone();
             let pending_transactions = pending_transactions.clone();
+            let pending_blocks = pending_blocks.clone();
 
             /// Try to write provided block to the blockchain. This function
             /// does not verify the block and only performs the writing itself.
@@ -346,8 +344,8 @@ impl<S: Storage> Node<S> {
                 mut validators: RwLockWriteGuard<'_, Vec<VerifyingKey>>,
                 mut current_distance: RwLockWriteGuard<'_, [u8; 32]>,
                 mut indexed_transactions: RwLockWriteGuard<'_, HashSet<Hash>>,
-                mut pending_blocks: RwLockWriteGuard<'_, HashMap<Hash, Block>>,
                 mut pending_transactions: RwLockWriteGuard<'_, HashMap<Hash, Transaction>>,
+                mut pending_blocks: RwLockWriteGuard<'_, HashMap<Hash, Block>>,
                 storage: Option<&S>
             ) {
                 let n = history.len();
@@ -765,8 +763,8 @@ impl<S: Storage> Node<S> {
                                                 validators.write(),
                                                 current_distance.write(),
                                                 indexed_transactions.write(),
-                                                pending_blocks.write(),
                                                 pending_transactions.write(),
+                                                pending_blocks.write(),
                                                 storage.as_ref()
                                             );
                                         }
@@ -1075,8 +1073,8 @@ impl<S: Storage> Node<S> {
                                                 validators.write(),
                                                 current_distance.write(),
                                                 indexed_transactions.write(),
-                                                pending_blocks,
                                                 pending_transactions.write(),
+                                                pending_blocks,
                                                 storage.as_ref()
                                             );
                                         }
@@ -1105,33 +1103,75 @@ impl<S: Storage> Node<S> {
             });
         }
 
-        std::thread::spawn(move|| {
-            while let Ok(packet) = handler_receiver.recv() {
-                for sender in existing_streams.values() {
-                    let _ = sender.send(packet.clone());
-                }
-            }
-        });
-
-        Ok(NodeHandler(handler_sender))
+        Ok(NodeHandler {
+            streams: Arc::new(RwLock::new(existing_streams)),
+            pending_transactions,
+            pending_blocks
+        })
     }
 }
 
 /// A helper struct connected to the running node. It can be used to perform
 /// client-side operations like announcing transactions to the network.
 #[derive(Debug, Clone)]
-pub struct NodeHandler(Sender<Packet>);
+pub struct NodeHandler {
+    streams: Arc<RwLock<HashMap<[u8; 32], Sender<Packet>>>>,
+    pending_transactions: Arc<RwLock<HashMap<Hash, Transaction>>>,
+    pending_blocks: Arc<RwLock<HashMap<Hash, Block>>>
+}
 
 impl NodeHandler {
+    fn send(&self, packet: Packet) {
+        let mut disconnected = Vec::new();
+
+        let lock = self.streams.read();
+
+        for (endpoint_id, sender) in lock.iter() {
+            if sender.send(packet.clone()).is_err() {
+                disconnected.push(endpoint_id.clone());
+            }
+        }
+
+        drop(lock);
+
+        for endpoint_id in disconnected {
+            self.streams.write().remove(&endpoint_id);
+        }
+    }
+
+    /// Get list of available connections' endpoints.
+    pub fn connections(&self) -> Box<[[u8; 32]]> {
+        self.streams.read()
+            .keys()
+            .cloned()
+            .collect::<Box<[[u8; 32]]>>()
+    }
+
     /// Send transaction to all the connected nodes.
     pub fn send_transaction(
         &self,
         root_block: impl Into<Hash>,
         transaction: impl Into<Transaction>
-    ) -> bool {
-        self.0.send(Packet::Transaction {
-            root_block: root_block.into(),
-            transaction: transaction.into()
-        }).is_ok()
+    ) {
+        // todo add connection and send to all of them and such stuff
+        // self.sender.send(Packet::Transaction {
+        //     root_block: root_block.into(),
+        //     transaction: transaction.into()
+        // }).is_ok()
+        todo!()
+    }
+
+    #[inline]
+    pub fn pending_transactions(
+        &self
+    ) -> RwLockReadGuard<'_, HashMap<Hash, Transaction>> {
+        self.pending_transactions.read()
+    }
+
+    #[inline]
+    pub fn pending_blocks(
+        &self
+    ) -> RwLockReadGuard<'_, HashMap<Hash, Block>> {
+        self.pending_blocks.read()
     }
 }
