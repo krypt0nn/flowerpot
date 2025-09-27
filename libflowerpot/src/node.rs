@@ -160,8 +160,8 @@ impl<S: Storage> Node<S> {
 
     /// Add new connection.
     pub fn add_connection(&mut self, stream: PacketStream) -> &mut Self {
-        if !self.streams.contains_key(stream.endpoint_id()) {
-            self.streams.insert(*stream.endpoint_id(), stream);
+        if !self.streams.contains_key(stream.peer_id()) {
+            self.streams.insert(*stream.peer_id(), stream);
         }
 
         self

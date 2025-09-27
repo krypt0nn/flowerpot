@@ -79,25 +79,43 @@ impl PacketStreamEncryptor {
         key: &[u8],
         iv: &[u8]
     ) -> Option<Self> {
+        fn scale<const N: usize>(input: &[u8], output: &mut [u8; N]) {
+            let mut i = 0u8;
+            let mut j = 0usize;
+
+            let mut keyed_input = vec![0; input.len() + 1];
+
+            keyed_input[1..input.len() + 1].copy_from_slice(input);
+
+            while j < N {
+                keyed_input[0] = i;
+
+                let hash = blake3::keyed_hash(&[
+                    129, 139, 171,  34, 143, 120,  62, 174,
+                      2, 242, 158, 197,  36, 156, 246, 235,
+                     13, 130, 199, 106,  55,  25, 141, 253,
+                     84,   9,  91,  51, 161,  36,  37,  56
+                ], &keyed_input);
+
+                let n = (N - j).min(32);
+
+                output[j..j + n].copy_from_slice(&hash.as_bytes()[..n]);
+
+                i += 1;
+                j += n;
+            }
+        }
+
         match algorithm {
             #[cfg(feature = "encryption-chacha20")]
             PacketStreamEncryption::ChaCha20 |
             PacketStreamEncryption::ChaCha12 |
             PacketStreamEncryption::ChaCha8 => {
                 let mut key_scaled = [0; 32];
-                let mut iv_scaled = [0; 32];
+                let mut iv_scaled = [0; 12];
 
-                if key.len() == 32 {
-                    key_scaled.copy_from_slice(key);
-                } else {
-                    key_scaled.copy_from_slice(blake3::hash(key).as_bytes());
-                }
-
-                if iv.len() == 32 {
-                    iv_scaled.copy_from_slice(iv);
-                } else {
-                    iv_scaled.copy_from_slice(blake3::hash(iv).as_bytes());
-                }
+                scale(key, &mut key_scaled);
+                scale(iv, &mut iv_scaled);
 
                 match algorithm {
                     PacketStreamEncryption::ChaCha20 => {
@@ -188,7 +206,8 @@ impl Default for PacketStreamOptions {
 /// sending and receiving, endpoint validation and optional stream encryption.
 pub struct PacketStream {
     stream: TcpStream,
-    endpoint_id: [u8; 32],
+    local_id: [u8; 32],
+    peer_id: [u8; 32],
     shared_secret: [u8; 32],
     read_encryptor: Option<PacketStreamEncryptor>,
     write_encryptor: Option<PacketStreamEncryptor>,
@@ -242,6 +261,11 @@ impl PacketStream {
         let secret_key = secret_key.as_ref();
         let public_key = secret_key.public_key().to_bytes();
 
+        let local_id = blake3::keyed_hash(
+            &Self::V1_ENDPOINT_ID_SALT,
+            &public_key
+        );
+
         // Prepare options byte.
         let mut options_byte = 0b00000000;
 
@@ -254,7 +278,7 @@ impl PacketStream {
                 PacketStreamEncryption::ChaCha12 => Self::V1_CHACHA12_ENCRYPTION,
 
                 #[cfg(feature = "encryption-chacha20")]
-                PacketStreamEncryption::ChaCha8  => Self::V1_CHACHA8_ENCRYPTION,
+                PacketStreamEncryption::ChaCha8 => Self::V1_CHACHA8_ENCRYPTION,
 
                 #[allow(unreachable_patterns)]
                 _ => 0
@@ -262,7 +286,12 @@ impl PacketStream {
         }
 
         #[cfg(feature = "tracing")]
-        tracing::trace!(?peer_addr, ?options, "send handshake");
+        tracing::trace!(
+            ?peer_addr,
+            local_id = base64::encode(local_id.as_bytes()),
+            ?options,
+            "send handshake"
+        );
 
         // Send header and options.
         stream.write_all(&[
@@ -275,7 +304,12 @@ impl PacketStream {
             .map_err(PacketStreamError::Stream)?;
 
         #[cfg(feature = "tracing")]
-        tracing::trace!(?peer_addr, ?options, "read handshake");
+        tracing::trace!(
+            ?peer_addr,
+            local_id = base64::encode(local_id.as_bytes()),
+            ?options,
+            "read handshake"
+        );
 
         // Read protocol version from the header byte.
         let mut buf = [0; 1];
@@ -299,7 +333,7 @@ impl PacketStream {
         stream.read_exact(&mut public_key)
             .map_err(PacketStreamError::Stream)?;
 
-        let endpoint_id = blake3::keyed_hash(
+        let peer_id = blake3::keyed_hash(
             &Self::V1_ENDPOINT_ID_SALT,
             &public_key
         );
@@ -350,7 +384,7 @@ impl PacketStream {
                 Some(PacketStreamEncryptor::new(
                     algorithm,
                     &shared_secret,
-                    endpoint_id.as_bytes()
+                    peer_id.as_bytes()
                 ).ok_or(PacketStreamError::EncryptorBuildFailed)?)
             }
 
@@ -362,7 +396,7 @@ impl PacketStream {
                 Some(PacketStreamEncryptor::new(
                     algorithm,
                     &shared_secret,
-                    endpoint_id.as_bytes()
+                    local_id.as_bytes()
                 ).ok_or(PacketStreamError::EncryptorBuildFailed)?)
             }
 
@@ -372,7 +406,8 @@ impl PacketStream {
         #[cfg(feature = "tracing")]
         tracing::trace!(
             ?peer_addr,
-            endpoint_id = base64::encode(endpoint_id.as_bytes()),
+            local_id = base64::encode(local_id.as_bytes()),
+            peer_id = base64::encode(peer_id.as_bytes()),
             shared_secret_image = base64::encode(shared_secret_image.as_bytes()),
             ?options,
             "send shared secret image"
@@ -388,14 +423,6 @@ impl PacketStream {
         stream.write_all(&buf)
             .map_err(PacketStreamError::Stream)?;
 
-        #[cfg(feature = "tracing")]
-        tracing::trace!(
-            ?peer_addr,
-            endpoint_id = base64::encode(endpoint_id.as_bytes()),
-            ?options,
-            "read shared secret image"
-        );
-
         // Read shared secret image.
         let mut buf = [0; 32];
 
@@ -405,6 +432,16 @@ impl PacketStream {
         if let Some(encryptor) = &mut read_encryptor {
             encryptor.apply(&mut buf);
         }
+
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            ?peer_addr,
+            local_id = base64::encode(local_id.as_bytes()),
+            peer_id = base64::encode(peer_id.as_bytes()),
+            shared_secret_image = base64::encode(buf),
+            ?options,
+            "read shared secret image"
+        );
 
         if &buf != shared_secret_image.as_bytes() {
             return Err(PacketStreamError::InvalidSharedSecretImage);
@@ -418,7 +455,8 @@ impl PacketStream {
 
         Ok(Self {
             stream,
-            endpoint_id: endpoint_id.into(),
+            local_id: local_id.into(),
+            peer_id: peer_id.into(),
             shared_secret,
             read_encryptor,
             write_encryptor,
@@ -438,13 +476,22 @@ impl PacketStream {
         self.stream.peer_addr()
     }
 
-    /// Get unique identifier of the stream's remote endpoint.
+    /// Get unique identifier of the local stream's endpoint.
     ///
     /// It is derived from the remote party's public key and can be used to
     /// keep only one connection with the same remote endpoint at once.
     #[inline(always)]
-    pub const fn endpoint_id(&self) -> &[u8; 32] {
-        &self.endpoint_id
+    pub const fn local_id(&self) -> &[u8; 32] {
+        &self.local_id
+    }
+
+    /// Get unique identifier of the peer stream's endpoint.
+    ///
+    /// It is derived from the remote party's public key and can be used to
+    /// keep only one connection with the same remote endpoint at once.
+    #[inline(always)]
+    pub const fn peer_id(&self) -> &[u8; 32] {
+        &self.peer_id
     }
 
     /// Get shared secret for this stream.
