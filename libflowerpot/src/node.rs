@@ -527,6 +527,15 @@ impl<S: Storage> Node<S> {
                                     offset,
                                     max_length
                                 } if received_root_block == root_block => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::debug!(
+                                        ?endpoint_id,
+                                        root_block = root_block.to_base64(),
+                                        ?offset,
+                                        ?max_length,
+                                        "handle AskHistory packet"
+                                    );
+
                                     // Then read max allowed amount of blocks'
                                     // hashes.
                                     let history = history.read()
@@ -554,11 +563,52 @@ impl<S: Storage> Node<S> {
                                     }
                                 }
 
+                                // If we were asked to send the pending
+                                // transactions list.
+                                Packet::AskPendingTransactions {
+                                    root_block: received_root_block
+                                } if received_root_block == root_block => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::debug!(
+                                        ?endpoint_id,
+                                        root_block = root_block.to_base64(),
+                                        "handle AskPendingTransactions packet"
+                                    );
+
+                                    // Then collect their hashes.
+                                    let pending_transactions = pending_transactions.read()
+                                        .keys()
+                                        .copied()
+                                        .collect();
+
+                                    // And try to send it back to the requester.
+                                    if let Err(err) = stream.send(Packet::PendingTransactions {
+                                        root_block,
+                                        pending_transactions
+                                    }) {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::error!(
+                                            err = err.to_string(),
+                                            ?endpoint_id,
+                                            "failed to send packet to the packets stream"
+                                        );
+
+                                        break;
+                                    }
+                                }
+
                                 // If we were asked to send the pending blocks
                                 // list.
                                 Packet::AskPendingBlocks {
                                     root_block: received_root_block
                                 } if received_root_block == root_block => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::debug!(
+                                        ?endpoint_id,
+                                        root_block = root_block.to_base64(),
+                                        "handle AskPendingBlocks packet"
+                                    );
+
                                     let pending_blocks = pending_blocks.read()
                                     // Then collect their hashes and approvals.
                                         .iter()
@@ -587,31 +637,131 @@ impl<S: Storage> Node<S> {
                                     }
                                 }
 
-                                // If we were asked to send the pending
-                                // transactions list.
-                                Packet::AskPendingTransactions {
-                                    root_block: received_root_block
+                                // If we were asked to send transaction.
+                                Packet::AskTransaction {
+                                    root_block: received_root_block,
+                                    transaction
                                 } if received_root_block == root_block => {
-                                    // Then collect their hashes.
-                                    let pending_transactions = pending_transactions.read()
-                                        .keys()
-                                        .copied()
-                                        .collect();
+                                    #[cfg(feature = "tracing")]
+                                    tracing::debug!(
+                                        ?endpoint_id,
+                                        root_block = root_block.to_base64(),
+                                        transaction = transaction.to_base64(),
+                                        "handle AskTransaction packet"
+                                    );
 
-                                    // And try to send it back to the requester.
-                                    if let Err(err) = stream.send(Packet::PendingTransactions {
-                                        root_block,
-                                        pending_transactions
-                                    }) {
+                                    // If it is a pending transaction.
+                                    let transaction = pending_transactions.read()
+                                        .get(&transaction)
+                                        .cloned();
+
+                                    #[allow(clippy::collapsible_if)]
+                                    if let Some(transaction) = transaction {
+                                        // Then try to send it back.
+                                        if let Err(err) = stream.send(Packet::Transaction {
+                                            root_block,
+                                            transaction: transaction.clone()
+                                        }) {
+                                            #[cfg(feature = "tracing")]
+                                            tracing::error!(
+                                                err = err.to_string(),
+                                                ?endpoint_id,
+                                                "failed to send packet to the packets stream"
+                                            );
+
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // If we received some transaction.
+                                Packet::Transaction {
+                                    root_block: received_root_block,
+                                    transaction
+                                } if received_root_block == root_block
+                                    && options.accept_pending_transactions
+                                => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::debug!(
+                                        ?endpoint_id,
+                                        root_block = root_block.to_base64(),
+                                        "handle Transaction packet"
+                                    );
+
+                                    // TODO: check if this transaction is already
+                                    // stored in some block!!!!!!!!!
+
+                                    // Reject large transactions.
+                                    if transaction.data().len() > options.max_transaction_size {
                                         #[cfg(feature = "tracing")]
-                                        tracing::error!(
-                                            err = err.to_string(),
+                                        tracing::warn!(
                                             ?endpoint_id,
-                                            "failed to send packet to the packets stream"
+                                            "received too large transaction"
                                         );
 
-                                        break;
+                                        continue;
                                     }
+
+                                    // Verify received transaction.
+                                    let (is_valid, hash, verifying_key) = match transaction.verify() {
+                                        Ok(result) => result,
+                                        Err(err) => {
+                                            #[cfg(feature = "tracing")]
+                                            tracing::error!(
+                                                ?err,
+                                                ?endpoint_id,
+                                                "failed to verify received transaction"
+                                            );
+
+                                            continue;
+                                        }
+                                    };
+
+                                    // Skip transaction if it's invalid.
+                                    if !is_valid {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::warn!(
+                                            ?endpoint_id,
+                                            hash = hash.to_base64(),
+                                            verifying_key = verifying_key.to_base64(),
+                                            "received invalid transaction"
+                                        );
+
+                                        continue;
+                                    }
+
+                                    // Reject already indexed transactions.
+                                    if indexed_transactions.read().contains(&hash)
+                                        || pending_transactions.read().contains_key(&hash)
+                                    {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::trace!(
+                                            ?endpoint_id,
+                                            hash = hash.to_base64(),
+                                            verifying_key = verifying_key.to_base64(),
+                                            "received already indexed transaction"
+                                        );
+
+                                        continue;
+                                    }
+
+                                    // Check this transaction using the provided filter.
+                                    if let Some(filter) = &options.transactions_filter
+                                        && !filter(&hash, &verifying_key, &transaction)
+                                    {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::debug!(
+                                            ?endpoint_id,
+                                            hash = hash.to_base64(),
+                                            verifying_key = verifying_key.to_base64(),
+                                            "received transaction which was filtered out"
+                                        );
+
+                                        continue;
+                                    }
+
+                                    pending_transactions.write()
+                                        .insert(hash, transaction);
                                 }
 
                                 // If we were asked to send a block of the
@@ -620,6 +770,14 @@ impl<S: Storage> Node<S> {
                                     root_block: received_root_block,
                                     target_block
                                 } if received_root_block == root_block => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::debug!(
+                                        ?endpoint_id,
+                                        root_block = root_block.to_base64(),
+                                        target_block = target_block.to_base64(),
+                                        "handle AskBlock packet"
+                                    );
+
                                     // If this block is pending.
                                     if let Some(block) = pending_blocks.read().get(&target_block) {
                                         // Then try to send it back.
@@ -684,6 +842,13 @@ impl<S: Storage> Node<S> {
                                     root_block: received_root_block,
                                     mut block
                                 } if received_root_block == root_block => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::debug!(
+                                        ?endpoint_id,
+                                        root_block = root_block.to_base64(),
+                                        "handle Block packet"
+                                    );
+
                                     // Verify the block and obtain its hash.
                                     let (is_valid, hash, verifying_key) = match block.verify() {
                                         Ok(result) => result,
@@ -829,123 +994,21 @@ impl<S: Storage> Node<S> {
                                     }
                                 }
 
-                                // If we were asked to send transaction.
-                                Packet::AskTransaction {
-                                    root_block: received_root_block,
-                                    transaction
-                                } if received_root_block == root_block => {
-                                    // If it is a pending transaction.
-                                    let transaction = pending_transactions.read()
-                                        .get(&transaction)
-                                        .cloned();
-
-                                    #[allow(clippy::collapsible_if)]
-                                    if let Some(transaction) = transaction {
-                                        // Then try to send it back.
-                                        if let Err(err) = stream.send(Packet::Transaction {
-                                            root_block,
-                                            transaction: transaction.clone()
-                                        }) {
-                                            #[cfg(feature = "tracing")]
-                                            tracing::error!(
-                                                err = err.to_string(),
-                                                ?endpoint_id,
-                                                "failed to send packet to the packets stream"
-                                            );
-
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                // If we received some transaction.
-                                Packet::Transaction {
-                                    root_block: received_root_block,
-                                    transaction
-                                } if received_root_block == root_block
-                                    && options.accept_pending_transactions => {
-                                    // TODO: check if this transaction is already
-                                    // stored in some block!!!!!!!!!
-
-                                    // Reject large transactions.
-                                    if transaction.data().len() > options.max_transaction_size {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::warn!(
-                                            ?endpoint_id,
-                                            "received too large transaction"
-                                        );
-
-                                        continue;
-                                    }
-
-                                    // Verify received transaction.
-                                    let (is_valid, hash, verifying_key) = match transaction.verify() {
-                                        Ok(result) => result,
-                                        Err(err) => {
-                                            #[cfg(feature = "tracing")]
-                                            tracing::error!(
-                                                ?err,
-                                                ?endpoint_id,
-                                                "failed to verify received transaction"
-                                            );
-
-                                            continue;
-                                        }
-                                    };
-
-                                    // Skip transaction if it's invalid.
-                                    if !is_valid {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::warn!(
-                                            ?endpoint_id,
-                                            hash = hash.to_base64(),
-                                            verifying_key = verifying_key.to_base64(),
-                                            "received invalid transaction"
-                                        );
-
-                                        continue;
-                                    }
-
-                                    // Reject already indexed transactions.
-                                    if indexed_transactions.read().contains(&hash)
-                                        || pending_transactions.read().contains_key(&hash)
-                                    {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::trace!(
-                                            ?endpoint_id,
-                                            hash = hash.to_base64(),
-                                            verifying_key = verifying_key.to_base64(),
-                                            "received already indexed transaction"
-                                        );
-
-                                        continue;
-                                    }
-
-                                    // Check this transaction using the provided filter.
-                                    if let Some(filter) = &options.transactions_filter
-                                        && !filter(&hash, &verifying_key, &transaction)
-                                    {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::debug!(
-                                            ?endpoint_id,
-                                            hash = hash.to_base64(),
-                                            verifying_key = verifying_key.to_base64(),
-                                            "received transaction which was filtered out"
-                                        );
-
-                                        continue;
-                                    }
-
-                                    pending_transactions.write()
-                                        .insert(hash, transaction);
-                                }
-
                                 // If we received block approval.
                                 Packet::ApproveBlock {
                                     root_block: received_root_block,
                                     target_block,
                                     approval
                                 } if received_root_block == root_block => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::debug!(
+                                        ?endpoint_id,
+                                        root_block = root_block.to_base64(),
+                                        target_block = target_block.to_base64(),
+                                        approval = approval.to_base64(),
+                                        "handle ApproveBlock packet"
+                                    );
+
                                     // Verify approval.
                                     let (is_valid, verifying_key) = match approval.verify(target_block) {
                                         Ok(result) => result,

@@ -24,6 +24,7 @@ use std::io::{Read, Write};
 #[cfg(feature = "encryption-chacha20")]
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 
+use crate::crypto::base64;
 use crate::crypto::key_exchange::{SecretKey, PublicKey};
 
 use super::packets::{Packet, PacketError};
@@ -228,8 +229,11 @@ impl PacketStream {
         options: &PacketStreamOptions,
         mut stream: TcpStream
     ) -> Result<Self, PacketStreamError> {
+        let peer_addr = stream.peer_addr().ok();
+
         #[cfg(feature = "tracing")]
         tracing::trace!(
+            ?peer_addr,
             ?options,
             "initializing packet stream connection"
         );
@@ -257,6 +261,9 @@ impl PacketStream {
             };
         }
 
+        #[cfg(feature = "tracing")]
+        tracing::trace!(?peer_addr, ?options, "send handshake");
+
         // Send header and options.
         stream.write_all(&[
             Self::V1_HEADER,
@@ -266,6 +273,9 @@ impl PacketStream {
         // Send public key.
         stream.write_all(&public_key)
             .map_err(PacketStreamError::Stream)?;
+
+        #[cfg(feature = "tracing")]
+        tracing::trace!(?peer_addr, ?options, "read handshake");
 
         // Read protocol version from the header byte.
         let mut buf = [0; 1];
@@ -359,6 +369,15 @@ impl PacketStream {
             None => None
         };
 
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            ?peer_addr,
+            endpoint_id = base64::encode(endpoint_id.as_bytes()),
+            shared_secret_image = base64::encode(shared_secret_image.as_bytes()),
+            ?options,
+            "send shared secret image"
+        );
+
         // Send shared secret image.
         let mut buf: [u8; 32] = *shared_secret_image.as_bytes();
 
@@ -368,6 +387,14 @@ impl PacketStream {
 
         stream.write_all(&buf)
             .map_err(PacketStreamError::Stream)?;
+
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            ?peer_addr,
+            endpoint_id = base64::encode(endpoint_id.as_bytes()),
+            ?options,
+            "read shared secret image"
+        );
 
         // Read shared secret image.
         let mut buf = [0; 32];

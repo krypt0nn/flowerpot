@@ -69,21 +69,6 @@ pub enum Packet {
         history: Box<[Hash]>
     },
 
-    /// Ask list of blockchain's pending blocks.
-    AskPendingBlocks {
-        /// Hash of the blockchain's root block.
-        root_block: Hash
-    },
-
-    /// List of pending blocks of a blockchain.
-    PendingBlocks {
-        /// Hash of the blockchain's root block.
-        root_block: Hash,
-
-        /// List of pending blocks' hashes and their approval signatures.
-        pending_blocks: Box<[(Hash, Box<[Signature]>)]>
-    },
-
     /// Ask list of blockchain's pending transactions.
     AskPendingTransactions {
         /// Hash of the blockchain's root block.
@@ -99,22 +84,19 @@ pub enum Packet {
         pending_transactions: Box<[Hash]>
     },
 
-    /// Ask block of a blockchain.
-    AskBlock {
+    /// Ask list of blockchain's pending blocks.
+    AskPendingBlocks {
         /// Hash of the blockchain's root block.
-        root_block: Hash,
-
-        /// Hash of the block you want to receive.
-        target_block: Hash
+        root_block: Hash
     },
 
-    /// Block of a blockchain.
-    Block {
+    /// List of pending blocks of a blockchain.
+    PendingBlocks {
         /// Hash of the blockchain's root block.
         root_block: Hash,
 
-        /// Block of the blockchain.
-        block: Block
+        /// List of pending blocks' hashes and their approval signatures.
+        pending_blocks: Box<[(Hash, Box<[Signature]>)]>
     },
 
     /// Ask transaction from a blockchain.
@@ -135,6 +117,24 @@ pub enum Packet {
         transaction: Transaction
     },
 
+    /// Ask block of a blockchain.
+    AskBlock {
+        /// Hash of the blockchain's root block.
+        root_block: Hash,
+
+        /// Hash of the block you want to receive.
+        target_block: Hash
+    },
+
+    /// Block of a blockchain.
+    Block {
+        /// Hash of the blockchain's root block.
+        root_block: Hash,
+
+        /// Block of the blockchain.
+        block: Block
+    },
+
     /// Approve block of a blockchain.
     ApproveBlock {
         /// Hash of the blockchain's root block.
@@ -152,14 +152,14 @@ impl Packet {
     pub const V1_HEARTBEAT: u8                = 0;
     pub const V1_ASK_HISTORY: u8              = 1;
     pub const V1_HISTORY: u8                  = 2;
-    pub const V1_ASK_PENDING_BLOCKS: u8       = 3;
-    pub const V1_PENDING_BLOCKS: u8           = 4;
-    pub const V1_ASK_PENDING_TRANSACTIONS: u8 = 5;
-    pub const V1_PENDING_TRANSACTIONS: u8     = 6;
-    pub const V1_ASK_BLOCK: u8                = 7;
-    pub const V1_BLOCK: u8                    = 8;
-    pub const V1_ASK_TRANSACTION: u8          = 9;
-    pub const V1_TRANSACTION: u8              = 10;
+    pub const V1_ASK_PENDING_TRANSACTIONS: u8 = 3;
+    pub const V1_PENDING_TRANSACTIONS: u8     = 4;
+    pub const V1_ASK_PENDING_BLOCKS: u8       = 5;
+    pub const V1_PENDING_BLOCKS: u8           = 6;
+    pub const V1_ASK_TRANSACTION: u8          = 7;
+    pub const V1_TRANSACTION: u8              = 8;
+    pub const V1_ASK_BLOCK: u8                = 9;
+    pub const V1_BLOCK: u8                    = 10;
     pub const V1_APPROVE_BLOCK: u8            = 11;
 
     /// Convert current packet to the bytes slice.
@@ -202,6 +202,30 @@ impl Packet {
                 Ok(buf.into_boxed_slice())
             }
 
+            Self::AskPendingTransactions { root_block } => {
+                let mut buf = [0; Hash::SIZE + 1];
+
+                buf[0] = Self::V1_ASK_PENDING_TRANSACTIONS;
+
+                buf[1..].copy_from_slice(&root_block.0);
+
+                Ok(Box::new(buf))
+            }
+
+            Self::PendingTransactions { root_block, pending_transactions } => {
+                let mut buf = Vec::new();
+
+                buf.push(Self::V1_PENDING_TRANSACTIONS);
+
+                buf.extend_from_slice(&root_block.0);
+
+                for hash in pending_transactions {
+                    buf.extend_from_slice(&hash.0);
+                }
+
+                Ok(buf.into_boxed_slice())
+            }
+
             Self::AskPendingBlocks { root_block } => {
                 let mut buf = [0; Hash::SIZE + 1];
 
@@ -232,26 +256,24 @@ impl Packet {
                 Ok(buf.into_boxed_slice())
             }
 
-            Self::AskPendingTransactions { root_block } => {
-                let mut buf = [0; Hash::SIZE + 1];
+            Self::AskTransaction { root_block, transaction } => {
+                let mut buf = [0; Hash::SIZE * 2 + 1];
 
-                buf[0] = Self::V1_ASK_PENDING_TRANSACTIONS;
+                buf[0] = Self::V1_ASK_TRANSACTION;
 
-                buf[1..].copy_from_slice(&root_block.0);
+                buf[1..Hash::SIZE + 1].copy_from_slice(&root_block.0);
+                buf[Hash::SIZE + 1..].copy_from_slice(&transaction.0);
 
                 Ok(Box::new(buf))
             }
 
-            Self::PendingTransactions { root_block, pending_transactions } => {
+            Self::Transaction { root_block, transaction } => {
                 let mut buf = Vec::new();
 
-                buf.push(Self::V1_PENDING_TRANSACTIONS);
+                buf.push(Self::V1_TRANSACTION);
 
                 buf.extend_from_slice(&root_block.0);
-
-                for hash in pending_transactions {
-                    buf.extend_from_slice(&hash.0);
-                }
+                buf.extend(transaction.to_bytes());
 
                 Ok(buf.into_boxed_slice())
             }
@@ -274,28 +296,6 @@ impl Packet {
 
                 buf.extend_from_slice(&root_block.0);
                 buf.extend(block.to_bytes()?);
-
-                Ok(buf.into_boxed_slice())
-            }
-
-            Self::AskTransaction { root_block, transaction } => {
-                let mut buf = [0; Hash::SIZE * 2 + 1];
-
-                buf[0] = Self::V1_ASK_TRANSACTION;
-
-                buf[1..Hash::SIZE + 1].copy_from_slice(&root_block.0);
-                buf[Hash::SIZE + 1..].copy_from_slice(&transaction.0);
-
-                Ok(Box::new(buf))
-            }
-
-            Self::Transaction { root_block, transaction } => {
-                let mut buf = Vec::new();
-
-                buf.push(Self::V1_TRANSACTION);
-
-                buf.extend_from_slice(&root_block.0);
-                buf.extend(transaction.to_bytes());
 
                 Ok(buf.into_boxed_slice())
             }
@@ -377,6 +377,44 @@ impl Packet {
                 })
             }
 
+            Self::V1_ASK_PENDING_TRANSACTIONS => {
+                if bytes.len() < Hash::SIZE + 1 {
+                    return Err(PacketError::PacketTooShort);
+                }
+
+                let mut root_block = [0; Hash::SIZE];
+
+                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+
+                Ok(Self::AskPendingTransactions {
+                    root_block: Hash::from(root_block)
+                })
+            }
+
+            Self::V1_PENDING_TRANSACTIONS => {
+                if bytes.len() < Hash::SIZE + 1 {
+                    return Err(PacketError::PacketTooShort);
+                }
+
+                let mut root_block = [0; Hash::SIZE];
+
+                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+
+                let mut bytes = Cursor::new(bytes[Hash::SIZE + 1..].to_vec());
+                let mut hash = [0; Hash::SIZE];
+
+                let mut transactions = Vec::new();
+
+                while bytes.read_exact(&mut hash).is_ok() {
+                    transactions.push(Hash::from(hash));
+                }
+
+                Ok(Self::PendingTransactions {
+                    root_block: Hash::from(root_block),
+                    pending_transactions: transactions.into_boxed_slice()
+                })
+            }
+
             Self::V1_ASK_PENDING_BLOCKS => {
                 if bytes.len() < Hash::SIZE + 1 {
                     return Err(PacketError::PacketTooShort);
@@ -434,21 +472,24 @@ impl Packet {
                 })
             }
 
-            Self::V1_ASK_PENDING_TRANSACTIONS => {
-                if bytes.len() < Hash::SIZE + 1 {
+            Self::V1_ASK_TRANSACTION => {
+                if bytes.len() < Hash::SIZE * 2 + 1 {
                     return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; Hash::SIZE];
+                let mut transaction = [0; Hash::SIZE];
 
                 root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+                transaction.copy_from_slice(&bytes[Hash::SIZE + 1..]);
 
-                Ok(Self::AskPendingTransactions {
-                    root_block: Hash::from(root_block)
+                Ok(Self::AskTransaction {
+                    root_block: Hash::from(root_block),
+                    transaction: Hash::from(transaction)
                 })
             }
 
-            Self::V1_PENDING_TRANSACTIONS => {
+            Self::V1_TRANSACTION => {
                 if bytes.len() < Hash::SIZE + 1 {
                     return Err(PacketError::PacketTooShort);
                 }
@@ -457,18 +498,9 @@ impl Packet {
 
                 root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
 
-                let mut bytes = Cursor::new(bytes[Hash::SIZE + 1..].to_vec());
-                let mut hash = [0; Hash::SIZE];
-
-                let mut transactions = Vec::new();
-
-                while bytes.read_exact(&mut hash).is_ok() {
-                    transactions.push(Hash::from(hash));
-                }
-
-                Ok(Self::PendingTransactions {
+                Ok(Self::Transaction {
                     root_block: Hash::from(root_block),
-                    pending_transactions: transactions.into_boxed_slice()
+                    transaction: Transaction::from_bytes(&bytes[Hash::SIZE + 1..])?
                 })
             }
 
@@ -501,38 +533,6 @@ impl Packet {
                 Ok(Self::Block {
                     root_block: Hash::from(root_block),
                     block: Block::from_bytes(&bytes[Hash::SIZE + 1..])?
-                })
-            }
-
-            Self::V1_ASK_TRANSACTION => {
-                if bytes.len() < Hash::SIZE * 2 + 1 {
-                    return Err(PacketError::PacketTooShort);
-                }
-
-                let mut root_block = [0; Hash::SIZE];
-                let mut transaction = [0; Hash::SIZE];
-
-                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
-                transaction.copy_from_slice(&bytes[Hash::SIZE + 1..]);
-
-                Ok(Self::AskTransaction {
-                    root_block: Hash::from(root_block),
-                    transaction: Hash::from(transaction)
-                })
-            }
-
-            Self::V1_TRANSACTION => {
-                if bytes.len() < Hash::SIZE + 1 {
-                    return Err(PacketError::PacketTooShort);
-                }
-
-                let mut root_block = [0; Hash::SIZE];
-
-                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
-
-                Ok(Self::Transaction {
-                    root_block: Hash::from(root_block),
-                    transaction: Transaction::from_bytes(&bytes[Hash::SIZE + 1..])?
                 })
             }
 
@@ -615,6 +615,19 @@ fn test_serialize() -> Result<(), PacketError> {
             ])
         },
 
+        Packet::AskPendingTransactions {
+            root_block: Hash::calc(b"Hello, World!")
+        },
+
+        Packet::PendingTransactions {
+            root_block: Hash::calc(b"Hello, World!"),
+            pending_transactions: Box::new([
+                Hash::calc(b"Test 1"),
+                Hash::calc(b"Test 2"),
+                Hash::calc(b"Test 3")
+            ])
+        },
+
         Packet::AskPendingBlocks {
             root_block: Hash::calc(b"Hello, World!")
         },
@@ -634,17 +647,17 @@ fn test_serialize() -> Result<(), PacketError> {
             ])
         },
 
-        Packet::AskPendingTransactions {
-            root_block: Hash::calc(b"Hello, World!")
+        Packet::AskTransaction {
+            root_block: Hash::calc(b"Hello, World!"),
+            transaction: Hash::calc(b"Test")
         },
 
-        Packet::PendingTransactions {
+        Packet::Transaction {
             root_block: Hash::calc(b"Hello, World!"),
-            pending_transactions: Box::new([
-                Hash::calc(b"Test 1"),
-                Hash::calc(b"Test 2"),
-                Hash::calc(b"Test 3")
-            ])
+            transaction: Transaction::create(
+                &signing_key,
+                [1, 2, 3]
+            ).unwrap()
         },
 
         Packet::AskBlock {
@@ -658,19 +671,6 @@ fn test_serialize() -> Result<(), PacketError> {
                 &signing_key,
                 Hash::default(),
                 BlockContent::data([1, 2, 3])
-            ).unwrap()
-        },
-
-        Packet::AskTransaction {
-            root_block: Hash::calc(b"Hello, World!"),
-            transaction: Hash::calc(b"Test")
-        },
-
-        Packet::Transaction {
-            root_block: Hash::calc(b"Hello, World!"),
-            transaction: Transaction::create(
-                &signing_key,
-                [1, 2, 3]
             ).unwrap()
         },
 
