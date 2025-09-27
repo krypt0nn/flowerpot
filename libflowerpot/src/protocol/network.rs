@@ -151,7 +151,7 @@ impl PacketStreamEncryptor {
     }
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PacketStreamOptions {
     /// List of encryption algorithms which can be used by the packet stream.
     ///
@@ -164,6 +164,23 @@ pub struct PacketStreamOptions {
     /// > blockchain by its nature is open for everybody. This option is mainly
     /// > needed to hide your traffic.
     pub encryption_algorithms: Vec<PacketStreamEncryption>
+}
+
+impl Default for PacketStreamOptions {
+    fn default() -> Self {
+        Self {
+            encryption_algorithms: vec![
+                #[cfg(feature = "encryption-chacha20")]
+                PacketStreamEncryption::ChaCha20,
+
+                #[cfg(feature = "encryption-chacha20")]
+                PacketStreamEncryption::ChaCha12,
+
+                #[cfg(feature = "encryption-chacha20")]
+                PacketStreamEncryption::ChaCha8
+            ]
+        }
+    }
 }
 
 /// Abstraction over a transport protocol data stream which supports packets
