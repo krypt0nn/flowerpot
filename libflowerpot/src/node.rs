@@ -289,11 +289,10 @@ impl<S: Storage> Node<S> {
     /// logs only.
     pub fn start(
         self,
-        options: NodeOptions,
-        mut spawner: impl FnMut(Box<dyn std::future::Future<Output = ()>>)
+        options: NodeOptions
     ) -> Result<NodeHandler, NodeError<S>>
     where
-        S: 'static
+        S: Send + 'static
     {
         #[cfg(feature = "tracing")]
         tracing::info!("starting the node");
@@ -447,7 +446,7 @@ impl<S: Storage> Node<S> {
                 }
             }
 
-            spawner(Box::new(async move {
+            std::thread::spawn(move || {
                 // Ask remote node to share pending blocks and transactions.
                 if let Err(err) = stream.send(Packet::AskPendingTransactions {
                     root_block
@@ -1102,16 +1101,16 @@ impl<S: Storage> Node<S> {
                         }
                     }
                 }
-            }));
+            });
         }
 
-        spawner(Box::new(async move {
+        std::thread::spawn(move|| {
             while let Ok(packet) = handler_receiver.recv() {
                 for sender in existing_streams.values() {
                     let _ = sender.send(packet.clone());
                 }
             }
-        }));
+        });
 
         Ok(NodeHandler(handler_sender))
     }
