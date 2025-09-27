@@ -446,10 +446,13 @@ impl<S: Storage> Node<S> {
             }
 
             std::thread::spawn(move || {
-                // Ask remote node to share pending blocks and transactions.
-                if let Err(err) = stream.send(Packet::AskPendingTransactions {
-                    root_block
-                }) {
+                // Ask remote node to share pending transactions if we support
+                // their storing.
+                if options.accept_pending_transactions &&
+                    let Err(err) = stream.send(Packet::AskPendingTransactions {
+                        root_block
+                    })
+                {
                     #[cfg(feature = "tracing")]
                     tracing::error!(
                         err = err.to_string(),
@@ -460,9 +463,13 @@ impl<S: Storage> Node<S> {
                     return;
                 }
 
-                if let Err(err) = stream.send(Packet::AskPendingBlocks {
-                    root_block
-                }) {
+                // Ask remote node to share pending blocks if we support their
+                // storing.
+                if options.accept_pending_blocks &&
+                    let Err(err) = stream.send(Packet::AskPendingBlocks {
+                        root_block
+                    })
+                {
                     #[cfg(feature = "tracing")]
                     tracing::error!(
                         err = err.to_string(),
