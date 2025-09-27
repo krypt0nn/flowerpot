@@ -68,7 +68,7 @@ impl<'stream> Viewer<'stream> {
 
     /// Open viewer of the blockchain history known to the node with provided
     /// packet stream connection.
-    pub async fn open(
+    pub fn open(
         stream: &'stream mut PacketStream,
         root_block: Hash
     ) -> Result<Self, ViewerError> {
@@ -211,7 +211,7 @@ impl<'stream> Viewer<'stream> {
     /// Request the next block of the blockchain history known to the underlying
     /// node, verify and return it. If we've reached the end of the known
     /// history then `None` is returned.
-    pub async fn forward(&mut self) -> Result<Option<ValidBlock>, ViewerError> {
+    pub fn forward(&mut self) -> Result<Option<ValidBlock>, ViewerError> {
         // Ask for the blockchain history if the history pool is empty.
         let pending_hash = if let Some(hash) = self.pending_history.pop_front() {
             hash
@@ -342,14 +342,14 @@ pub struct BatchedViewer<'stream> {
 impl<'stream> BatchedViewer<'stream> {
     /// Open batched viewer of the blockchain history known to the provided
     /// nodes' packet streams
-    pub async fn open(
+    pub fn open(
         streams: impl IntoIterator<Item = &'stream mut PacketStream>,
         root_block: Hash
     ) -> Result<Self, ViewerError> {
         let mut viewers = Vec::new();
 
         for stream in streams {
-            viewers.push(Viewer::open(stream, root_block).await?);
+            viewers.push(Viewer::open(stream, root_block)?);
         }
 
         Ok(Self {
@@ -363,7 +363,7 @@ impl<'stream> BatchedViewer<'stream> {
     /// provided streams' endpoints have the same history.
     ///
     /// Return `Ok(None)` if storage doesn't have any blocks.
-    pub async fn open_from_storage<S: Storage>(
+    pub fn open_from_storage<S: Storage>(
         streams: impl IntoIterator<Item = &'stream mut PacketStream>,
         storage: &S
     )  -> Result<Option<Self>, ViewerError>
@@ -431,13 +431,13 @@ impl<'stream> BatchedViewer<'stream> {
     /// Request the next block of the blockchain history known to the underlying
     /// nodes, verify and return it. If we've reached the end of the known
     /// history then `Ok(None)` is returned.
-    pub async fn forward(
+    pub fn forward(
         &mut self
     ) -> Result<Option<ValidBlock>, ViewerError> {
         let mut curr_block: Option<ValidBlock> = None;
 
         for viewer in &mut self.viewers {
-            let block = viewer.forward().await?;
+            let block = viewer.forward()?;
 
             if let Some(block) = block {
                 if block.block.previous() != &self.prev_block {
@@ -483,7 +483,7 @@ impl<'stream> BatchedViewer<'stream> {
     ///
     /// > Note that this method does not modify the provided storage if new
     /// > blocks are received from the network. Only read operations are used.
-    pub async fn forward_with_storage<T: Storage>(
+    pub fn forward_with_storage<T: Storage>(
         &mut self,
         storage: &T
     ) -> Result<Option<ValidBlock>, ViewerError>
@@ -517,7 +517,7 @@ impl<'stream> BatchedViewer<'stream> {
             .map_err(ViewerError::Block)?
             .flatten();
 
-        let network_block = self.forward().await?;
+        let network_block = self.forward()?;
 
         match (network_block, storage_block) {
             (Some(network_block), Some(storage_block)) => {

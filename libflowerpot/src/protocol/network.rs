@@ -206,7 +206,7 @@ impl PacketStream {
     /// This method will exchange some handshake info, read incoming data and
     /// if handshake was successful - provide simple interface to send and
     /// receive packets over the network.
-    pub async fn init(
+    pub fn init(
         secret_key: impl AsRef<SecretKey>,
         options: PacketStreamOptions,
         mut stream: TcpStream

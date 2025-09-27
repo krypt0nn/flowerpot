@@ -198,7 +198,7 @@ impl<S: Storage> Node<S> {
     ///    then it's forcely removed from the network. This is needed to prevent
     ///    people from creating validators which don't participate in the
     ///    network maintenance and break the 2/3 validators rule.
-    pub async fn sync(&mut self) -> Result<(), NodeError<S>>
+    pub fn sync(&mut self) -> Result<(), NodeError<S>>
     where
         S::Error: 'static
     {
@@ -214,7 +214,7 @@ impl<S: Storage> Node<S> {
                 let viewer = BatchedViewer::open_from_storage(
                     self.streams.values_mut(),
                     storage
-                ).await.map_err(NodeError::Viewer)?;
+                ).map_err(NodeError::Viewer)?;
 
                 match viewer {
                     Some(viewer) => viewer,
@@ -224,7 +224,7 @@ impl<S: Storage> Node<S> {
                         BatchedViewer::open(
                             self.streams.values_mut(),
                             self.root_block
-                        ).await.map_err(NodeError::Viewer)?
+                        ).map_err(NodeError::Viewer)?
                     }
                 }
             }
@@ -233,7 +233,7 @@ impl<S: Storage> Node<S> {
                 BatchedViewer::open(
                     self.streams.values_mut(),
                     self.root_block
-                ).await.map_err(NodeError::Viewer)?
+                ).map_err(NodeError::Viewer)?
             }
         };
 
@@ -243,10 +243,10 @@ impl<S: Storage> Node<S> {
 
         loop {
             let block = match &self.storage {
-                Some(storage) => viewer.forward_with_storage(storage).await
+                Some(storage) => viewer.forward_with_storage(storage)
                     .map_err(NodeError::Viewer)?,
 
-                None => viewer.forward().await
+                None => viewer.forward()
                     .map_err(NodeError::Viewer)?
             };
 
@@ -287,7 +287,7 @@ impl<S: Storage> Node<S> {
     ///
     /// All the non-critical errors will be silenced and displayed in tracing
     /// logs only.
-    pub async fn start(
+    pub fn start(
         self,
         options: NodeOptions,
         mut spawner: impl FnMut(Box<dyn std::future::Future<Output = ()>>)
