@@ -28,8 +28,8 @@ use crate::crypto::sign::VerifyingKey;
 use crate::transaction::Transaction;
 use crate::block::{Block, BlockContent, BlockStatus, Error as BlockError};
 use crate::storage::Storage;
-use crate::network::Stream;
-use crate::protocol::{Packet, PacketStream, PacketStreamError};
+use crate::protocol::packets::Packet;
+use crate::protocol::network::{PacketStream, PacketStreamError};
 use crate::viewer::{BatchedViewer, ViewerError};
 
 #[derive(Debug,thiserror::Error)]
@@ -130,10 +130,10 @@ impl Default for NodeOptions {
     }
 }
 
-pub struct Node<T: Stream, F: Storage> {
+pub struct Node<S: Storage> {
     root_block: Hash,
-    streams: HashMap<[u8; 32], PacketStream<T>>,
-    storage: Option<F>,
+    streams: HashMap<[u8; 32], PacketStream>,
+    storage: Option<S>,
     history: Vec<Hash>,
     validators: Vec<VerifyingKey>,
     current_distance: [u8; 32],
@@ -142,7 +142,7 @@ pub struct Node<T: Stream, F: Storage> {
     pending_transactions: HashMap<Hash, Transaction>
 }
 
-impl<T: Stream, F: Storage> Node<T, F> {
+impl<S: Storage> Node<S> {
     /// Create new empty node.
     pub fn new(root_block: impl Into<Hash>) -> Self {
         Self {
@@ -159,7 +159,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
     }
 
     /// Add new connection.
-    pub fn add_connection(&mut self, stream: PacketStream<T>) -> &mut Self {
+    pub fn add_connection(&mut self, stream: PacketStream) -> &mut Self {
         if !self.streams.contains_key(stream.endpoint_id()) {
             self.streams.insert(*stream.endpoint_id(), stream);
         }
@@ -168,7 +168,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
     }
 
     /// Add blockchain storage to the node.
-    pub fn attach_storage(&mut self, storage: F) -> &mut Self {
+    pub fn attach_storage(&mut self, storage: S) -> &mut Self {
         self.storage = Some(storage);
 
         self
@@ -198,9 +198,9 @@ impl<T: Stream, F: Storage> Node<T, F> {
     ///    then it's forcely removed from the network. This is needed to prevent
     ///    people from creating validators which don't participate in the
     ///    network maintenance and break the 2/3 validators rule.
-    pub async fn sync(&mut self) -> Result<(), NodeError<F>>
+    pub async fn sync(&mut self) -> Result<(), NodeError<S>>
     where
-        F::Error: 'static
+        S::Error: 'static
     {
         #[cfg(feature = "tracing")]
         tracing::info!("synchronizing node state");
@@ -291,10 +291,9 @@ impl<T: Stream, F: Storage> Node<T, F> {
         self,
         options: NodeOptions,
         mut spawner: impl FnMut(Box<dyn std::future::Future<Output = ()>>)
-    ) -> Result<NodeHandler, NodeError<F>>
+    ) -> Result<NodeHandler, NodeError<S>>
     where
-        T: 'static,
-        F: 'static
+        S: 'static
     {
         #[cfg(feature = "tracing")]
         tracing::info!("starting the node");
@@ -452,7 +451,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                 // Ask remote node to share pending blocks and transactions.
                 if let Err(err) = stream.send(Packet::AskPendingTransactions {
                     root_block
-                }).await {
+                }) {
                     #[cfg(feature = "tracing")]
                     tracing::error!(
                         err = err.to_string(),
@@ -465,7 +464,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
 
                 if let Err(err) = stream.send(Packet::AskPendingBlocks {
                     root_block
-                }).await {
+                }) {
                     #[cfg(feature = "tracing")]
                     tracing::error!(
                         err = err.to_string(),
@@ -482,7 +481,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                     loop {
                         match stream_receiver.try_recv() {
                             Ok(packet) => {
-                                if let Err(err) = stream.send(packet).await {
+                                if let Err(err) = stream.send(packet) {
                                     #[cfg(feature = "tracing")]
                                     tracing::error!(
                                         err = err.to_string(),
@@ -510,7 +509,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
 
                     // Read packet from the remote endpoint.
                     // TODO: timeout support
-                    let packet = stream.recv().await;
+                    let packet = stream.recv();
 
                     // Process received packet.
                     match packet {
@@ -538,7 +537,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         root_block,
                                         offset,
                                         history
-                                    }).await {
+                                    }) {
                                         #[cfg(feature = "tracing")]
                                         tracing::error!(
                                             err = err.to_string(),
@@ -571,7 +570,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     if let Err(err) = stream.send(Packet::PendingBlocks {
                                         root_block,
                                         pending_blocks
-                                    }).await {
+                                    }) {
                                         #[cfg(feature = "tracing")]
                                         tracing::error!(
                                             err = err.to_string(),
@@ -598,7 +597,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                     if let Err(err) = stream.send(Packet::PendingTransactions {
                                         root_block,
                                         pending_transactions
-                                    }).await {
+                                    }) {
                                         #[cfg(feature = "tracing")]
                                         tracing::error!(
                                             err = err.to_string(),
@@ -622,7 +621,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         if let Err(err) = stream.send(Packet::Block {
                                             root_block,
                                             block: block.clone()
-                                        }).await {
+                                        }) {
                                             #[cfg(feature = "tracing")]
                                             tracing::error!(
                                                 err = err.to_string(),
@@ -644,7 +643,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                                 if let Err(err) = stream.send(Packet::Block {
                                                     root_block,
                                                     block
-                                                }).await {
+                                                }) {
                                                     #[cfg(feature = "tracing")]
                                                     tracing::error!(
                                                         err = err.to_string(),
@@ -841,7 +840,7 @@ impl<T: Stream, F: Storage> Node<T, F> {
                                         if let Err(err) = stream.send(Packet::Transaction {
                                             root_block,
                                             transaction: transaction.clone()
-                                        }).await {
+                                        }) {
                                             #[cfg(feature = "tracing")]
                                             tracing::error!(
                                                 err = err.to_string(),

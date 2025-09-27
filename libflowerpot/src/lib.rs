@@ -22,7 +22,6 @@ pub mod crypto;
 pub mod transaction;
 pub mod block;
 pub mod storage;
-pub mod network;
 pub mod protocol;
 pub mod viewer;
 pub mod node;

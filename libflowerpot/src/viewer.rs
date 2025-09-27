@@ -22,8 +22,8 @@ use crate::crypto::hash::Hash;
 use crate::crypto::sign::VerifyingKey;
 use crate::block::{Block, BlockContent, BlockStatus, Error as BlockError};
 use crate::storage::Storage;
-use crate::network::Stream;
-use crate::protocol::{Packet, PacketStream, PacketStreamError};
+use crate::protocol::packets::Packet;
+use crate::protocol::network::{PacketStream, PacketStreamError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ViewerError {
@@ -55,28 +55,28 @@ pub struct ValidBlock {
 
 /// Viewer is a helper struct which uses the underlying packet stream connection
 /// to traverse blockchain history known to the remote node.
-pub struct Viewer<'stream, S: Stream> {
-    stream: &'stream mut PacketStream<S>,
+pub struct Viewer<'stream> {
+    stream: &'stream mut PacketStream,
     root_block: Hash,
     current_block: (u64, Hash),
     pending_history: VecDeque<Hash>,
     validators: Vec<(VerifyingKey, u8)>
 }
 
-impl<'stream, S: Stream> Viewer<'stream, S> {
+impl<'stream> Viewer<'stream> {
     const MAX_HISTORY_LENGTH: u64 = 1024;
 
     /// Open viewer of the blockchain history known to the node with provided
     /// packet stream connection.
     pub async fn open(
-        stream: &'stream mut PacketStream<S>,
+        stream: &'stream mut PacketStream,
         root_block: Hash
     ) -> Result<Self, ViewerError> {
         // Ask for the root block of the blockchain.
         stream.send(&Packet::AskBlock {
             root_block,
             target_block: root_block
-        }).await.map_err(ViewerError::PacketStream)?;
+        }).map_err(ViewerError::PacketStream)?;
 
         let root_block_packet = stream.peek(|packet| {
             if let Packet::Block {
@@ -88,7 +88,7 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
             }
 
             false
-        }).await.map_err(ViewerError::PacketStream)?;
+        }).map_err(ViewerError::PacketStream)?;
 
         let Packet::Block { block, .. } = root_block_packet else {
             return Err(ViewerError::InvalidBlock);
@@ -116,12 +116,12 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
     /// stream's endpoint has the same history.
     ///
     /// Return `Ok(None)` if storage doesn't have any blocks.
-    pub fn open_from_storage<T: Storage>(
-        stream: &'stream mut PacketStream<S>,
-        storage: &T
+    pub fn open_from_storage<S: Storage>(
+        stream: &'stream mut PacketStream,
+        storage: &S
     )  -> Result<Option<Self>, ViewerError>
     where
-        T::Error: 'static
+        S::Error: 'static
     {
         // Try to read root block from the storage.
         let root_block = storage.root_block()
@@ -220,7 +220,7 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
                 root_block: self.root_block,
                 offset: self.current_block.0,
                 max_length: Self::MAX_HISTORY_LENGTH
-            }).await.map_err(ViewerError::PacketStream)?;
+            }).map_err(ViewerError::PacketStream)?;
 
             let history = self.stream.peek(|packet| {
                 if let Packet::History {
@@ -233,7 +233,7 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
                 }
 
                 false
-            }).await.map_err(ViewerError::PacketStream)?;
+            }).map_err(ViewerError::PacketStream)?;
 
             let Packet::History { history, .. } = history else {
                 return Err(ViewerError::InvalidHistory);
@@ -260,7 +260,7 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
         self.stream.send(Packet::AskBlock {
             root_block: self.root_block,
             target_block: pending_hash
-        }).await.map_err(ViewerError::PacketStream)?;
+        }).map_err(ViewerError::PacketStream)?;
 
         let packet = self.stream.peek(|packet| {
             if let Packet::Block {
@@ -271,7 +271,7 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
             }
 
             false
-        }).await.map_err(ViewerError::PacketStream)?;
+        }).map_err(ViewerError::PacketStream)?;
 
         let Packet::Block { mut block, .. } = packet else {
             return Err(ViewerError::InvalidBlock);
@@ -334,16 +334,16 @@ impl<'stream, S: Stream> Viewer<'stream, S> {
 /// Batched viewer is a helper struct which takes multiple `Viewer`-s and allows
 /// iterating through the commonly known blockchain history, selecting the best
 /// fork according to the protocol agreements.
-pub struct BatchedViewer<'stream, S: Stream> {
-    viewers: Vec<Viewer<'stream, S>>,
+pub struct BatchedViewer<'stream> {
+    viewers: Vec<Viewer<'stream>>,
     prev_block: Hash
 }
 
-impl<'stream, S: Stream> BatchedViewer<'stream, S> {
+impl<'stream> BatchedViewer<'stream> {
     /// Open batched viewer of the blockchain history known to the provided
     /// nodes' packet streams
     pub async fn open(
-        streams: impl IntoIterator<Item = &'stream mut PacketStream<S>>,
+        streams: impl IntoIterator<Item = &'stream mut PacketStream>,
         root_block: Hash
     ) -> Result<Self, ViewerError> {
         let mut viewers = Vec::new();
@@ -363,12 +363,12 @@ impl<'stream, S: Stream> BatchedViewer<'stream, S> {
     /// provided streams' endpoints have the same history.
     ///
     /// Return `Ok(None)` if storage doesn't have any blocks.
-    pub async fn open_from_storage<T: Storage>(
-        streams: impl IntoIterator<Item = &'stream mut PacketStream<S>>,
-        storage: &T
+    pub async fn open_from_storage<S: Storage>(
+        streams: impl IntoIterator<Item = &'stream mut PacketStream>,
+        storage: &S
     )  -> Result<Option<Self>, ViewerError>
     where
-        T::Error: 'static
+        S::Error: 'static
     {
         let mut viewers = Vec::new();
 

@@ -18,14 +18,15 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::net::TcpStream;
+use std::io::{Read, Write};
 
 #[cfg(feature = "encryption-chacha20")]
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 
 use crate::crypto::key_exchange::{SecretKey, PublicKey};
-use crate::network::Stream;
 
-use super::{Packet, PacketError};
+use super::packets::{Packet, PacketError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PacketStreamError {
@@ -167,8 +168,8 @@ pub struct PacketStreamOptions {
 
 /// Abstraction over a transport protocol data stream which supports packets
 /// sending and receiving, endpoint validation and optional stream encryption.
-pub struct PacketStream<S: Stream> {
-    stream: S,
+pub struct PacketStream {
+    stream: TcpStream,
     endpoint_id: [u8; 32],
     shared_secret: [u8; 32],
     read_encryptor: Option<PacketStreamEncryptor>,
@@ -176,7 +177,7 @@ pub struct PacketStream<S: Stream> {
     peek_queue: VecDeque<Packet>
 }
 
-impl<S: Stream> PacketStream<S> {
+impl PacketStream {
     pub const V1_HEADER: u8 = 0;
 
     pub const V1_CHACHA20_ENCRYPTION: u8 = 0b00000001;
@@ -208,7 +209,7 @@ impl<S: Stream> PacketStream<S> {
     pub async fn init(
         secret_key: impl AsRef<SecretKey>,
         options: PacketStreamOptions,
-        mut stream: S
+        mut stream: TcpStream
     ) -> Result<Self, PacketStreamError> {
         #[cfg(feature = "tracing")]
         tracing::trace!(
@@ -240,22 +241,19 @@ impl<S: Stream> PacketStream<S> {
         }
 
         // Send header and options.
-        stream.write(&[
+        stream.write_all(&[
             Self::V1_HEADER,
             options_byte
-        ]).await.map_err(PacketStreamError::Stream)?;
+        ]).map_err(PacketStreamError::Stream)?;
 
         // Send public key.
-        stream.write(&public_key).await
-            .map_err(PacketStreamError::Stream)?;
-
-        stream.flush().await
+        stream.write_all(&public_key)
             .map_err(PacketStreamError::Stream)?;
 
         // Read protocol version from the header byte.
         let mut buf = [0; 1];
 
-        stream.read_exact(&mut buf).await
+        stream.read_exact(&mut buf)
             .map_err(PacketStreamError::Stream)?;
 
         if buf[0] != Self::V1_HEADER {
@@ -265,13 +263,13 @@ impl<S: Stream> PacketStream<S> {
         // Read options.
         let mut buf = [0; 1];
 
-        stream.read_exact(&mut buf).await
+        stream.read_exact(&mut buf)
             .map_err(PacketStreamError::Stream)?;
 
         // Read public key.
         let mut public_key = [0; PublicKey::SIZE];
 
-        stream.read_exact(&mut public_key).await
+        stream.read_exact(&mut public_key)
             .map_err(PacketStreamError::Stream)?;
 
         let endpoint_id = blake3::keyed_hash(
@@ -351,16 +349,13 @@ impl<S: Stream> PacketStream<S> {
             encryptor.apply(&mut buf);
         }
 
-        stream.write(&buf).await
-            .map_err(PacketStreamError::Stream)?;
-
-        stream.flush().await
+        stream.write_all(&buf)
             .map_err(PacketStreamError::Stream)?;
 
         // Read shared secret image.
         let mut buf = [0; 32];
 
-        stream.read_exact(&mut buf).await
+        stream.read_exact(&mut buf)
             .map_err(PacketStreamError::Stream)?;
 
         if let Some(encryptor) = &mut read_encryptor {
@@ -389,14 +384,14 @@ impl<S: Stream> PacketStream<S> {
 
     /// Get socket address of the local endpoint.
     #[inline]
-    pub fn local_address(&self) -> &SocketAddr {
-        self.stream.local_address()
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.stream.local_addr()
     }
 
     /// Get socket address of the remote endpoint.
     #[inline]
-    pub fn remote_address(&self) -> &SocketAddr {
-        self.stream.remote_address()
+    pub fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+        self.stream.peer_addr()
     }
 
     /// Get unique identifier of the stream's remote endpoint.
@@ -415,7 +410,7 @@ impl<S: Stream> PacketStream<S> {
     }
 
     /// Send packet.
-    pub async fn send(
+    pub fn send(
         &mut self,
         packet: impl AsRef<Packet>
     ) -> Result<(), PacketStreamError> {
@@ -439,27 +434,24 @@ impl<S: Stream> PacketStream<S> {
             encryptor.apply(&mut packet);
         }
 
-        self.stream.write(&length).await
+        self.stream.write_all(&length)
             .map_err(PacketStreamError::Stream)?;
 
-        self.stream.write(&packet).await
-            .map_err(PacketStreamError::Stream)?;
-
-        self.stream.flush().await
+        self.stream.write_all(&packet)
             .map_err(PacketStreamError::Stream)?;
 
         Ok(())
     }
 
     /// Receive packet.
-    pub async fn recv(&mut self) -> Result<Packet, PacketStreamError> {
+    pub fn recv(&mut self) -> Result<Packet, PacketStreamError> {
         if let Some(packet) = self.peek_queue.pop_front() {
             return Ok(packet);
         }
 
         let mut length = [0; 4];
 
-        self.stream.read_exact(&mut length).await
+        self.stream.read_exact(&mut length)
             .map_err(PacketStreamError::Stream)?;
 
         let mut packet = vec![0; u32::from_le_bytes(length) as usize];
@@ -467,7 +459,7 @@ impl<S: Stream> PacketStream<S> {
         #[cfg(feature = "tracing")]
         tracing::trace!(length = packet.len(), "recv packet");
 
-        self.stream.read_exact(&mut packet).await
+        self.stream.read_exact(&mut packet)
             .map_err(PacketStreamError::Stream)?;
 
         if let Some(encryptor) = &mut self.read_encryptor {
@@ -487,14 +479,14 @@ impl<S: Stream> PacketStream<S> {
     /// method.
     ///
     /// This method can be used to search for a requested packet.
-    pub async fn peek(
+    pub fn peek(
         &mut self,
         mut callback: impl FnMut(&Packet) -> bool
     ) -> Result<Packet, PacketStreamError> {
         let mut peek_queue = Vec::new();
 
         loop {
-            let packet = self.recv().await?;
+            let packet = self.recv()?;
 
             if callback(&packet) {
                 self.peek_queue.extend(peek_queue);
