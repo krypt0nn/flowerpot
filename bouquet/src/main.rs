@@ -12,6 +12,7 @@ use libflowerpot::crypto::base64;
 use libflowerpot::crypto::hash::Hash;
 use libflowerpot::crypto::sign::SigningKey;
 use libflowerpot::crypto::key_exchange::SecretKey;
+use libflowerpot::transaction::Transaction;
 use libflowerpot::block::{Block, BlockContent};
 use libflowerpot::storage::Storage;
 use libflowerpot::storage::sqlite_storage::SqliteStorage;
@@ -43,12 +44,18 @@ enum Commands {
     Blockchain {
         #[command(subcommand)]
         command: BlockchainCommands
+    },
+
+    /// Manage flowerpot blockchain transactions.
+    Transaction {
+        #[command(subcommand)]
+        command: TransactionCommands
     }
 }
 
 #[derive(Subcommand)]
 enum KeypairCommands {
-    /// Create new flowerpot blockchain secret key.
+    /// Create new flowerpot blockchain signing key.
     Create {
         /// Seed for random numbers generator. If unset, then system-provided
         /// entropy is used.
@@ -118,6 +125,29 @@ enum BlockchainCommands {
         /// Disable streams encryption.
         #[arg(long, alias = "disable-encryption")]
         no_encryption: bool
+    }
+}
+
+#[derive(Subcommand)]
+enum TransactionCommands {
+    /// Create new flowerpot blockchain transaction.
+    Create {
+        /// Seed for random numbers generator. If unset, then system-provided
+        /// entropy is used.
+        #[arg(short = 'r', long, alias = "rand", alias = "random")]
+        seed: Option<u64>,
+
+        /// Signing key of the transaction's author.
+        ///
+        /// If not specified then randomly generated key is used.
+        #[arg(short = 'k', long, alias = "secret", alias = "key")]
+        signing_key: Option<String>,
+
+        /// Content of the transaction.
+        ///
+        /// If not specified, then stdin is read.
+        #[arg(short = 'd', long, alias = "source", alias = "content")]
+        data: Option<String>
     }
 }
 
@@ -326,6 +356,44 @@ fn main() -> anyhow::Result<()> {
 
                 println!("Node started at {local_addr}");
                 println!("  root block: {}", root_block.to_base64());
+            }
+        }
+
+        Commands::Transaction { command } => match command {
+            TransactionCommands::Create { seed, signing_key, data } => {
+                let mut rng = match seed {
+                    Some(seed) => ChaCha20Rng::seed_from_u64(seed),
+                    None => ChaCha20Rng::from_entropy()
+                };
+
+                let signing_key = match signing_key {
+                    Some(signing_key) => {
+                        match SigningKey::from_base64(signing_key) {
+                            Some(signing_key) => signing_key,
+                            None => anyhow::bail!("invalid signing key")
+                        }
+                    }
+
+                    None => SigningKey::random(&mut rng)
+                };
+
+                let data = match data {
+                    Some(data) => data.as_bytes().to_vec(),
+                    None => {
+                        let mut buf = Vec::new();
+
+                        std::io::stdin().read_to_end(&mut buf)?;
+
+                        buf
+                    }
+                };
+
+                let trasaction = Transaction::create(signing_key, data)
+                    .context("failed to create transaction")?;
+
+                let transaction = base64::encode(trasaction.to_bytes());
+
+                std::io::stdout().write_all(transaction.as_bytes())?;
             }
         }
     }
