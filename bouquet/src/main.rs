@@ -375,7 +375,7 @@ fn main() -> anyhow::Result<()> {
                         base64::encode(stream.peer_id())
                     );
 
-                    node.add_connection(stream);
+                    node.add_stream(stream);
                 }
 
                 if let Some(storage) = storage {
@@ -410,7 +410,7 @@ fn main() -> anyhow::Result<()> {
                                         base64::encode(stream.peer_id())
                                     );
 
-                                    // handler.add_connection(stream);
+                                    handler.add_stream(stream);
                                 }
 
                                 Err(err) => eprintln!("listener: {err}")
@@ -528,7 +528,7 @@ fn main() -> anyhow::Result<()> {
                         base64::encode(stream.peer_id())
                     );
 
-                    node.add_connection(stream);
+                    node.add_stream(stream);
                 }
 
                 println!("starting the node...");
