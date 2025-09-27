@@ -1121,6 +1121,35 @@ pub struct NodeHandler {
 }
 
 impl NodeHandler {
+    /// Get list of available connections' endpoints.
+    pub fn connections(&self) -> Box<[[u8; 32]]> {
+        self.streams.read()
+            .keys()
+            .cloned()
+            .collect::<Box<[[u8; 32]]>>()
+    }
+
+    /// Get table of known pending transactions.
+    #[inline]
+    pub fn pending_transactions(
+        &self
+    ) -> RwLockReadGuard<'_, HashMap<Hash, Transaction>> {
+        self.pending_transactions.read()
+    }
+
+    /// Get table of known pending blocks.
+    #[inline]
+    pub fn pending_blocks(
+        &self
+    ) -> RwLockReadGuard<'_, HashMap<Hash, Block>> {
+        self.pending_blocks.read()
+    }
+
+    // TODO:
+    // pub fn add_connection(&self, connection: PacketStream) {
+    //     self.streams.write().insert(*connection.endpoint_id(), connection);
+    // }
+
     fn send(&self, packet: Packet) {
         let mut disconnected = Vec::new();
 
@@ -1128,7 +1157,7 @@ impl NodeHandler {
 
         for (endpoint_id, sender) in lock.iter() {
             if sender.send(packet.clone()).is_err() {
-                disconnected.push(endpoint_id.clone());
+                disconnected.push(*endpoint_id);
             }
         }
 
@@ -1139,39 +1168,27 @@ impl NodeHandler {
         }
     }
 
-    /// Get list of available connections' endpoints.
-    pub fn connections(&self) -> Box<[[u8; 32]]> {
-        self.streams.read()
-            .keys()
-            .cloned()
-            .collect::<Box<[[u8; 32]]>>()
-    }
-
     /// Send transaction to all the connected nodes.
     pub fn send_transaction(
         &self,
         root_block: impl Into<Hash>,
         transaction: impl Into<Transaction>
     ) {
-        // todo add connection and send to all of them and such stuff
-        // self.sender.send(Packet::Transaction {
-        //     root_block: root_block.into(),
-        //     transaction: transaction.into()
-        // }).is_ok()
-        todo!()
+        self.send(Packet::Transaction {
+            root_block: root_block.into(),
+            transaction: transaction.into()
+        });
     }
 
-    #[inline]
-    pub fn pending_transactions(
-        &self
-    ) -> RwLockReadGuard<'_, HashMap<Hash, Transaction>> {
-        self.pending_transactions.read()
-    }
-
-    #[inline]
-    pub fn pending_blocks(
-        &self
-    ) -> RwLockReadGuard<'_, HashMap<Hash, Block>> {
-        self.pending_blocks.read()
+    /// Send block to all the connected nodes.
+    pub fn send_block(
+        &self,
+        root_block: impl Into<Hash>,
+        block: impl Into<Block>
+    ) {
+        self.send(Packet::Block {
+            root_block: root_block.into(),
+            block: block.into()
+        });
     }
 }

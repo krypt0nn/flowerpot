@@ -124,7 +124,11 @@ enum BlockchainCommands {
 
         /// Disable streams encryption.
         #[arg(long, alias = "disable-encryption")]
-        no_encryption: bool
+        no_encryption: bool,
+
+        /// Disable blocks synchronization at startup.
+        #[arg(long, alias = "disable-sync")]
+        no_sync: bool
     }
 }
 
@@ -274,7 +278,8 @@ fn main() -> anyhow::Result<()> {
                 storage,
                 nodes,
                 local_addr,
-                no_encryption
+                no_encryption,
+                no_sync
             } => {
                 let storage = match storage {
                     Some(storage) => {
@@ -334,7 +339,7 @@ fn main() -> anyhow::Result<()> {
                     let stream = TcpStream::connect(address)
                         .context("failed to connect to the node")?;
 
-                    let stream = PacketStream::init(&secret_key, options.clone(), stream)
+                    let stream = PacketStream::init(&secret_key, &options, stream)
                         .context("failed to initialize packet stream with the node")?;
 
                     println!(
@@ -348,6 +353,12 @@ fn main() -> anyhow::Result<()> {
 
                 if let Some(storage) = storage {
                     node.attach_storage(storage);
+                }
+
+                println!("synchronizing blockchain data...");
+
+                if !no_sync {
+                    node.sync().context("failed to synchronize blockchain data")?;
                 }
 
                 println!("starting the node...");
