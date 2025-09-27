@@ -545,6 +545,10 @@ impl PacketStream {
         self.stream.read_exact(&mut length)
             .map_err(PacketStreamError::Stream)?;
 
+        if let Some(encryptor) = &mut self.read_encryptor {
+            encryptor.apply(&mut length);
+        }
+
         let mut packet = vec![0; u32::from_le_bytes(length) as usize];
 
         #[cfg(feature = "tracing")]
@@ -554,7 +558,6 @@ impl PacketStream {
             .map_err(PacketStreamError::Stream)?;
 
         if let Some(encryptor) = &mut self.read_encryptor {
-            encryptor.apply(&mut length);
             encryptor.apply(&mut packet);
         }
 
