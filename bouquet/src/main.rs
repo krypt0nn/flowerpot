@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::net::{SocketAddr, Ipv6Addr, TcpStream};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -14,15 +15,18 @@ use libflowerpot::crypto::key_exchange::SecretKey;
 use libflowerpot::block::{Block, BlockContent};
 use libflowerpot::storage::Storage;
 use libflowerpot::storage::sqlite_storage::SqliteStorage;
-use libflowerpot::network::{Transport, TcpSocket};
-use libflowerpot::protocol::{
+use libflowerpot::protocol::network::{
     PacketStream, PacketStreamOptions, PacketStreamEncryption
 };
-use libflowerpot::node::Node;
+use libflowerpot::node::{Node, NodeOptions};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
+    /// Optional path to a file where to write debug information.
+    #[arg(long, alias = "debug")]
+    log: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands
 }
@@ -101,15 +105,41 @@ enum BlockchainCommands {
         #[arg(short = 'n', long = "node", alias = "connect")]
         nodes: Vec<String>,
 
+        /// Local address to listen to incoming TCP connections.
+        #[arg(
+            short = 'l',
+            long,
+            alias = "local",
+            alias = "listen",
+            default_value_t = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 13478)
+        )]
+        local_addr: SocketAddr,
+
         /// Disable streams encryption.
         #[arg(long, alias = "disable-encryption")]
         no_encryption: bool
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    if let Some(log) = cli.log {
+        if let Some(parent) = log.parent() {
+            std::fs::create_dir_all(parent)
+                .context("failed to create log file's parent folder")?;
+        }
+
+        let file = std::fs::File::create(log)
+            .context("failed to create log file")?;
+
+        tracing_subscriber::fmt()
+            .with_writer(file)
+            .with_ansi(false)
+            .init();
+    }
+
+    match cli.command {
         Commands::Keypair { command } => match command {
             KeypairCommands::Create { seed } => {
                 let mut rng = match seed {
@@ -213,6 +243,7 @@ async fn main() -> anyhow::Result<()> {
                 root_block,
                 storage,
                 nodes,
+                local_addr,
                 no_encryption
             } => {
                 let storage = match storage {
@@ -249,7 +280,9 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 let secret_key = SecretKey::random(&mut rng);
-                let socket = TcpSocket::default();
+
+                // let mut listener = TcpListener::bind(local_addr)
+                //     .context("failed to bind TCP listener to the provided local address")?;
 
                 let options = PacketStreamOptions {
                     encryption_algorithms: if no_encryption {
@@ -268,15 +301,15 @@ async fn main() -> anyhow::Result<()> {
                 for address in nodes {
                     println!("connecting to {address}...");
 
-                    let stream = socket.connect(address).await
+                    let stream = TcpStream::connect(address)
                         .context("failed to connect to the node")?;
 
-                    let stream = PacketStream::init(&secret_key, options.clone(), stream).await
+                    let stream = PacketStream::init(&secret_key, options.clone(), stream)
                         .context("failed to initialize packet stream with the node")?;
 
                     println!(
                         "connected to {} [{}]",
-                        stream.remote_address(),
+                        stream.peer_addr()?,
                         base64::encode(stream.endpoint_id())
                     );
 
@@ -286,6 +319,13 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(storage) = storage {
                     node.attach_storage(storage);
                 }
+
+                println!("starting the node...");
+
+                let handler = node.start(NodeOptions::default())?;
+
+                println!("Node started at {local_addr}");
+                println!("  root block: {}", root_block.to_base64());
             }
         }
     }
