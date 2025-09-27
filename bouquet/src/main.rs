@@ -152,6 +152,31 @@ enum TransactionCommands {
         /// If not specified, then stdin is read.
         #[arg(short = 'd', long, alias = "source", alias = "content")]
         data: Option<String>
+    },
+
+    /// Send transaction to the flowerpot blockchain network.
+    Send {
+        /// Seed for random numbers generator. If unset, then system-provided
+        /// entropy is used.
+        #[arg(short = 'r', long, alias = "rand", alias = "random")]
+        seed: Option<u64>,
+
+        /// Hash of the root block of the flowerpot blockchain.
+        #[arg(short = 'b', long, alias = "root")]
+        root_block: String,
+
+        /// Address of remote node to connect to.
+        #[arg(short = 'n', long = "node", alias = "connect")]
+        nodes: Vec<String>,
+
+        /// Flowerpot blockchain transaction. If unset, then stdin value will be
+        /// read.
+        #[arg(short = 't', long)]
+        transaction: Option<String>,
+
+        /// Disable streams encryption.
+        #[arg(long, alias = "disable-encryption")]
+        no_encryption: bool
     }
 }
 
@@ -355,9 +380,9 @@ fn main() -> anyhow::Result<()> {
                     node.attach_storage(storage);
                 }
 
-                println!("synchronizing blockchain data...");
-
                 if !no_sync {
+                    println!("synchronizing blockchain data...");
+
                     node.sync().context("failed to synchronize blockchain data")?;
                 }
 
@@ -405,6 +430,90 @@ fn main() -> anyhow::Result<()> {
                 let transaction = base64::encode(trasaction.to_bytes());
 
                 std::io::stdout().write_all(transaction.as_bytes())?;
+            }
+
+            TransactionCommands::Send {
+                seed,
+                root_block,
+                nodes,
+                transaction,
+                no_encryption
+            } => {
+                let root_block = Hash::from_base64(root_block)
+                    .ok_or_else(|| anyhow::anyhow!("invalid root block"))?;
+
+                let transaction = match transaction {
+                    Some(transaction) => {
+                        let transaction = base64::decode(transaction)
+                            .context("failed to decode transaction")?;
+
+                        Transaction::from_bytes(&transaction)
+                            .context("invalid transaction")?
+                    }
+
+                    None => {
+                        let mut transaction = Vec::new();
+
+                        std::io::stdin().read_to_end(&mut transaction)?;
+
+                        let transaction = base64::decode(transaction)
+                            .context("failed to decode transaction")?;
+
+                        Transaction::from_bytes(&transaction)
+                            .context("invalid transaction")?
+                    }
+                };
+
+                let mut rng = match seed {
+                    Some(seed) => ChaCha20Rng::seed_from_u64(seed),
+                    None => ChaCha20Rng::from_entropy()
+                };
+
+                let secret_key = SecretKey::random(&mut rng);
+
+                let options = PacketStreamOptions {
+                    encryption_algorithms: if no_encryption {
+                        vec![]
+                    } else {
+                        vec![
+                            PacketStreamEncryption::ChaCha20,
+                            PacketStreamEncryption::ChaCha12,
+                            PacketStreamEncryption::ChaCha8
+                        ]
+                    }
+                };
+
+                let mut node = Node::<SqliteStorage>::new(root_block);
+
+                for address in nodes {
+                    println!("connecting to {address}...");
+
+                    let stream = TcpStream::connect(address)
+                        .context("failed to connect to the node")?;
+
+                    let stream = PacketStream::init(&secret_key, &options, stream)
+                        .context("failed to initialize packet stream with the node")?;
+
+                    println!(
+                        "connected to {} [{}]",
+                        stream.peer_addr()?,
+                        base64::encode(stream.endpoint_id())
+                    );
+
+                    node.add_connection(stream);
+                }
+
+                println!("starting the node...");
+
+                let handler = node.start(NodeOptions {
+                    accept_pending_transactions: false,
+                    accept_pending_blocks: false,
+                    ..NodeOptions::default()
+                })?;
+
+                println!("sending transaction...");
+
+                handler.send_transaction(root_block, transaction);
             }
         }
     }
