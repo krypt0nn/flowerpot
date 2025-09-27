@@ -34,7 +34,7 @@ pub enum ViewerError {
     Block(BlockError),
 
     #[error("storage error: {0}")]
-    Storage(Box<dyn std::error::Error>),
+    Storage(String),
 
     #[error("stream returned invalid block")]
     InvalidBlock,
@@ -119,13 +119,10 @@ impl<'stream> Viewer<'stream> {
     pub fn open_from_storage<S: Storage>(
         stream: &'stream mut PacketStream,
         storage: &S
-    )  -> Result<Option<Self>, ViewerError>
-    where
-        S::Error: 'static
-    {
+    )  -> Result<Option<Self>, ViewerError> {
         // Try to read root block from the storage.
         let root_block = storage.root_block()
-            .map_err(|err| ViewerError::Storage(err.into()))?;
+            .map_err(|err| ViewerError::Storage(err.to_string()))?;
 
         let Some(root_block) = root_block else {
             return Ok(None);
@@ -133,7 +130,7 @@ impl<'stream> Viewer<'stream> {
 
         // Try to read tail block from the storage.
         let tail_block = storage.tail_block()
-            .map_err(|err| ViewerError::Storage(err.into()))?;
+            .map_err(|err| ViewerError::Storage(err.to_string()))?;
 
         let Some(mut tail_block) = tail_block else {
             return Ok(None);
@@ -145,13 +142,13 @@ impl<'stream> Viewer<'stream> {
         // block can be.
         if root_block != tail_block {
             tail_block = storage.prev_block(&tail_block)
-                .map_err(|err| ViewerError::Storage(err.into()))?
+                .map_err(|err| ViewerError::Storage(err.to_string()))?
                 .unwrap_or(tail_block);
         }
 
         // Try to read list of validators after the selected tail block.
         let validators = storage.get_validators_after_block(&tail_block)
-            .map_err(|err| ViewerError::Storage(err.into()))?;
+            .map_err(|err| ViewerError::Storage(err.to_string()))?;
 
         let Some(validators) = validators else {
             return Ok(None);
@@ -161,7 +158,7 @@ impl<'stream> Viewer<'stream> {
         let mut i = 0;
 
         for hash in storage.history() {
-            let hash = hash.map_err(|err| ViewerError::Storage(err.into()))?;
+            let hash = hash.map_err(|err| ViewerError::Storage(err.to_string()))?;
 
             if hash == tail_block {
                 break;
@@ -491,13 +488,13 @@ impl<'stream> BatchedViewer<'stream> {
         T::Error: 'static
     {
         let storage_block = storage.next_block(&self.prev_block)
-            .map_err(|err| ViewerError::Storage(err.into()))?
+            .map_err(|err| ViewerError::Storage(err.to_string()))?
             .and_then(|block| {
                 storage.read_block(&block)
                     .transpose()
             })
             .transpose()
-            .map_err(|err| ViewerError::Storage(err.into()))?
+            .map_err(|err| ViewerError::Storage(err.to_string()))?
             .map(|block| {
                 match block.verify() {
                     Ok((false, _, _)) => Ok(None),

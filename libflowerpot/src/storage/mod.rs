@@ -35,7 +35,7 @@ pub mod ram_storage;
 pub mod sqlite_storage;
 
 pub trait Storage: Clone {
-    type Error: std::error::Error;
+    type Error: std::error::Error + Send + 'static;
 
     /// Get hash of the root block if it's available.
     fn root_block(&self) -> Result<Option<Hash>, Self::Error>;

@@ -32,7 +32,7 @@ use crate::protocol::packets::Packet;
 use crate::protocol::network::{PacketStream, PacketStreamError};
 use crate::viewer::{BatchedViewer, ViewerError};
 
-#[derive(Debug,thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum NodeError<S: Storage> {
     #[error(transparent)]
     PacketStream(PacketStreamError),
@@ -292,7 +292,8 @@ impl<S: Storage> Node<S> {
         options: NodeOptions
     ) -> Result<NodeHandler, NodeError<S>>
     where
-        S: Send + 'static
+        S: Send + 'static,
+        S::Error: Send + 'static
     {
         #[cfg(feature = "tracing")]
         tracing::info!("starting the node");
