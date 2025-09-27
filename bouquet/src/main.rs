@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::net::{SocketAddr, Ipv6Addr, TcpStream};
+use std::net::{SocketAddr, Ipv6Addr, TcpStream, TcpListener};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -118,6 +118,7 @@ enum BlockchainCommands {
             long,
             alias = "local",
             alias = "listen",
+            alias = "bind",
             default_value_t = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 13478)
         )]
         local_addr: SocketAddr,
@@ -195,6 +196,7 @@ fn main() -> anyhow::Result<()> {
         tracing_subscriber::fmt()
             .with_writer(file)
             .with_ansi(false)
+            .with_max_level(tracing_subscriber::filter::LevelFilter::TRACE)
             .init();
     }
 
@@ -341,8 +343,8 @@ fn main() -> anyhow::Result<()> {
 
                 let secret_key = SecretKey::random(&mut rng);
 
-                // let mut listener = TcpListener::bind(local_addr)
-                //     .context("failed to bind TCP listener to the provided local address")?;
+                let listener = TcpListener::bind(local_addr)
+                    .context("failed to bind TCP listener to the provided local address")?;
 
                 let options = PacketStreamOptions {
                     encryption_algorithms: if no_encryption {
@@ -370,7 +372,7 @@ fn main() -> anyhow::Result<()> {
                     println!(
                         "connected to {} [{}]",
                         stream.peer_addr()?,
-                        base64::encode(stream.endpoint_id())
+                        base64::encode(stream.peer_id())
                     );
 
                     node.add_connection(stream);
@@ -390,8 +392,34 @@ fn main() -> anyhow::Result<()> {
 
                 let handler = node.start(NodeOptions::default())?;
 
-                println!("Node started at {local_addr}");
-                println!("  root block: {}", root_block.to_base64());
+                println!(
+                    "node started at {local_addr} with root block {}",
+                    root_block.to_base64()
+                );
+
+                loop {
+                    match listener.accept() {
+                        Ok((stream, address)) => {
+                            println!("listener: accept connection from {address}");
+
+                            match PacketStream::init(&secret_key, &options, stream) {
+                                Ok(stream) => {
+                                    println!(
+                                        "listener: connected to {} [{}]",
+                                        stream.peer_addr()?,
+                                        base64::encode(stream.peer_id())
+                                    );
+
+                                    // handler.add_connection(stream);
+                                }
+
+                                Err(err) => eprintln!("listener: {err}")
+                            }
+                        }
+
+                        Err(err) => eprintln!("listener: {err}")
+                    }
+                }
             }
         }
 
@@ -497,7 +525,7 @@ fn main() -> anyhow::Result<()> {
                     println!(
                         "connected to {} [{}]",
                         stream.peer_addr()?,
-                        base64::encode(stream.endpoint_id())
+                        base64::encode(stream.peer_id())
                     );
 
                     node.add_connection(stream);
