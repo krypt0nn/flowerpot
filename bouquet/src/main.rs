@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::net::{SocketAddr, Ipv6Addr, TcpStream, TcpListener};
+use std::time::{Instant, Duration};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -177,7 +178,11 @@ enum TransactionCommands {
 
         /// Disable streams encryption.
         #[arg(long, alias = "disable-encryption")]
-        no_encryption: bool
+        no_encryption: bool,
+
+        /// Amount of seconds to wait for transaction to appear in the network.
+        #[arg(long, alias = "wait", alias = "timeout", default_value_t = 10)]
+        wait_timeout: u64
     }
 }
 
@@ -465,7 +470,8 @@ fn main() -> anyhow::Result<()> {
                 root_block,
                 nodes,
                 transaction,
-                no_encryption
+                no_encryption,
+                wait_timeout
             } => {
                 let root_block = Hash::from_base64(root_block)
                     .ok_or_else(|| anyhow::anyhow!("invalid root block"))?;
@@ -534,14 +540,38 @@ fn main() -> anyhow::Result<()> {
                 println!("starting the node...");
 
                 let handler = node.start(NodeOptions {
-                    accept_pending_transactions: false,
-                    accept_pending_blocks: false,
+                    accept_transactions: true,
+                    accept_blocks: false,
                     ..NodeOptions::default()
                 })?;
 
                 println!("sending transaction...");
 
-                handler.send_transaction(root_block, transaction);
+                let hash = transaction.hash();
+
+                handler.send_transaction(transaction);
+                handler.ask_pending_transactions();
+
+                let now = Instant::now();
+                let mut last_repeat = Instant::now();
+
+                while !handler.pending_transactions().contains_key(&hash)
+                    && now.elapsed().as_secs() < wait_timeout
+                {
+                    if last_repeat.elapsed().as_secs() >= 5 {
+                        handler.ask_pending_transactions();
+
+                        last_repeat = Instant::now();
+                    }
+
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+
+                if handler.pending_transactions().contains_key(&hash) {
+                    println!("transaction accepted by the network");
+                } else {
+                    println!("transaction was not accepted by the network");
+                }
             }
         }
     }
