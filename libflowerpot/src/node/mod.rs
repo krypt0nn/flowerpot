@@ -32,7 +32,7 @@ use crate::protocol::packets::Packet;
 use crate::protocol::network::{PacketStream, PacketStreamError};
 use crate::viewer::{BatchedViewer, ViewerError};
 
-mod handler;
+mod handlers;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError<S: Storage> {
@@ -75,23 +75,21 @@ pub struct NodeOptions {
     /// Default is `33554432` bytes (128 MB).
     pub max_transaction_size: usize,
 
-    /// Accept incoming pending blocks and store them in the memory until
-    /// approved.
+    /// Accept incoming blocks.
     ///
     /// If disabled your node will not act as a normal blockchain node and
     /// reduce overall network quality.
     ///
     /// Default is `true`.
-    pub accept_pending_blocks: bool,
+    pub accept_blocks: bool,
 
-    /// Accept incoming pending transactions and store them in the memory until
-    /// approved.
+    /// Accept incoming transactions.
     ///
     /// If disabled your node will not act as a normal blockchain node and
     /// reduce overall network quality.
     ///
     /// Default is `true`.
-    pub accept_pending_transactions: bool,
+    pub accept_transactions: bool,
 
     /// When specified this function will be used to filter incoming
     /// transactions and accept only those for which the provided function
@@ -124,8 +122,8 @@ impl Default for NodeOptions {
         Self {
             max_history_length: 1024,
             max_transaction_size: 32 * 1024 * 1024,
-            accept_pending_blocks: true,
-            accept_pending_transactions: true,
+            accept_blocks: true,
+            accept_transactions: true,
             blocks_filter: None,
             transactions_filter: None
         }
@@ -369,25 +367,14 @@ impl<S: Storage> NodeHandler<S> {
             "adding connection"
         );
 
-        let state = handler::NodeState {
+        let state = handlers::NodeState {
+            handler: self.clone(),
             stream,
-            options: self.options,
-            receiver,
-
-            root_block: self.root_block,
-            storage: self.storage.clone(),
-
-            history: self.history.clone(),
-            current_distance: self.current_distance.clone(),
-            validators: self.validators.clone(),
-
-            indexed_transactions: self.indexed_transactions.clone(),
-            pending_transactions: self.pending_transactions.clone(),
-            pending_blocks: self.pending_blocks.clone()
+            receiver
         };
 
         std::thread::spawn(move || {
-            handler::handle(state);
+            handlers::handle(state);
         });
 
         self.streams.write().insert(peer_id, sender);
