@@ -116,6 +116,15 @@ pub fn handle<S: Storage>(
         return true;
     }
 
+    #[cfg(feature = "tracing")]
+    tracing::info!(
+        local_id = base64::encode(state.stream.local_id()),
+        peer_id = base64::encode(state.stream.peer_id()),
+        hash = hash.to_base64(),
+        verifying_key = verifying_key.to_base64(),
+        "accepted new pending transaction"
+    );
+
     // Broadcast this transaction to other connected nodes.
     state.broadcast(Packet::Transaction {
         root_block: state.handler.root_block,

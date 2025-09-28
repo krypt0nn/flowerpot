@@ -23,47 +23,43 @@ use crate::protocol::packets::Packet;
 
 use super::NodeState;
 
-/// Handle `AskTransaction` packet.
+/// Handle `PendingTransactions` packet.
 ///
 /// Return `false` is critical error occured and node connection must be
 /// terminated.
 pub fn handle<S: Storage>(
     state: &mut NodeState<S>,
-    transaction: Hash
+    pending_transactions: Box<[Hash]>
 ) -> bool {
     #[cfg(feature = "tracing")]
     tracing::debug!(
         local_id = base64::encode(state.stream.local_id()),
         peer_id = base64::encode(state.stream.peer_id()),
         root_block = state.handler.root_block.to_base64(),
-        transaction = transaction.to_base64(),
-        "handle AskTransaction packet"
+        ?pending_transactions,
+        "handle PendingTransactions packet"
     );
 
-    // If it is a pending transaction.
-    let transaction_hash = transaction;
+    let lock = state.handler.pending_transactions.read();
 
-    let transaction = state.handler.pending_transactions.read()
-        .get(&transaction_hash)
-        .cloned();
+    for transaction in pending_transactions {
+        #[allow(clippy::collapsible_if)]
+        if !lock.contains_key(&transaction) {
+            if let Err(err) = state.stream.send(Packet::AskTransaction {
+                root_block: state.handler.root_block,
+                transaction
+            }) {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    ?err,
+                    local_id = base64::encode(state.stream.local_id()),
+                    peer_id = base64::encode(state.stream.peer_id()),
+                    ?transaction,
+                    "failed to send AskTransaction packet"
+                );
 
-    #[allow(clippy::collapsible_if)]
-    if let Some(transaction) = transaction {
-        // Then try to send it back.
-        if let Err(err) = state.stream.send(Packet::Transaction {
-            root_block: state.handler.root_block,
-            transaction: transaction.clone()
-        }) {
-            #[cfg(feature = "tracing")]
-            tracing::error!(
-                ?err,
-                local_id = base64::encode(state.stream.local_id()),
-                peer_id = base64::encode(state.stream.peer_id()),
-                ?transaction_hash,
-                "failed to send Transaction packet"
-            );
-
-            return false;
+                return false;
+            }
         }
     }
 

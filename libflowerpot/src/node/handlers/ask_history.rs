@@ -17,6 +17,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::crypto::base64;
+use crate::crypto::hash::Hash;
 use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 
@@ -47,20 +48,22 @@ pub fn handle<S: Storage>(
         .skip(offset as usize)
         .take(state.handler.options.max_history_length.min(max_length as usize))
         .copied()
-        .collect();
+        .collect::<Box<[Hash]>>();
 
     // And try to send them back to the requester.
     if let Err(err) = state.stream.send(Packet::History {
         root_block: state.handler.root_block,
         offset,
-        history
+        history: history.clone()
     }) {
         #[cfg(feature = "tracing")]
         tracing::error!(
             ?err,
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            "failed to send packet to the packets stream"
+            ?offset,
+            ?history,
+            "failed to send History packet"
         );
 
         return false;

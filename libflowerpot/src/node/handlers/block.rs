@@ -69,10 +69,8 @@ pub fn handle<S: Storage>(
         return true;
     }
 
-    // Check if we already have this block, and
-    // if we do - then merge approvals because
-    // already stored block can have more than
-    // in what we received.
+    // Check if we already have this block, and if we do - then merge approvals
+    // because already stored block can have more than in what we received.
     if let Some(curr_block) = state.handler.pending_blocks.read().get(&hash) {
         for approval in curr_block.approvals() {
             if !block.approvals.contains(approval) {
@@ -113,8 +111,17 @@ pub fn handle<S: Storage>(
             approvals,
             ..
         }) => {
-            // Update received block's approvals list
-            // to remove any invalid signatures.
+            #[cfg(feature = "tracing")]
+            tracing::info!(
+                local_id = base64::encode(state.stream.local_id()),
+                peer_id = base64::encode(state.stream.peer_id()),
+                hash = hash.to_base64(),
+                verifying_key = verifying_key.to_base64(),
+                "accepted new approved block"
+            );
+
+            // Update received block's approvals list to remove any invalid
+            // signatures.
             block.approvals = approvals.into_iter()
                 .map(|(approval, _)| approval)
                 .collect();
@@ -130,27 +137,35 @@ pub fn handle<S: Storage>(
 
         // Block is valid but not approved by enough validators.
         Ok(BlockStatus::NotApproved {
+            hash,
+            verifying_key,
             approvals,
             ..
         }) => {
             // Try to read the last block of the blockchain.
             if let Some(last_block) = state.handler.history.read().last() {
-                // Update received block's approvals list
-                // to remove any invalid signatures.
+                // Update received block's approvals list to remove any invalid
+                // signatures.
                 block.approvals = approvals.into_iter()
                     .map(|(approval, _)| approval)
                     .collect();
 
-                // If this block is the potential new block
-                // for the blockchain then, if options allow
-                // it, we should store it in the pending
+                // If this block is the potential new block for the blockchain
+                // then, if options allow it, we should store it in the pending
                 // blocks pool.
-                if last_block == block.previous()
-                    && state.handler.options.accept_blocks
-                {
-                    // If we already have block with this hash - we can
-                    // compare them, and if the new one is different - we
-                    // should broadcast it to other network nodes.
+                if last_block == block.previous() {
+                    #[cfg(feature = "tracing")]
+                    tracing::info!(
+                        local_id = base64::encode(state.stream.local_id()),
+                        peer_id = base64::encode(state.stream.peer_id()),
+                        hash = hash.to_base64(),
+                        verifying_key = verifying_key.to_base64(),
+                        "accepted new pending block"
+                    );
+
+                    // If we already have block with this hash - we can compare
+                    // them, and if the new one is different - we should
+                    // broadcast it to other network nodes.
                     if let Some(prev) = state.handler.pending_blocks.read().get(&hash)
                         && prev != &block
                     {
@@ -162,6 +177,17 @@ pub fn handle<S: Storage>(
 
                     state.handler.pending_blocks.write()
                         .insert(hash, block);
+                }
+
+                else {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        local_id = base64::encode(state.stream.local_id()),
+                        peer_id = base64::encode(state.stream.peer_id()),
+                        hash = hash.to_base64(),
+                        verifying_key = verifying_key.to_base64(),
+                        "new approved block was not accepted due to being out of history"
+                    );
                 }
             }
         }

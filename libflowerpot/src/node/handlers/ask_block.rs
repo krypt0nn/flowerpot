@@ -52,7 +52,7 @@ pub fn handle<S: Storage>(
                 ?err,
                 local_id = base64::encode(state.stream.local_id()),
                 peer_id = base64::encode(state.stream.peer_id()),
-                "failed to send packet to the packets stream"
+                "failed to send Block packet"
             );
 
             return false;
@@ -75,7 +75,7 @@ pub fn handle<S: Storage>(
                         ?err,
                         local_id = base64::encode(state.stream.local_id()),
                         peer_id = base64::encode(state.stream.peer_id()),
-                        "failed to send packet to the packets stream"
+                        "failed to send Block packet"
                     );
 
                     return false;

@@ -30,7 +30,9 @@ use super::NodeHandler;
 
 mod ask_history;
 mod ask_pending_transactions;
+mod pending_transactions;
 mod ask_pending_blocks;
+mod pending_blocks;
 mod ask_transaction;
 mod transaction;
 mod ask_block;
@@ -296,11 +298,35 @@ pub fn handle<S: Storage>(mut state: NodeState<S>) {
                         }
                     }
 
+                    // If we received list of available pending transactions.
+                    Packet::PendingTransactions {
+                        root_block: received_root_block,
+                        pending_transactions
+                    } if received_root_block == state.handler.root_block
+                        && state.handler.options.fetch_pending_transactions
+                    => {
+                        if !pending_transactions::handle(&mut state, pending_transactions) {
+                            return;
+                        }
+                    }
+
                     // If we were asked to send the pending blocks list.
                     Packet::AskPendingBlocks {
                         root_block: received_root_block
                     } if received_root_block == state.handler.root_block => {
                         if !ask_pending_blocks::handle(&mut state) {
+                            return;
+                        }
+                    }
+
+                    // If we received list of available pending blocks.
+                    Packet::PendingBlocks {
+                        root_block: received_root_block,
+                        pending_blocks
+                    } if received_root_block == state.handler.root_block
+                        && state.handler.options.fetch_pending_transactions
+                    => {
+                        if !pending_blocks::handle(&mut state, pending_blocks) {
                             return;
                         }
                     }
@@ -341,7 +367,9 @@ pub fn handle<S: Storage>(mut state: NodeState<S>) {
                     Packet::Block {
                         root_block: received_root_block,
                         block
-                    } if received_root_block == state.handler.root_block => {
+                    } if received_root_block == state.handler.root_block
+                        && state.handler.options.accept_blocks
+                    => {
                         if !block::handle(&mut state, block) {
                             return;
                         }

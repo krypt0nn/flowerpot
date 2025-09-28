@@ -18,52 +18,52 @@
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
+use crate::crypto::sign::Signature;
 use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 
 use super::NodeState;
 
-/// Handle `AskTransaction` packet.
+/// Handle `PendingBlocks` packet.
 ///
 /// Return `false` is critical error occured and node connection must be
 /// terminated.
 pub fn handle<S: Storage>(
     state: &mut NodeState<S>,
-    transaction: Hash
+    pending_blocks: Box<[(Hash, Box<[Signature]>)]>
 ) -> bool {
     #[cfg(feature = "tracing")]
     tracing::debug!(
         local_id = base64::encode(state.stream.local_id()),
         peer_id = base64::encode(state.stream.peer_id()),
         root_block = state.handler.root_block.to_base64(),
-        transaction = transaction.to_base64(),
-        "handle AskTransaction packet"
+        ?pending_blocks,
+        "handle PendingBlocks packet"
     );
 
-    // If it is a pending transaction.
-    let transaction_hash = transaction;
+    let lock = state.handler.pending_blocks.read();
 
-    let transaction = state.handler.pending_transactions.read()
-        .get(&transaction_hash)
-        .cloned();
+    for (block, _) in pending_blocks {
+        // TODO: do not ask for blocks if it has the same approvals as the
+        // currently having one.
 
-    #[allow(clippy::collapsible_if)]
-    if let Some(transaction) = transaction {
-        // Then try to send it back.
-        if let Err(err) = state.stream.send(Packet::Transaction {
-            root_block: state.handler.root_block,
-            transaction: transaction.clone()
-        }) {
-            #[cfg(feature = "tracing")]
-            tracing::error!(
-                ?err,
-                local_id = base64::encode(state.stream.local_id()),
-                peer_id = base64::encode(state.stream.peer_id()),
-                ?transaction_hash,
-                "failed to send Transaction packet"
-            );
+        #[allow(clippy::collapsible_if)]
+        if !lock.contains_key(&block) {
+            if let Err(err) = state.stream.send(Packet::AskBlock {
+                root_block: state.handler.root_block,
+                target_block: block
+            }) {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    ?err,
+                    local_id = base64::encode(state.stream.local_id()),
+                    peer_id = base64::encode(state.stream.peer_id()),
+                    ?block,
+                    "failed to send AskBlock packet"
+                );
 
-            return false;
+                return false;
+            }
         }
     }
 

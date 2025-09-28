@@ -17,6 +17,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::crypto::base64;
+use crate::crypto::hash::Hash;
+use crate::crypto::sign::Signature;
 use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 
@@ -45,19 +47,20 @@ pub fn handle<S: Storage>(state: &mut NodeState<S>) -> bool {
 
             (*hash, approvals)
         })
-        .collect();
+        .collect::<Box<[(Hash, Box<[Signature]>)]>>();
 
     // And try to send it back to the requester.
     if let Err(err) = state.stream.send(Packet::PendingBlocks {
         root_block: state.handler.root_block,
-        pending_blocks
+        pending_blocks: pending_blocks.clone()
     }) {
         #[cfg(feature = "tracing")]
         tracing::error!(
             ?err,
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            "failed to send packet to the packets stream"
+            ?pending_blocks,
+            "failed to send PendingBlocks packet"
         );
 
         return false;

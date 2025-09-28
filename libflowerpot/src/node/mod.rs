@@ -72,10 +72,22 @@ pub struct NodeOptions {
     ///
     /// > This is applied to the `Transaction` packets only.
     ///
-    /// Default is `33554432` bytes (128 MB).
+    /// Default is `33554432` bytes (32 MB).
     pub max_transaction_size: usize,
 
+    /// Accept incoming transactions.
+    ///
+    /// This option disables the `Transaction` packet processing.
+    ///
+    /// If disabled your node will not act as a normal blockchain node and
+    /// reduce overall network quality.
+    ///
+    /// Default is `true`.
+    pub accept_transactions: bool,
+
     /// Accept incoming blocks.
+    ///
+    /// This option disables the `Block` packet processing.
     ///
     /// If disabled your node will not act as a normal blockchain node and
     /// reduce overall network quality.
@@ -83,13 +95,37 @@ pub struct NodeOptions {
     /// Default is `true`.
     pub accept_blocks: bool,
 
-    /// Accept incoming transactions.
+    /// Resolve missing transactions and fetch them from the remote nodes.
+    ///
+    /// Nodes exchange special `PendingTransactions` and `PendingBlocks` packets
+    /// to share list of known pending transactions and blocks' hashes. If this
+    /// option is disabled, then upon receiving such packet we won't try to
+    /// find out which transactions we're missing and won't try to fetch them.
+    ///
+    /// This option is the main mechanism of pending transactions
+    /// synchronization in the network.
     ///
     /// If disabled your node will not act as a normal blockchain node and
     /// reduce overall network quality.
     ///
     /// Default is `true`.
-    pub accept_transactions: bool,
+    pub fetch_pending_transactions: bool,
+
+    /// Resolve missing transactions and fetch them from the remote nodes.
+    ///
+    /// Nodes exchange special `PendingTransactions` and `PendingBlocks` packets
+    /// to share list of known pending transactions and blocks' hashes. If this
+    /// option is disabled, then upon receiving such packet we won't try to
+    /// find out which blocks we're missing and won't try to fetch them.
+    ///
+    /// This option is the main mechanism of pending blocks synchronization in
+    /// the network.
+    ///
+    /// If disabled your node will not act as a normal blockchain node and
+    /// reduce overall network quality.
+    ///
+    /// Default is `true`.
+    pub fetch_pending_blocks: bool,
 
     /// When specified this function will be used to filter incoming
     /// transactions and accept only those for which the provided function
@@ -122,8 +158,10 @@ impl Default for NodeOptions {
         Self {
             max_history_length: 1024,
             max_transaction_size: 32 * 1024 * 1024,
-            accept_blocks: true,
             accept_transactions: true,
+            accept_blocks: true,
+            fetch_pending_transactions: true,
+            fetch_pending_blocks: true,
             blocks_filter: None,
             transactions_filter: None
         }
@@ -422,14 +460,27 @@ impl<S: Storage> NodeHandler<S> {
         }
     }
 
+    /// Ask connected nodes to share their pending transactions.
+    pub fn ask_pending_transactions(&self) {
+        self.send(Packet::AskPendingTransactions {
+            root_block: self.root_block
+        });
+    }
+
+    /// Ask connected nodes to share their pending blocks.
+    pub fn ask_pending_blocks(&self) {
+        self.send(Packet::AskPendingBlocks {
+            root_block: self.root_block
+        });
+    }
+
     /// Send transaction to all the connected nodes.
     pub fn send_transaction(
         &self,
-        root_block: impl Into<Hash>,
         transaction: impl Into<Transaction>
     ) {
         self.send(Packet::Transaction {
-            root_block: root_block.into(),
+            root_block: self.root_block,
             transaction: transaction.into()
         });
     }
@@ -437,11 +488,10 @@ impl<S: Storage> NodeHandler<S> {
     /// Send block to all the connected nodes.
     pub fn send_block(
         &self,
-        root_block: impl Into<Hash>,
         block: impl Into<Block>
     ) {
         self.send(Packet::Block {
-            root_block: root_block.into(),
+            root_block: self.root_block,
             block: block.into()
         });
     }
