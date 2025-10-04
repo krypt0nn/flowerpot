@@ -16,11 +16,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::VerifyingKey;
+use crate::transaction::Transaction;
 use crate::block::{Block, BlockContent, Error as BlockError};
 
 use super::Storage;
@@ -32,6 +33,54 @@ pub enum Error {
 
     #[error(transparent)]
     Block(#[from] BlockError)
+}
+
+fn has_transaction(
+    blocks: &RwLockReadGuard<'_, HashMap<Hash, Block>>,
+    transaction: &Hash
+) -> bool {
+    for block in blocks.values() {
+        if let BlockContent::Transactions(transactions) = block.content()
+            && transactions.iter().any(|tr| &tr.hash() == transaction)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn find_transaction(
+    blocks: &RwLockReadGuard<'_, HashMap<Hash, Block>>,
+    transaction: &Hash
+) -> Option<Hash> {
+    for (block_hash, block) in blocks.iter() {
+        if let BlockContent::Transactions(transactions) = block.content()
+            && transactions.iter().any(|tr| &tr.hash() == transaction)
+        {
+            return Some(*block_hash);
+        }
+    }
+
+    None
+}
+
+fn read_transaction(
+    blocks: &RwLockReadGuard<'_, HashMap<Hash, Block>>,
+    transaction: &Hash
+) -> Option<Transaction> {
+    for block in blocks.values() {
+        if let BlockContent::Transactions(transactions) = block.content() {
+            let transaction = transactions.iter()
+                .find(|tr| &tr.hash() == transaction);
+
+            if let Some(transaction) = transaction.cloned() {
+                return Some(transaction);
+            }
+        }
+    }
+
+    None
 }
 
 #[derive(Default, Debug, Clone)]
@@ -128,6 +177,34 @@ impl Storage for RamStorage {
     }
 
     fn write_block(&self, block: &Block) -> Result<bool, Self::Error> {
+        fn has_duplicate_transactions(
+            blocks: &RwLockReadGuard<'_, HashMap<Hash, Block>>,
+            transactions: &[Transaction]
+        ) -> bool {
+            let mut hashes = HashSet::new();
+
+            for transaction in transactions {
+                let hash = transaction.hash();
+
+                if !hashes.insert(hash) || has_transaction(blocks, &hash) {
+                    return true;
+                }
+            }
+
+            false
+        }
+
+        // Check that there's no duplicate transactions.
+        if let BlockContent::Transactions(transactions) = block.content() {
+            let Ok(blocks) = self.blocks.read() else {
+                return Err(Error::Lock);
+            };
+
+            if has_duplicate_transactions(&blocks, transactions) {
+                return Ok(false);
+            }
+        }
+
         let (
             Ok(mut blocks),
             Ok(mut history)
@@ -215,6 +292,39 @@ impl Storage for RamStorage {
         }
 
         Ok(true)
+    }
+
+    #[inline]
+    fn has_transaction(
+        &self,
+        transaction: &Hash
+    ) -> Result<bool, Self::Error> {
+        let lock = self.blocks.read()
+            .map_err(|_| Error::Lock)?;
+
+        Ok(has_transaction(&lock, transaction))
+    }
+
+    #[inline]
+    fn find_transaction(
+        &self,
+        transaction: &Hash
+    ) -> Result<Option<Hash>, Self::Error> {
+        let lock = self.blocks.read()
+            .map_err(|_| Error::Lock)?;
+
+        Ok(find_transaction(&lock, transaction))
+    }
+
+    #[inline]
+    fn read_transaction(
+        &self,
+        transaction: &Hash
+    ) -> Result<Option<Transaction>, Self::Error> {
+        let lock = self.blocks.read()
+            .map_err(|_| Error::Lock)?;
+
+        Ok(read_transaction(&lock, transaction))
     }
 
     fn get_validators_before_block(

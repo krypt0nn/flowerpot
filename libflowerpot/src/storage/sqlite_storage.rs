@@ -16,6 +16,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -38,7 +39,7 @@ fn root_block(
     ")?;
 
     let hash = query.query_row([], |row| {
-        row.get::<_, [u8; 32]>("current_hash")
+        row.get::<_, [u8; Hash::SIZE]>("current_hash")
     });
 
     match hash {
@@ -56,7 +57,7 @@ fn tail_block(
     ")?;
 
     let hash = query.query_row([], |row| {
-        row.get::<_, [u8; 32]>("current_hash")
+        row.get::<_, [u8; Hash::SIZE]>("current_hash")
     });
 
     match hash {
@@ -74,9 +75,47 @@ fn has_block(
         SELECT 1 FROM v1_blocks WHERE current_hash = ?1
     ")?;
 
-    match query.query_row([hash.0], |_| Ok(true)) {
+    match query.query_row([hash.as_bytes()], |_| Ok(true)) {
         Ok(_) => Ok(true),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(err) => Err(err)
+    }
+}
+
+fn has_transaction(
+    database: &MutexGuard<'_, Connection>,
+    hash: &Hash
+) -> rusqlite::Result<bool> {
+    let mut query = database.prepare_cached("
+        SELECT 1 FROM v1_block_transactions WHERE hash = ?1
+    ")?;
+
+    match query.query_row([hash.as_bytes()], |_| Ok(true)) {
+        Ok(_) => Ok(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(err) => Err(err)
+    }
+}
+
+fn find_transaction(
+    database: &MutexGuard<'_, Connection>,
+    hash: &Hash
+) -> rusqlite::Result<Option<Hash>> {
+    let mut query = database.prepare_cached("
+        SELECT v1_blocks.current_hash as block_hash
+        FROM v1_blocks
+        INNER JOIN v1_block_transactions
+        ON v1_block_transactions.block_id = v1_blocks.id
+        WHERE v1_block_transactions.hash = ?1
+    ")?;
+
+    let result = query.query_row([hash.as_bytes()], |row| {
+        row.get::<_, [u8; Hash::SIZE]>("block_hash")
+    });
+
+    match result {
+        Ok(hash) => Ok(Some(Hash::from(hash))),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(err) => Err(err)
     }
 }
@@ -140,7 +179,7 @@ impl SqliteStorage {
                 ON DELETE CASCADE
             );
 
-            CREATE INDEX IF NOT EXISTS v1_transactions_idx
+            CREATE INDEX IF NOT EXISTS v1_block_transactions_idx
             ON v1_block_transactions (block_id, hash);
 
             CREATE TABLE IF NOT EXISTS v1_block_validators (
@@ -430,6 +469,23 @@ impl Storage for SqliteStorage {
             Ok(())
         }
 
+        fn has_duplicate_transactions(
+            database: &MutexGuard<'_, Connection>,
+            transactions: &[Transaction]
+        ) -> rusqlite::Result<bool> {
+            let mut hashes = HashSet::new();
+
+            for transaction in transactions {
+                let hash = transaction.hash();
+
+                if !hashes.insert(hash) || has_transaction(database, &hash)? {
+                    return Ok(true);
+                }
+            }
+
+            Ok(false)
+        }
+
         let mut lock = self.0.lock();
 
         let (is_valid, hash, _) = block.verify()
@@ -443,6 +499,13 @@ impl Storage for SqliteStorage {
 
         // Ignore block if it's already stored.
         if has_block(&lock, &hash)? {
+            return Ok(false);
+        }
+
+        // Check that there's no duplicate transactions.
+        else if let BlockContent::Transactions(transactions) = block.content()
+            && has_duplicate_transactions(&lock, transactions)?
+        {
             return Ok(false);
         }
 
@@ -504,6 +567,52 @@ impl Storage for SqliteStorage {
         }
 
         Ok(true)
+    }
+
+    #[inline]
+    fn has_transaction(&self, transaction: &Hash) -> Result<bool, Self::Error> {
+        has_transaction(&self.0.lock(), transaction)
+    }
+
+    #[inline]
+    fn find_transaction(
+        &self,
+        transaction: &Hash
+    ) -> Result<Option<Hash>, Self::Error> {
+        find_transaction(&self.0.lock(), transaction)
+    }
+
+    fn read_transaction(
+        &self,
+        transaction: &Hash
+    ) -> Result<Option<Transaction>, Self::Error> {
+        let lock = self.0.lock();
+
+        let mut query = lock.prepare_cached("
+            SELECT
+                data,
+                sign
+            FROM v1_block_transactions
+            WHERE hash = ?1
+        ")?;
+
+        let result = query.query_row([transaction.as_bytes()], |row| {
+            Ok((
+                row.get::<_, Box<[u8]>>("data")?,
+                row.get::<_, [u8; Signature::SIZE]>("sign")?
+            ))
+        });
+
+        match result {
+            Ok((data, sign)) => Ok(Some(Transaction {
+                data,
+                sign: Signature::from_bytes(&sign)
+                    .ok_or_else(|| rusqlite::Error::InvalidQuery)?
+            })),
+
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err)
+        }
     }
 }
 

@@ -20,6 +20,7 @@ use std::iter::FusedIterator;
 
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::VerifyingKey;
+use crate::transaction::Transaction;
 use crate::block::{Block, BlockContent};
 
 // FIXME: `write_block` must update the same block if the new variant has more
@@ -83,12 +84,19 @@ pub trait Storage: Clone {
     /// be verified outside of this trait so this method must work without extra
     /// verifications, even if the block is not valid.
     ///
+    /// Transactions with the same hash must not be allowed. If there's already
+    /// a block with some transaction - this method must return `Ok(false)` and
+    /// forbid writing a new block with the same transaction hash.
+    ///
     /// Return `Ok(true)` if the blockchain history was modified, otherwise
     /// `Ok(false)`.
     ///
     /// # Blocks writing rules
     ///
     /// - If a block with the same hash is already stored then do nothing.
+    /// - If there's already a block with the same-hashed transaction stored as
+    ///   what we have in the new block, or if this block has multiple copies
+    ///   of the same-hashed transaction, then reject the new block.
     /// - If there's no blocks in the storage then
     ///     - If the block is of the root type - store it;
     ///     - Otherwise reject it.
@@ -101,6 +109,61 @@ pub trait Storage: Clone {
     ///     - If the previous block is not the tail block of the history then we
     ///       remove all the following blocks and overwrite the history.
     fn write_block(&self, block: &Block) -> Result<bool, Self::Error>;
+
+    /// Check if blockchain has transaction with given hash.
+    fn has_transaction(&self, transaction: &Hash) -> Result<bool, Self::Error> {
+        Ok(self.find_transaction(transaction)?.is_some())
+    }
+
+    /// Find block hash in which transaction with provided hash is stored.
+    /// Return `None` if there's no such transaction.
+    fn find_transaction(
+        &self,
+        transaction: &Hash
+    ) -> Result<Option<Hash>, Self::Error> {
+        let mut curr_block = self.root_block()?;
+
+        while let Some(block_hash) = &curr_block {
+            dbg!(block_hash);
+
+            if let Some(block) = self.read_block(block_hash)?
+                && let BlockContent::Transactions(transactions) = block.content()
+            {
+                for curr_transaction in transactions {
+                    if &curr_transaction.hash() == transaction {
+                        return Ok(Some(*block_hash));
+                    }
+                }
+            }
+
+            curr_block = self.next_block(block_hash)?;
+        }
+
+        Ok(None)
+    }
+
+    /// Read transaction from its hash. Return `None` if there's no such
+    /// transaction.
+    fn read_transaction(
+        &self,
+        transaction: &Hash
+    ) -> Result<Option<Transaction>, Self::Error> {
+        let Some(block) = self.find_transaction(transaction)? else {
+            return Ok(None);
+        };
+
+        let Some(block) = self.read_block(&block)? else {
+            return Ok(None);
+        };
+
+        if let BlockContent::Transactions(transactions) = block.content() {
+            return Ok(transactions.iter()
+                .find(|tr| &tr.hash() == transaction)
+                .cloned());
+        }
+
+        Ok(None)
+    }
 
     /// Get iterator over all the blocks stored in the current storage.
     #[inline]
@@ -334,6 +397,9 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     assert!(!storage.has_block(&Hash::default())?);
     assert!(storage.next_block(&Hash::default())?.is_none());
     assert!(storage.read_block(&Hash::default())?.is_none());
+    assert!(!storage.has_transaction(&Hash::default())?);
+    assert!(storage.find_transaction(&Hash::default())?.is_none());
+    assert!(storage.read_transaction(&Hash::default())?.is_none());
     assert_eq!(storage.blocks().count(), 0);
     assert!(storage.get_current_validators()?.is_empty());
 
@@ -403,7 +469,7 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     //
     // Block 2 must be rejected by the method since it's not a root block type.
 
-    storage.write_block(&block_2)?;
+    assert!(!storage.write_block(&block_2)?);
 
     assert!(storage.root_block()?.is_none());
     assert!(storage.tail_block()?.is_none());
@@ -424,8 +490,8 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     // Block 3 must be rejected by the method since block 2 is not stored yet.
     // Block 1 must be written successfully.
 
-    storage.write_block(&block_1)?;
-    storage.write_block(&block_3)?;
+    assert!(storage.write_block(&block_1)?);
+    assert!(!storage.write_block(&block_3)?);
 
     assert_eq!(storage.root_block()?, Some(block_1_hash));
     assert_eq!(storage.tail_block()?, Some(block_1_hash));
@@ -451,8 +517,8 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     //
     // Blocks 2 and 3 must be written to the storage successfully.
 
-    storage.write_block(&block_2)?;
-    storage.write_block(&block_3)?;
+    assert!(storage.write_block(&block_2)?);
+    assert!(storage.write_block(&block_3)?);
 
     assert_eq!(storage.root_block()?, Some(block_1_hash));
     assert_eq!(storage.tail_block()?, Some(block_3_hash));
@@ -489,7 +555,7 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     // Block 3 must be correctly replaced by the alternative block 3.
     // Original block 3 must be removed completely.
 
-    storage.write_block(&block_3_alt)?;
+    assert!(storage.write_block(&block_3_alt)?);
 
     assert_eq!(storage.root_block()?, Some(block_1_hash));
     assert_eq!(storage.tail_block()?, Some(block_3_alt_hash));
@@ -520,7 +586,7 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     // Alternative block 3 must be removed completely since its previous hash
     // is not correct anymore.
 
-    storage.write_block(&block_2_alt)?;
+    assert!(storage.write_block(&block_2_alt)?);
 
     assert_eq!(storage.root_block()?, Some(block_1_hash));
     assert_eq!(storage.tail_block()?, Some(block_2_alt_hash));
@@ -558,7 +624,7 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     // is not correct anymore. No blocks but the alternative block 1 must remain
     // in the history at that point.
 
-    storage.write_block(&block_1_alt)?;
+    assert!(storage.write_block(&block_1_alt)?);
 
     assert_eq!(storage.root_block()?, Some(block_1_alt_hash));
     assert_eq!(storage.tail_block()?, Some(block_1_alt_hash));
@@ -625,8 +691,8 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     // 7. Validator blocks.
 
-    storage.write_block(&block_2_alt)?;
-    storage.write_block(&block_3_alt)?;
+    assert!(storage.write_block(&block_2_alt)?);
+    assert!(storage.write_block(&block_3_alt)?);
 
     // Block 1 (root)
     assert_eq!(
@@ -672,6 +738,95 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
             validator_3.verifying_key()
         ]
     );
+
+    // Prepare transaction blocks.
+
+    let transaction_1 = Transaction::create(
+        &validator_1, b"Test duplicate 1".to_vec()
+    ).unwrap();
+
+    let transaction_2 = Transaction::create(
+        &validator_2, b"Test duplicate 1".to_vec()
+    ).unwrap();
+
+    let transaction_3 = Transaction::create(
+        &validator_2, b"Test duplicate 2".to_vec()
+    ).unwrap();
+
+    let transaction_4 = Transaction::create(
+        &validator_3, b"Test duplicate 2".to_vec()
+    ).unwrap(); // duplicate
+
+    let transaction_1_hash = transaction_1.hash();
+    let transaction_2_hash = transaction_2.hash();
+    let transaction_3_hash = transaction_3.hash();
+    let transaction_4_hash = transaction_4.hash();
+
+    // Block with two duplicate transactions.
+    let mut block_4 = Block::new(
+        &validator_1,
+        block_3_alt_hash,
+        BlockContent::transactions([
+            transaction_1,
+            transaction_2
+        ])
+    ).unwrap();
+
+    block_4.approve_with(&validator_3).unwrap();
+
+    let block_4_hash = block_4.hash().unwrap();
+
+    // Block with one non-existing transaction.
+    let mut block_5 = Block::new(
+        &validator_1,
+        block_3_alt_hash,
+        BlockContent::transactions([
+            transaction_3.clone()
+        ])
+    ).unwrap();
+
+    block_5.approve_with(&validator_3).unwrap();
+
+    let block_5_hash = block_5.hash().unwrap();
+
+    // Block with already existing transaction.
+    let mut block_6 = Block::new(
+        &validator_1,
+        block_5_hash,
+        BlockContent::transactions([
+            transaction_4
+        ])
+    ).unwrap();
+
+    block_6.approve_with(&validator_3).unwrap();
+
+    let block_6_hash = block_6.hash().unwrap();
+
+    // 8. Test transaction blocks.
+    //
+    // Block 4 must be rejected because it has two identical transactions.
+    // Block 5 must be accepted.
+    // Block 6 must be rejected because it has the same transaction as block 5.
+
+    assert_eq!(transaction_1_hash, transaction_2_hash);
+    assert_eq!(transaction_3_hash, transaction_4_hash);
+
+    assert!(!storage.write_block(&block_4)?);
+    assert!(storage.write_block(&block_5)?);
+    assert!(!storage.write_block(&block_6)?);
+
+    assert!(!storage.has_block(&block_4_hash)?);
+    assert!(storage.has_block(&block_5_hash)?);
+    assert!(!storage.has_block(&block_6_hash)?);
+
+    assert!(!storage.has_transaction(&transaction_1_hash)?);
+    assert!(storage.has_transaction(&transaction_3_hash)?);
+
+    assert!(storage.find_transaction(&transaction_1_hash)?.is_none());
+    assert_eq!(storage.find_transaction(&transaction_3_hash)?, Some(block_5_hash));
+
+    assert!(storage.read_transaction(&transaction_1_hash)?.is_none());
+    assert_eq!(storage.read_transaction(&transaction_3_hash)?, Some(transaction_3));
 
     Ok(())
 }
