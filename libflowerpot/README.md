@@ -47,7 +47,7 @@ Some key points:
     - [ ] Create `bouquet` CLI tool
         - [x] Create keypairs (public/secret keys)
         - [x] Create new transactions
-        - [ ] Send transactions to the network
+        - [x] Send transactions to the network
         - [x] Create new blockchains
         - [ ] Connect to a blockchain and monitor its activity
         - [ ] Show blockchain status

@@ -16,6 +16,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
 use std::io::{Read, Cursor};
 
 use varint_rs::{VarintReader, VarintWriter};
@@ -31,10 +32,13 @@ pub enum PacketError {
     Io(#[from] std::io::Error),
 
     #[error("unknown packet type: {0}")]
-    UnknownPacketType(u8),
+    UnknownPacketType(u16),
 
     #[error("provided packet bytes slice is too short")]
     PacketTooShort,
+
+    #[error("invalid node socket address type")]
+    InvalidNodeAddrType,
 
     #[error("couldn't deserialize signature from invalid bytes slice")]
     InvalidSignature
@@ -44,6 +48,16 @@ pub enum PacketError {
 pub enum Packet {
     /// Heartbeat (keep alive) packet.
     Heartbeat,
+
+    /// Ask network nodes addresses.
+    AskNodes {
+        max_nodes: u32
+    },
+
+    /// Slice of network nodes addresses.
+    Nodes {
+        nodes: Box<[SocketAddr]>
+    },
 
     /// Ask history of a blockchain.
     AskHistory {
@@ -149,23 +163,58 @@ pub enum Packet {
 }
 
 impl Packet {
-    pub const V1_HEARTBEAT: u8                = 0;
-    pub const V1_ASK_HISTORY: u8              = 1;
-    pub const V1_HISTORY: u8                  = 2;
-    pub const V1_ASK_PENDING_TRANSACTIONS: u8 = 3;
-    pub const V1_PENDING_TRANSACTIONS: u8     = 4;
-    pub const V1_ASK_PENDING_BLOCKS: u8       = 5;
-    pub const V1_PENDING_BLOCKS: u8           = 6;
-    pub const V1_ASK_TRANSACTION: u8          = 7;
-    pub const V1_TRANSACTION: u8              = 8;
-    pub const V1_ASK_BLOCK: u8                = 9;
-    pub const V1_BLOCK: u8                    = 10;
-    pub const V1_APPROVE_BLOCK: u8            = 11;
+    pub const V1_HEARTBEAT: u16                = 0;
+    pub const V1_ASK_NODES: u16                = 1;
+    pub const V1_NODES: u16                    = 2;
+    pub const V1_ASK_HISTORY: u16              = 3;
+    pub const V1_HISTORY: u16                  = 4;
+    pub const V1_ASK_PENDING_TRANSACTIONS: u16 = 5;
+    pub const V1_PENDING_TRANSACTIONS: u16     = 6;
+    pub const V1_ASK_PENDING_BLOCKS: u16       = 7;
+    pub const V1_PENDING_BLOCKS: u16           = 8;
+    pub const V1_ASK_TRANSACTION: u16          = 9;
+    pub const V1_TRANSACTION: u16              = 10;
+    pub const V1_ASK_BLOCK: u16                = 11;
+    pub const V1_BLOCK: u16                    = 12;
+    pub const V1_APPROVE_BLOCK: u16            = 13;
 
     /// Convert current packet to the bytes slice.
     pub fn to_bytes(&self) -> Result<Box<[u8]>, PacketError> {
         match self {
-            Self::Heartbeat => Ok(Box::new([Self::V1_HEARTBEAT])),
+            Self::Heartbeat => Ok(Box::new(Self::V1_HEARTBEAT.to_le_bytes())),
+
+            Self::AskNodes { max_nodes } => {
+                let mut buf = [0; 6];
+
+                buf[0..2].copy_from_slice(&Self::V1_ASK_NODES.to_le_bytes());
+                buf[2..].copy_from_slice(&max_nodes.to_le_bytes());
+
+                Ok(Box::new(buf))
+            }
+
+            Self::Nodes { nodes } => {
+                let mut buf = Vec::new();
+
+                buf.extend(Self::V1_NODES.to_le_bytes());
+
+                for node in nodes {
+                    match node.ip() {
+                        IpAddr::V4(ip) => {
+                            buf.push(0);
+                            buf.extend(node.port().to_le_bytes());
+                            buf.extend(ip.octets());
+                        }
+
+                        IpAddr::V6(ip) => {
+                            buf.push(1);
+                            buf.extend(node.port().to_le_bytes());
+                            buf.extend(ip.octets());
+                        }
+                    }
+                }
+
+                Ok(buf.into_boxed_slice())
+            }
 
             Self::AskHistory {
                 root_block,
@@ -174,9 +223,9 @@ impl Packet {
             } => {
                 let mut buf = Vec::new();
 
-                buf.push(Self::V1_ASK_HISTORY);
+                buf.extend(Self::V1_ASK_HISTORY.to_le_bytes());
 
-                buf.extend_from_slice(&root_block.0);
+                buf.extend(&root_block.0);
                 buf.write_u64_varint(*offset)?;
                 buf.write_u64_varint(*max_length)?;
 
@@ -190,24 +239,26 @@ impl Packet {
             } => {
                 let mut buf = Vec::new();
 
-                buf.push(Self::V1_HISTORY);
+                buf.extend(Self::V1_HISTORY.to_le_bytes());
 
-                buf.extend_from_slice(&root_block.0);
+                buf.extend(&root_block.0);
                 buf.write_u64_varint(*offset)?;
 
                 for hash in history {
-                    buf.extend_from_slice(&hash.0);
+                    buf.extend(&hash.0);
                 }
 
                 Ok(buf.into_boxed_slice())
             }
 
             Self::AskPendingTransactions { root_block } => {
-                let mut buf = [0; Hash::SIZE + 1];
+                let mut buf = [0; 2 + Hash::SIZE];
 
-                buf[0] = Self::V1_ASK_PENDING_TRANSACTIONS;
+                buf[0..2].copy_from_slice(
+                    &Self::V1_ASK_PENDING_TRANSACTIONS.to_le_bytes()
+                );
 
-                buf[1..].copy_from_slice(&root_block.0);
+                buf[2..].copy_from_slice(&root_block.0);
 
                 Ok(Box::new(buf))
             }
@@ -215,23 +266,25 @@ impl Packet {
             Self::PendingTransactions { root_block, pending_transactions } => {
                 let mut buf = Vec::new();
 
-                buf.push(Self::V1_PENDING_TRANSACTIONS);
+                buf.extend(Self::V1_PENDING_TRANSACTIONS.to_le_bytes());
 
-                buf.extend_from_slice(&root_block.0);
+                buf.extend(&root_block.0);
 
                 for hash in pending_transactions {
-                    buf.extend_from_slice(&hash.0);
+                    buf.extend(&hash.0);
                 }
 
                 Ok(buf.into_boxed_slice())
             }
 
             Self::AskPendingBlocks { root_block } => {
-                let mut buf = [0; Hash::SIZE + 1];
+                let mut buf = [0; 2 + Hash::SIZE];
 
-                buf[0] = Self::V1_ASK_PENDING_BLOCKS;
+                buf[0..2].copy_from_slice(
+                    &Self::V1_ASK_PENDING_BLOCKS.to_le_bytes()
+                );
 
-                buf[1..].copy_from_slice(&root_block.0);
+                buf[2..].copy_from_slice(&root_block.0);
 
                 Ok(Box::new(buf))
             }
@@ -239,17 +292,17 @@ impl Packet {
             Self::PendingBlocks { root_block, pending_blocks } => {
                 let mut buf = Vec::new();
 
-                buf.push(Self::V1_PENDING_BLOCKS);
+                buf.extend(Self::V1_PENDING_BLOCKS.to_le_bytes());
 
-                buf.extend_from_slice(&root_block.0);
+                buf.extend(&root_block.0);
 
                 for (hash, approvals) in pending_blocks {
-                    buf.extend_from_slice(&hash.0);
+                    buf.extend(&hash.0);
 
                     buf.write_usize_varint(approvals.len())?;
 
                     for approval in approvals {
-                        buf.extend_from_slice(&approval.to_bytes());
+                        buf.extend(&approval.to_bytes());
                     }
                 }
 
@@ -257,12 +310,14 @@ impl Packet {
             }
 
             Self::AskTransaction { root_block, transaction } => {
-                let mut buf = [0; Hash::SIZE * 2 + 1];
+                let mut buf = [0; 2 + Hash::SIZE * 2];
 
-                buf[0] = Self::V1_ASK_TRANSACTION;
+                buf[0..2].copy_from_slice(
+                    &Self::V1_ASK_TRANSACTION.to_le_bytes()
+                );
 
-                buf[1..Hash::SIZE + 1].copy_from_slice(&root_block.0);
-                buf[Hash::SIZE + 1..].copy_from_slice(&transaction.0);
+                buf[2..2 + Hash::SIZE].copy_from_slice(&root_block.0);
+                buf[2 + Hash::SIZE..].copy_from_slice(&transaction.0);
 
                 Ok(Box::new(buf))
             }
@@ -270,21 +325,23 @@ impl Packet {
             Self::Transaction { root_block, transaction } => {
                 let mut buf = Vec::new();
 
-                buf.push(Self::V1_TRANSACTION);
+                buf.extend(Self::V1_TRANSACTION.to_le_bytes());
 
-                buf.extend_from_slice(&root_block.0);
+                buf.extend(&root_block.0);
                 buf.extend(transaction.to_bytes());
 
                 Ok(buf.into_boxed_slice())
             }
 
             Self::AskBlock { root_block, target_block } => {
-                let mut buf = [0; Hash::SIZE * 2 + 1];
+                let mut buf = [0; 2 + Hash::SIZE * 2];
 
-                buf[0] = Self::V1_ASK_BLOCK;
+                buf[0..2].copy_from_slice(
+                    &Self::V1_ASK_BLOCK.to_le_bytes()
+                );
 
-                buf[1..Hash::SIZE + 1].copy_from_slice(&root_block.0);
-                buf[Hash::SIZE + 1..65].copy_from_slice(&target_block.0);
+                buf[2..2 + Hash::SIZE].copy_from_slice(&root_block.0);
+                buf[2 + Hash::SIZE..66].copy_from_slice(&target_block.0);
 
                 Ok(Box::new(buf))
             }
@@ -292,9 +349,9 @@ impl Packet {
             Self::Block { root_block, block } => {
                 let mut buf = Vec::new();
 
-                buf.push(Self::V1_BLOCK);
+                buf.extend(Self::V1_BLOCK.to_le_bytes());
 
-                buf.extend_from_slice(&root_block.0);
+                buf.extend(&root_block.0);
                 buf.extend(block.to_bytes()?);
 
                 Ok(buf.into_boxed_slice())
@@ -305,13 +362,15 @@ impl Packet {
                 target_block,
                 approval
             } => {
-                let mut buf = [0; Hash::SIZE * 2 + Signature::SIZE + 1];
+                let mut buf = [0; 2 + Hash::SIZE * 2 + Signature::SIZE];
 
-                buf[0] = Self::V1_APPROVE_BLOCK;
+                buf[0..2].copy_from_slice(
+                    &Self::V1_APPROVE_BLOCK.to_le_bytes()
+                );
 
-                buf[1..Hash::SIZE + 1].copy_from_slice(&root_block.0);
-                buf[Hash::SIZE + 1..Hash::SIZE * 2 + 1].copy_from_slice(&target_block.0);
-                buf[Hash::SIZE * 2 + 1..].copy_from_slice(&approval.to_bytes());
+                buf[2..2 + Hash::SIZE].copy_from_slice(&root_block.0);
+                buf[2 + Hash::SIZE..2 + Hash::SIZE * 2].copy_from_slice(&target_block.0);
+                buf[2 + Hash::SIZE * 2..].copy_from_slice(&approval.to_bytes());
 
                 Ok(Box::new(buf))
             }
@@ -322,23 +381,84 @@ impl Packet {
     pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, PacketError> {
         let bytes = bytes.as_ref();
 
-        if bytes.is_empty() {
+        if bytes.len() < 2 {
             return Err(PacketError::PacketTooShort);
         }
 
-        match bytes[0] {
+        match u16::from_le_bytes([bytes[0], bytes[1]]) {
             Self::V1_HEARTBEAT => Ok(Self::Heartbeat),
 
+            Self::V1_ASK_NODES => {
+                if bytes.len() < 6 {
+                    return Err(PacketError::PacketTooShort);
+                }
+
+                Ok(Self::AskNodes {
+                    max_nodes: u32::from_le_bytes([
+                        bytes[2], bytes[3],
+                        bytes[4], bytes[5]
+                    ])
+                })
+            }
+
+            Self::V1_NODES => {
+                let mut i = 2;
+                let n = bytes.len();
+
+                let mut nodes = Vec::new();
+
+                while i < n {
+                    let port = u16::from_le_bytes([
+                        bytes[i + 1],
+                        bytes[i + 2]
+                    ]);
+
+                    match bytes[i] {
+                        0 => {
+                            let mut ip = [0; 4];
+
+                            ip.copy_from_slice(&bytes[i + 3..i + 7]);
+
+                            nodes.push(SocketAddr::new(
+                                IpAddr::from(Ipv4Addr::from(ip)),
+                                port
+                            ));
+
+                            i += 7;
+                        }
+
+                        1 => {
+                            let mut ip = [0; 16];
+
+                            ip.copy_from_slice(&bytes[i + 3..i + 19]);
+
+                            nodes.push(SocketAddr::new(
+                                IpAddr::from(Ipv6Addr::from(ip)),
+                                port
+                            ));
+
+                            i += 19;
+                        }
+
+                        _ => return Err(PacketError::InvalidNodeAddrType)
+                    }
+                }
+
+                Ok(Self::Nodes {
+                    nodes: nodes.into_boxed_slice()
+                })
+            }
+
             Self::V1_ASK_HISTORY => {
-                if bytes.len() < Hash::SIZE + 3 {
+                if bytes.len() < Hash::SIZE + 4 {
                     return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
-                let mut bytes = Cursor::new(bytes[Hash::SIZE + 1..].to_vec());
+                let mut bytes = Cursor::new(bytes[2 + Hash::SIZE..].to_vec());
 
                 let offset = bytes.read_u64_varint()?;
                 let max_length = bytes.read_u64_varint()?;
@@ -351,15 +471,15 @@ impl Packet {
             }
 
             Self::V1_HISTORY => {
-                if bytes.len() < Hash::SIZE + 1 {
+                if bytes.len() < Hash::SIZE + 2 {
                     return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
-                let mut bytes = Cursor::new(bytes[Hash::SIZE + 1..].to_vec());
+                let mut bytes = Cursor::new(bytes[2 + Hash::SIZE..].to_vec());
 
                 let offset = bytes.read_u64_varint()?;
 
@@ -378,13 +498,13 @@ impl Packet {
             }
 
             Self::V1_ASK_PENDING_TRANSACTIONS => {
-                if bytes.len() < Hash::SIZE + 1 {
+                if bytes.len() < Hash::SIZE + 2 {
                     return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
                 Ok(Self::AskPendingTransactions {
                     root_block: Hash::from(root_block)
@@ -392,15 +512,15 @@ impl Packet {
             }
 
             Self::V1_PENDING_TRANSACTIONS => {
-                if bytes.len() < Hash::SIZE + 1 {
+                if bytes.len() < Hash::SIZE + 2 {
                     return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
-                let mut bytes = Cursor::new(bytes[Hash::SIZE + 1..].to_vec());
+                let mut bytes = Cursor::new(bytes[2 + Hash::SIZE..].to_vec());
                 let mut hash = [0; Hash::SIZE];
 
                 let mut transactions = Vec::new();
@@ -416,13 +536,13 @@ impl Packet {
             }
 
             Self::V1_ASK_PENDING_BLOCKS => {
-                if bytes.len() < Hash::SIZE + 1 {
+                if bytes.len() < Hash::SIZE + 2 {
                     return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
                 Ok(Self::AskPendingBlocks {
                     root_block: Hash::from(root_block)
@@ -430,15 +550,15 @@ impl Packet {
             },
 
             Self::V1_PENDING_BLOCKS => {
-                if bytes.len() < Hash::SIZE + 1 {
+                if bytes.len() < Hash::SIZE + 2 {
                     return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
-                let mut bytes = Cursor::new(bytes[Hash::SIZE + 1..].to_vec());
+                let mut bytes = Cursor::new(bytes[2 + Hash::SIZE..].to_vec());
 
                 let mut hash = [0; Hash::SIZE];
                 let mut approval = [0; Signature::SIZE];
@@ -473,15 +593,15 @@ impl Packet {
             }
 
             Self::V1_ASK_TRANSACTION => {
-                if bytes.len() < Hash::SIZE * 2 + 1 {
+                if bytes.len() < 2 + Hash::SIZE * 2 {
                     return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; Hash::SIZE];
                 let mut transaction = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
-                transaction.copy_from_slice(&bytes[Hash::SIZE + 1..]);
+                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
+                transaction.copy_from_slice(&bytes[2 + Hash::SIZE..]);
 
                 Ok(Self::AskTransaction {
                     root_block: Hash::from(root_block),
@@ -490,30 +610,30 @@ impl Packet {
             }
 
             Self::V1_TRANSACTION => {
-                if bytes.len() < Hash::SIZE + 1 {
+                if bytes.len() < Hash::SIZE + 2 {
                     return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
                 Ok(Self::Transaction {
                     root_block: Hash::from(root_block),
-                    transaction: Transaction::from_bytes(&bytes[Hash::SIZE + 1..])?
+                    transaction: Transaction::from_bytes(&bytes[2 + Hash::SIZE..])?
                 })
             }
 
             Self::V1_ASK_BLOCK => {
-                if bytes.len() < Hash::SIZE * 2 + 1 {
+                if bytes.len() < 2 + Hash::SIZE * 2 {
                     return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; Hash::SIZE];
                 let mut target_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
-                target_block.copy_from_slice(&bytes[Hash::SIZE + 1..]);
+                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
+                target_block.copy_from_slice(&bytes[2 + Hash::SIZE..]);
 
                 Ok(Self::AskBlock {
                     root_block: Hash::from(root_block),
@@ -522,22 +642,22 @@ impl Packet {
             }
 
             Self::V1_BLOCK => {
-                if bytes.len() < Hash::SIZE + 1 {
+                if bytes.len() < 2 + Hash::SIZE {
                     return Err(PacketError::PacketTooShort);
                 }
 
                 let mut root_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
+                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
                 Ok(Self::Block {
                     root_block: Hash::from(root_block),
-                    block: Block::from_bytes(&bytes[Hash::SIZE + 1..])?
+                    block: Block::from_bytes(&bytes[2 + Hash::SIZE..])?
                 })
             }
 
             Self::V1_APPROVE_BLOCK => {
-                if bytes.len() < Hash::SIZE * 2 + Signature::SIZE + 1 {
+                if bytes.len() < 2 + Hash::SIZE * 2 + Signature::SIZE {
                     return Err(PacketError::PacketTooShort);
                 }
 
@@ -545,9 +665,9 @@ impl Packet {
                 let mut target_block = [0; Hash::SIZE];
                 let mut approval = [0; Signature::SIZE];
 
-                root_block.copy_from_slice(&bytes[1..Hash::SIZE + 1]);
-                target_block.copy_from_slice(&bytes[Hash::SIZE + 1..Hash::SIZE * 2 + 1]);
-                approval.copy_from_slice(&bytes[Hash::SIZE * 2 + 1..]);
+                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
+                target_block.copy_from_slice(&bytes[2 + Hash::SIZE..2 + Hash::SIZE * 2]);
+                approval.copy_from_slice(&bytes[2 + Hash::SIZE * 2..]);
 
                 let Some(approval) = Signature::from_bytes(&approval) else {
                     return Err(PacketError::InvalidSignature);
@@ -598,6 +718,20 @@ fn test_serialize() -> Result<(), PacketError> {
 
     test_packets!(
         Packet::Heartbeat,
+
+        Packet::AskNodes {
+            max_nodes: u32::MAX
+        },
+
+        Packet::Nodes {
+            nodes: Box::new([
+                "127.0.0.1:10001".parse::<SocketAddr>().unwrap(),
+                "[::]:10002".parse::<SocketAddr>().unwrap(),
+                "127.0.0.3:10003".parse::<SocketAddr>().unwrap(),
+                "127.0.0.4:10004".parse::<SocketAddr>().unwrap(),
+                "[1::5]:10005".parse::<SocketAddr>().unwrap()
+            ])
+        },
 
         Packet::AskHistory {
             root_block: Hash::calc(b"Hello, World!"),
