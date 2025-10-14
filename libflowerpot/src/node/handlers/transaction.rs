@@ -39,9 +39,6 @@ pub fn handle<S: Storage>(
         "handle Transaction packet"
     );
 
-    // TODO: check if this transaction is already
-    // stored in some block!!!!!!!!!
-
     // Reject large transactions.
     if transaction.data().len() > state.handler.options.max_transaction_size {
         #[cfg(feature = "tracing")]
@@ -79,6 +76,22 @@ pub fn handle<S: Storage>(
             hash = hash.to_base64(),
             verifying_key = verifying_key.to_base64(),
             "received invalid transaction"
+        );
+
+        return true;
+    }
+
+    // Skip already stored transactions.
+    if let Some(storage) = &state.handler.storage
+        && let Ok(true) = storage.has_transaction(&hash)
+    {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            local_id = base64::encode(state.stream.local_id()),
+            peer_id = base64::encode(state.stream.peer_id()),
+            hash = hash.to_base64(),
+            verifying_key = verifying_key.to_base64(),
+            "received already stored transaction"
         );
 
         return true;
