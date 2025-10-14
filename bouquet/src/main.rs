@@ -323,10 +323,6 @@ fn main() -> anyhow::Result<()> {
             } => {
                 let storage = match storage {
                     Some(storage) => {
-                        if !storage.exists() {
-                            anyhow::bail!("storage doesn't exist");
-                        }
-
                         let storage = SqliteStorage::open(storage)
                             .context("failed to open sqlite storage")?;
 
