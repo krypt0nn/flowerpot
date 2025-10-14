@@ -113,6 +113,13 @@ enum BlockchainCommands {
         #[arg(short = 'n', long = "node", alias = "connect")]
         nodes: Vec<String>,
 
+        /// Signing key of a validator node.
+        ///
+        /// If specified, the local node will run the blocks validator to create
+        /// new blocks and approve blocks made by other validators.
+        #[arg(short = 'v', long = "signing-key", alias = "validator")]
+        signing_keys: Vec<String>,
+
         /// Local address to listen to incoming TCP connections.
         #[arg(
             short = 'l',
@@ -309,6 +316,7 @@ fn main() -> anyhow::Result<()> {
                 root_block,
                 storage,
                 nodes,
+                signing_keys,
                 local_addr,
                 no_encryption,
                 no_sync
@@ -385,6 +393,14 @@ fn main() -> anyhow::Result<()> {
 
                 if let Some(storage) = storage {
                     node.attach_storage(storage);
+                }
+
+                for signing_key in signing_keys {
+                    let Some(signing_key) = SigningKey::from_base64(signing_key) else {
+                        anyhow::bail!("invalid validator signign key");
+                    };
+
+                    node.add_validator(signing_key);
                 }
 
                 if !no_sync {

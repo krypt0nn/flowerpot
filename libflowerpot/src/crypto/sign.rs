@@ -53,8 +53,8 @@ impl SigningKey {
         bytes
     }
 
-    pub fn from_bytes(secret_key: &[u8; Self::SIZE]) -> Option<Self> {
-        k256::ecdsa::SigningKey::from_slice(secret_key).ok().map(Self)
+    pub fn from_bytes(signing_key: &[u8; Self::SIZE]) -> Option<Self> {
+        k256::ecdsa::SigningKey::from_slice(signing_key).ok().map(Self)
     }
 
     #[inline]
@@ -62,16 +62,16 @@ impl SigningKey {
         base64::encode(self.to_bytes())
     }
 
-    pub fn from_base64(secret_key: impl AsRef<[u8]>) -> Option<Self> {
-        let secret_key = base64::decode(secret_key).ok()?;
+    pub fn from_base64(signing_key: impl AsRef<[u8]>) -> Option<Self> {
+        let signing_key = base64::decode(signing_key).ok()?;
 
-        if secret_key.len() != Self::SIZE {
+        if signing_key.len() != Self::SIZE {
             return None;
         }
 
         let mut buf = [0; Self::SIZE];
 
-        buf.copy_from_slice(&secret_key[..Self::SIZE]);
+        buf.copy_from_slice(&signing_key[..Self::SIZE]);
 
         Self::from_bytes(&buf)
     }
@@ -118,8 +118,8 @@ impl VerifyingKey {
         bytes
     }
 
-    pub fn from_bytes(public_key: &[u8; Self::SIZE]) -> Option<Self> {
-        k256::ecdsa::VerifyingKey::from_sec1_bytes(public_key).ok().map(Self)
+    pub fn from_bytes(verifying_key: &[u8; Self::SIZE]) -> Option<Self> {
+        k256::ecdsa::VerifyingKey::from_sec1_bytes(verifying_key).ok().map(Self)
     }
 
     #[inline]
@@ -127,16 +127,16 @@ impl VerifyingKey {
         base64::encode(self.to_bytes())
     }
 
-    pub fn from_base64(public_key: impl AsRef<[u8]>) -> Option<Self> {
-        let public_key = base64::decode(public_key).ok()?;
+    pub fn from_base64(verifying_key: impl AsRef<[u8]>) -> Option<Self> {
+        let verifying_key = base64::decode(verifying_key).ok()?;
 
-        if public_key.len() != Self::SIZE {
+        if verifying_key.len() != Self::SIZE {
             return None;
         }
 
         let mut buf = [0; Self::SIZE];
 
-        buf.copy_from_slice(&public_key[..Self::SIZE]);
+        buf.copy_from_slice(&verifying_key[..Self::SIZE]);
 
         Self::from_bytes(&buf)
     }
