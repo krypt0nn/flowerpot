@@ -99,7 +99,7 @@ fn try_write_block<S: Storage>(
     // Distance between the previous block and the new block's
     // author.
     let new_distance = crate::block_validator_distance(
-        &history[n - 2],
+        history[n - 2],
         verifying_key
     );
 
@@ -305,7 +305,10 @@ pub fn handle<S: Storage>(mut state: NodeState<S>) {
                     } if received_root_block == state.handler.root_block
                         && state.handler.options.fetch_pending_transactions
                     => {
-                        if !pending_transactions::handle(&mut state, pending_transactions) {
+                        if !pending_transactions::handle(
+                            &mut state,
+                            pending_transactions
+                        ) {
                             return;
                         }
                     }
@@ -381,7 +384,11 @@ pub fn handle<S: Storage>(mut state: NodeState<S>) {
                         target_block,
                         approval
                     } if received_root_block == state.handler.root_block => {
-                        if !approve_block::handle(&mut state, target_block, approval) {
+                        if !approve_block::handle(
+                            &mut state,
+                            target_block,
+                            approval
+                        ) {
                             return;
                         }
                     }

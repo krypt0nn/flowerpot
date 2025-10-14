@@ -94,6 +94,36 @@ impl From<Hash> for [u8; 32] {
     }
 }
 
+impl std::ops::BitAnd for Hash {
+    type Output = Self;
+
+    fn bitand(mut self, rhs: Self) -> Self::Output {
+        (0..32).for_each(|i| self.0[i] &= rhs.0[i]);
+
+        self
+    }
+}
+
+impl std::ops::BitOr for Hash {
+    type Output = Self;
+
+    fn bitor(mut self, rhs: Self) -> Self::Output {
+        (0..32).for_each(|i| self.0[i] |= rhs.0[i]);
+
+        self
+    }
+}
+
+impl std::ops::BitXor for Hash {
+    type Output = Self;
+
+    fn bitxor(mut self, rhs: Self) -> Self::Output {
+        (0..32).for_each(|i| self.0[i] ^= rhs.0[i]);
+
+        self
+    }
+}
+
 impl std::ops::Deref for Hash {
     type Target = [u8; 32];
 

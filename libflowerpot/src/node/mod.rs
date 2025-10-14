@@ -17,6 +17,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
@@ -24,7 +25,7 @@ use spin::{RwLock, RwLockReadGuard};
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
-use crate::crypto::sign::VerifyingKey;
+use crate::crypto::sign::{Signature, SigningKey, VerifyingKey};
 use crate::transaction::Transaction;
 use crate::block::{Block, BlockContent, Error as BlockError};
 use crate::storage::Storage;
@@ -32,6 +33,7 @@ use crate::protocol::packets::Packet;
 use crate::protocol::network::{PacketStream, PacketStreamError};
 use crate::viewer::{BatchedViewer, ViewerError};
 
+mod validator;
 mod handlers;
 
 #[derive(Debug, thiserror::Error)]
@@ -150,7 +152,43 @@ pub struct NodeOptions {
     /// This filter function is applied to the `Block` packets only.
     ///
     /// Default is `None`.
-    pub blocks_filter: Option<fn(&Hash, &VerifyingKey, &Block) -> bool>
+    pub blocks_filter: Option<fn(&Hash, &VerifyingKey, &Block) -> bool>,
+
+    /// Amount of time a validator thread will wait before starting the
+    /// consensus mechanism. This time is needed so that the node can
+    /// synchronize all the pending data. It is recommended to keep this value
+    /// relatively high, as it will be used only initially and won't affect
+    /// further algorithm work.
+    ///
+    /// Default is `1m`.
+    pub validator_warmup_time: Duration,
+
+    /// Minimal amount of transactions needed to form a new block.
+    ///
+    /// Default is `1`.
+    pub validator_min_transactions_num: usize,
+
+    /// Maximal amount of transactions needed to form a new block.
+    ///
+    /// Default is `128`.
+    pub validator_max_transactions_num: usize,
+
+    /// Amount of time validator will wait to receive pending blocks from other
+    /// validators.
+    ///
+    /// It is recommended to keep this value reasonably high so that blocks can
+    /// be shared between the network nodes. Making this value small will also
+    /// result in approving many different blocks which can be abused by
+    /// malicious validators.
+    ///
+    /// Default is `20s`.
+    pub validator_blocks_await_time: Duration,
+
+    /// Amount of time validator will wait for other validators to send their
+    /// block approvals until starting a new validation round.
+    ///
+    /// Default is `10s`.
+    pub validator_block_approvals_await_time: Duration
 }
 
 impl Default for NodeOptions {
@@ -163,7 +201,12 @@ impl Default for NodeOptions {
             fetch_pending_transactions: true,
             fetch_pending_blocks: true,
             blocks_filter: None,
-            transactions_filter: None
+            transactions_filter: None,
+            validator_warmup_time: Duration::from_secs(60),
+            validator_min_transactions_num: 1,
+            validator_max_transactions_num: 128,
+            validator_blocks_await_time: Duration::from_secs(20),
+            validator_block_approvals_await_time: Duration::from_secs(10)
         }
     }
 }
@@ -172,9 +215,12 @@ pub struct Node<S: Storage> {
     root_block: Hash,
     streams: HashMap<[u8; 32], PacketStream>,
     storage: Option<S>,
+    owned_validators: Vec<SigningKey>,
+
     history: Vec<Hash>,
     validators: Vec<VerifyingKey>,
-    current_distance: [u8; 32],
+    current_distance: Hash,
+
     indexed_transactions: HashSet<Hash>,
     pending_transactions: HashMap<Hash, Transaction>,
     pending_blocks: HashMap<Hash, Block>
@@ -187,9 +233,12 @@ impl<S: Storage> Node<S> {
             root_block: root_block.into(),
             streams: HashMap::new(),
             storage: None,
+            owned_validators: Vec::new(),
+
             history: Vec::new(),
             validators: Vec::new(),
-            current_distance: [0xFF; 32],
+            current_distance: Hash::from([0xFF; 32]),
+
             indexed_transactions: HashSet::new(),
             pending_transactions: HashMap::new(),
             pending_blocks: HashMap::new()
@@ -208,6 +257,25 @@ impl<S: Storage> Node<S> {
     /// Add blockchain storage to the node.
     pub fn attach_storage(&mut self, storage: S) -> &mut Self {
         self.storage = Some(storage);
+
+        self
+    }
+
+    /// Add validator signing key.
+    ///
+    /// If set, node will start a background task to create new blocks and send
+    /// approvals for other validators' nodes.
+    ///
+    /// Multiple validator keys are allowed to be stored.
+    pub fn add_validator(
+        &mut self,
+        validator: impl Into<SigningKey>
+    ) -> &mut Self {
+        let validator: SigningKey = validator.into();
+
+        if !self.owned_validators.contains(&validator) {
+            self.owned_validators.push(validator);
+        }
 
         self
     }
@@ -337,7 +405,7 @@ impl<S: Storage> Node<S> {
         tracing::info!("starting the node");
 
         let handler = NodeHandler {
-            streams: Arc::new(RwLock::new(HashMap::new())),
+            streams: Arc::new(RwLock::new(HashMap::with_capacity(self.streams.len()))),
             options,
 
             root_block: self.root_block,
@@ -352,6 +420,7 @@ impl<S: Storage> Node<S> {
             pending_blocks: Arc::new(RwLock::new(self.pending_blocks))
         };
 
+        // Add streams to the handler.
         for (endpoint_id, stream) in self.streams {
             #[cfg(feature = "tracing")]
             tracing::info!(
@@ -360,6 +429,16 @@ impl<S: Storage> Node<S> {
             );
 
             handler.add_stream(stream);
+        }
+
+        // Start validator thread if any keys are provided.
+        if !self.owned_validators.is_empty() {
+            let handler = handler.clone();
+            let validators = self.owned_validators;
+
+            std::thread::spawn(move || {
+                validator::run(handler, validators);
+            });
         }
 
         #[cfg(feature = "tracing")]
@@ -380,7 +459,7 @@ pub struct NodeHandler<S> {
     storage: Option<S>,
 
     history: Arc<RwLock<Vec<Hash>>>,
-    current_distance: Arc<RwLock<[u8; 32]>>,
+    current_distance: Arc<RwLock<Hash>>,
     validators: Arc<RwLock<Vec<VerifyingKey>>>,
 
     indexed_transactions: Arc<RwLock<HashSet<Hash>>>,
@@ -424,6 +503,18 @@ impl<S: Storage> NodeHandler<S> {
             .keys()
             .cloned()
             .collect::<Box<[[u8; 32]]>>()
+    }
+
+    /// Get list of known blockchain history.
+    #[inline]
+    pub fn history(&self) -> RwLockReadGuard<'_, Vec<Hash>> {
+        self.history.read()
+    }
+
+    /// Get list of current blockchain validators.
+    #[inline]
+    pub fn validators(&self) -> RwLockReadGuard<'_, Vec<VerifyingKey>> {
+        self.validators.read()
     }
 
     /// Get table of known pending transactions.
@@ -493,6 +584,19 @@ impl<S: Storage> NodeHandler<S> {
         self.send(Packet::Block {
             root_block: self.root_block,
             block: block.into()
+        });
+    }
+
+    /// Send block approval to all the connected nodes.
+    pub fn send_block_approval(
+        &self,
+        block: impl Into<Hash>,
+        approval: impl Into<Signature>
+    ) {
+        self.send(Packet::ApproveBlock {
+            root_block: self.root_block,
+            target_block: block.into(),
+            approval: approval.into()
         });
     }
 }

@@ -54,33 +54,8 @@ pub fn calc_required_approvals(validators: usize) -> usize {
 ///
 /// This distance is used to determine approved blocks priority.
 pub fn block_validator_distance(
-    block: &Hash,
+    block: Hash,
     validator: &VerifyingKey
-) -> [u8; 32] {
-    let mut dist = *blake3::hash(&validator.to_bytes()).as_bytes();
-
-    (0..32).for_each(|i| {
-        dist[i] ^= block.0[i];
-    });
-
-    dist
-}
-
-/// Sort provided validators list in descending priority order using the hash
-/// of the previous block.
-///
-/// The algorithm prioritizes validators which public key's hashes are closer
-/// to the previous block in xor distance. If we assume that blocks' hashes
-/// are distributed uniformally, then on average all validators should be
-/// prioritized equal amount of times.
-pub fn rank_validators(
-    prev_block_hash: &Hash,
-    validators: &mut [VerifyingKey]
-) {
-    validators.sort_by(|a, b| {
-        let a = block_validator_distance(prev_block_hash, a);
-        let b = block_validator_distance(prev_block_hash, b);
-
-        a.cmp(&b)
-    });
+) -> Hash {
+    block ^ Hash::calc(validator.to_bytes())
 }

@@ -445,12 +445,12 @@ impl<'stream> BatchedViewer<'stream> {
 
                 if let Some(curr_block) = &mut curr_block {
                     let curr_distance = crate::block_validator_distance(
-                        &self.prev_block,
+                        self.prev_block,
                         &curr_block.verifying_key
                     );
 
                     let new_distance = crate::block_validator_distance(
-                        &self.prev_block,
+                        self.prev_block,
                         &block.verifying_key
                     );
 
@@ -519,12 +519,12 @@ impl<'stream> BatchedViewer<'stream> {
         match (network_block, storage_block) {
             (Some(network_block), Some(storage_block)) => {
                 let network_distance = crate::block_validator_distance(
-                    &self.prev_block,
+                    self.prev_block,
                     &network_block.verifying_key
                 );
 
                 let storage_distance = crate::block_validator_distance(
-                    &self.prev_block,
+                    self.prev_block,
                     &storage_block.verifying_key
                 );
 
