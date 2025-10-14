@@ -529,14 +529,24 @@ impl<'stream> BatchedViewer<'stream> {
                 );
 
                 if network_distance < storage_distance {
+                    self.prev_block = network_block.hash;
+
                     Ok(Some(network_block))
-                } else {
+                }
+
+                else {
+                    self.prev_block = storage_block.hash;
+
                     Ok(Some(storage_block))
                 }
             }
 
             (Some(block), None) |
-            (None, Some(block)) => Ok(Some(block)),
+            (None, Some(block)) => {
+                self.prev_block = block.hash;
+
+                Ok(Some(block))
+            }
 
             (None, None) => Ok(None)
         }
