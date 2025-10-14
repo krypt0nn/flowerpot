@@ -59,7 +59,9 @@ pub fn handle<S: Storage>(state: &mut NodeState<S>) -> bool {
             ?err,
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            ?pending_blocks,
+            pending_blocks = ?pending_blocks.iter()
+                .map(|(hash, approvals)| (hash.to_base64(), approvals.len()))
+                .collect::<Box<[(String, usize)]>>(),
             "failed to send PendingBlocks packet"
         );
 

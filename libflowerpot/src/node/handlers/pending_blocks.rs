@@ -37,7 +37,9 @@ pub fn handle<S: Storage>(
         local_id = base64::encode(state.stream.local_id()),
         peer_id = base64::encode(state.stream.peer_id()),
         root_block = state.handler.root_block.to_base64(),
-        ?pending_blocks,
+        pending_blocks = ?pending_blocks.iter()
+            .map(|(hash, approvals)| (hash.to_base64(), approvals.len()))
+            .collect::<Box<[(String, usize)]>>(),
         "handle PendingBlocks packet"
     );
 
@@ -58,7 +60,7 @@ pub fn handle<S: Storage>(
                     ?err,
                     local_id = base64::encode(state.stream.local_id()),
                     peer_id = base64::encode(state.stream.peer_id()),
-                    ?block,
+                    block = block.to_base64(),
                     "failed to send AskBlock packet"
                 );
 

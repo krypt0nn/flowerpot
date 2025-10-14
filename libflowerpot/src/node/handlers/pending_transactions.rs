@@ -36,7 +36,9 @@ pub fn handle<S: Storage>(
         local_id = base64::encode(state.stream.local_id()),
         peer_id = base64::encode(state.stream.peer_id()),
         root_block = state.handler.root_block.to_base64(),
-        ?pending_transactions,
+        pending_transactions = ?pending_transactions.iter()
+            .map(|hash| hash.to_base64())
+            .collect::<Box<[String]>>(),
         "handle PendingTransactions packet"
     );
 
@@ -54,7 +56,7 @@ pub fn handle<S: Storage>(
                     ?err,
                     local_id = base64::encode(state.stream.local_id()),
                     peer_id = base64::encode(state.stream.peer_id()),
-                    ?transaction,
+                    transaction = transaction.to_base64(),
                     "failed to send AskTransaction packet"
                 );
 
