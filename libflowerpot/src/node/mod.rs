@@ -311,7 +311,7 @@ impl<S: Storage> Node<S> {
         #[cfg(feature = "tracing")]
         tracing::info!("synchronizing node state");
 
-        if self.streams.is_empty() {
+        if self.streams.is_empty() && self.storage.is_none() {
             return Ok(());
         }
 
