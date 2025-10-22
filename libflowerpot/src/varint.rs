@@ -16,40 +16,84 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-pub fn read_u64(bytes: &[u8]) -> (u64, &[u8]) {
+/// Read variable sized number from the provided bytes slice, return read number
+/// and the slice's tail which doesn't encode the returned number.
+///
+/// Return `None` if the encoded number is invalid (too large) or provided bytes
+/// slice is empty.
+pub fn read_u64(bytes: &[u8]) -> (Option<u64>, &[u8]) {
     let mut num = 0;
     let mut i = 0;
+
     let n = bytes.len();
 
-    while i < n {
-        num |= (bytes[i] & 0b01111111) as u64;
-        num <<= 7;
+    if n == 0 {
+        return (None, &[]);
+    }
 
-        if num & 0b10000000 == 0b10000000 {
+    // Locate the end of the varint (no extension bit).
+    while i < n {
+        if bytes[i] & 0b10000000 == 0 {
             break;
         }
 
         i += 1;
+
+        // To encode up to 64 bits we need ceil(64 / 7) = 10 bytes.
+        // If there's more than that then the number is too large, so reject it.
+        if i >= 10 {
+            return (None, &[]);
+        }
     }
 
-    if i == n {
-        (num, &[])
+    // Check that the last part of the number is valid and that we've found it.
+    if i >= n || bytes[i] & 0b10000000 != 0 {
+        return (None, &[]);
+    }
+
+    // Decode the number by going backward to preserve the encoded order.
+    loop {
+        num |= (bytes[i] & 0b01111111) as u64;
+
+        if i == 0 {
+            break;
+        }
+
+        num <<= 7;
+        i -= 1;
+    }
+
+    if i >= n {
+        (Some(num), &[])
     } else {
-        (num, &bytes[i..])
+        (Some(num), &bytes[i..])
     }
 }
 
+/// Encode provided number into variably sized bytes vector. Numbers under 128
+/// are encoded in one single byte.
 pub fn write_u64(mut num: u64) -> Vec<u8> {
+    // Special case.
+    if num == 0 {
+        return vec![0];
+    }
+
     let mut buf = Vec::with_capacity(1);
 
     while num > 0 {
+        // Take 7 bits from the number.
         let byte = (num & 0b01111111) as u8;
 
         num >>= 7;
 
+        // If the number is not done yet.
         if num > 0 {
+            // Add extension bit if we have more parts of the number.
             buf.push(byte | 0b10000000);
-        } else {
+        }
+
+        // Otherwise don't add extension bit, marking varint as finished.
+        else {
             buf.push(byte);
         }
     }
@@ -59,10 +103,22 @@ pub fn write_u64(mut num: u64) -> Vec<u8> {
 
 #[test]
 fn test() {
-    assert_eq!(read_u64(&write_u64(0)).0, 0);
-    assert_eq!(read_u64(&write_u64(123)).0, 123);
+    dbg!(write_u64(123));
+    dbg!(write_u64(u16::MAX as u64));
 
-    assert_eq!(read_u64(&write_u64(u16::MAX as u64)).0, u16::MAX as u64);
-    assert_eq!(read_u64(&write_u64(u32::MAX as u64)).0, u32::MAX as u64);
-    assert_eq!(read_u64(&write_u64(u64::MAX as u64)).0, u64::MAX as u64);
+    assert_eq!(read_u64(&write_u64(0)).0, Some(0));
+    assert_eq!(read_u64(&write_u64(123)).0, Some(123));
+
+    assert_eq!(read_u64(&write_u64(u16::MAX as u64)).0, Some(u16::MAX as u64));
+    assert_eq!(read_u64(&write_u64(u32::MAX as u64)).0, Some(u32::MAX as u64));
+    assert_eq!(read_u64(&write_u64(u64::MAX)).0, Some(u64::MAX));
+
+    // Empty slice.
+    assert_eq!(read_u64(&[]), (None, &[] as &[u8]));
+
+    // Invalid number (last part must not contain extension bit).
+    assert_eq!(read_u64(&[0xFF, 0xFF]), (None, &[] as &[u8]));
+
+    // Too large number.
+    assert_eq!(read_u64(&[0xFF; 32]), (None, &[] as &[u8]));
 }

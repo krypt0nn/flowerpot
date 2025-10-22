@@ -16,8 +16,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// pub mod varint; // TODO in-house varint
-
+pub mod varint;
 pub mod crypto;
 pub mod transaction;
 pub mod block;
