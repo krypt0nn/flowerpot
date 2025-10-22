@@ -105,7 +105,17 @@ pub enum BlockchainCommands {
 
         /// Disable streams encryption.
         #[arg(long, alias = "disable-encryption")]
-        no_encryption: bool
+        no_encryption: bool,
+
+        /// Disable stream connection status reports.
+        #[arg(
+            long,
+            alias = "disable-stream-connect-report",
+            alias = "disable-stream-report",
+            alias = "no-stream-report",
+            alias = "no-connect-report"
+        )]
+        no_stream_connect_report: bool
     },
 
     /// Serve flowerpot blockchain.
@@ -283,7 +293,14 @@ impl BlockchainCommands {
                 println!("  Total blocks: {total_blocks}");
             }
 
-            Self::View { seed, root_block, storage, nodes, no_encryption } => {
+            Self::View {
+                seed,
+                root_block,
+                storage,
+                nodes,
+                no_encryption,
+                no_stream_connect_report
+            } => {
                 let storage = match storage {
                     Some(storage) => {
                         let storage = SqliteStorage::open(storage)
@@ -330,7 +347,9 @@ impl BlockchainCommands {
                 let mut streams = Vec::with_capacity(nodes.len());
 
                 for address in nodes {
-                    println!("connecting to {address}...");
+                    if !no_stream_connect_report {
+                        println!("connecting to {address}...");
+                    }
 
                     let stream = TcpStream::connect(address)
                         .context("failed to connect to the node")?;
@@ -338,11 +357,13 @@ impl BlockchainCommands {
                     let stream = PacketStream::init(&secret_key, &options, stream)
                         .context("failed to initialize packet stream with the node")?;
 
-                    println!(
-                        "connected to {} [{}]",
-                        stream.peer_addr()?,
-                        base64::encode(stream.peer_id())
-                    );
+                    if !no_stream_connect_report {
+                        println!(
+                            "connected to {} [{}]",
+                            stream.peer_addr()?,
+                            base64::encode(stream.peer_id())
+                        );
+                    }
 
                     streams.push(stream);
                 }
