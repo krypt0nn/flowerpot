@@ -17,31 +17,35 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
-use std::io::{Read, Cursor};
 
-use varint_rs::{VarintReader, VarintWriter};
-
+use crate::varint;
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::Signature;
-use crate::transaction::Transaction;
-use crate::block::Block;
+use crate::transaction::{Transaction, TransactionDecodeError};
+use crate::block::{Block, BlockDecodeError};
 
-#[derive(Debug, thiserror::Error)]
-pub enum PacketError {
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+pub enum PacketDecodeError {
+    #[error("unsupported packet type: {0}")]
+    UnsupportedType(u16),
 
-    #[error("unknown packet type: {0}")]
-    UnknownPacketType(u16),
+    #[error("provided packet bytes slice is too short: {got} bytes got, at least {expected} bytes expected")]
+    TooShort {
+        got: usize,
+        expected: usize
+    },
 
-    #[error("provided packet bytes slice is too short")]
-    PacketTooShort,
+    #[error("invalid param {param} format in the {packet_type} packet")]
+    InvalidParam {
+        packet_type: &'static str,
+        param: &'static str
+    },
 
-    #[error("invalid node socket address type")]
-    InvalidNodeAddrType,
+    #[error("failed to decode transaction: {0}")]
+    DecodeTransaction(#[from] TransactionDecodeError),
 
-    #[error("couldn't deserialize signature from invalid bytes slice")]
-    InvalidSignature
+    #[error("failed to decode block: {0}")]
+    DecodeBlock(#[from] BlockDecodeError)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +55,7 @@ pub enum Packet {
 
     /// Ask network nodes addresses.
     AskNodes {
-        max_nodes: u32
+        max_nodes: u64
     },
 
     /// Slice of network nodes addresses.
@@ -178,18 +182,19 @@ impl Packet {
     pub const V1_BLOCK: u16                    = 12;
     pub const V1_APPROVE_BLOCK: u16            = 13;
 
-    /// Convert current packet to the bytes slice.
-    pub fn to_bytes(&self) -> Result<Box<[u8]>, PacketError> {
+    /// Encode packet into a binary representation.
+    pub fn to_bytes(&self) -> Box<[u8]> {
         match self {
-            Self::Heartbeat => Ok(Box::new(Self::V1_HEARTBEAT.to_le_bytes())),
+            Self::Heartbeat => Box::new(Self::V1_HEARTBEAT.to_le_bytes()),
 
             Self::AskNodes { max_nodes } => {
-                let mut buf = [0; 6];
+                let mut buf = Vec::new();
 
-                buf[0..2].copy_from_slice(&Self::V1_ASK_NODES.to_le_bytes());
-                buf[2..].copy_from_slice(&max_nodes.to_le_bytes());
+                buf.extend(Self::V1_ASK_NODES.to_le_bytes());
 
-                Ok(Box::new(buf))
+                buf.extend(varint::write_u64(*max_nodes));
+
+                buf.into_boxed_slice()
             }
 
             Self::Nodes { nodes } => {
@@ -213,7 +218,7 @@ impl Packet {
                     }
                 }
 
-                Ok(buf.into_boxed_slice())
+                buf.into_boxed_slice()
             }
 
             Self::AskHistory {
@@ -225,11 +230,11 @@ impl Packet {
 
                 buf.extend(Self::V1_ASK_HISTORY.to_le_bytes());
 
-                buf.extend(&root_block.0);
-                buf.write_u64_varint(*offset)?;
-                buf.write_u64_varint(*max_length)?;
+                buf.extend(root_block.as_bytes());
+                buf.extend(varint::write_u64(*offset));
+                buf.extend(varint::write_u64(*max_length));
 
-                Ok(buf.into_boxed_slice())
+                buf.into_boxed_slice()
             }
 
             Self::History {
@@ -241,14 +246,14 @@ impl Packet {
 
                 buf.extend(Self::V1_HISTORY.to_le_bytes());
 
-                buf.extend(&root_block.0);
-                buf.write_u64_varint(*offset)?;
+                buf.extend(root_block.as_bytes());
+                buf.extend(varint::write_u64(*offset));
 
                 for hash in history {
-                    buf.extend(&hash.0);
+                    buf.extend(hash.as_bytes());
                 }
 
-                Ok(buf.into_boxed_slice())
+                buf.into_boxed_slice()
             }
 
             Self::AskPendingTransactions { root_block } => {
@@ -258,9 +263,9 @@ impl Packet {
                     &Self::V1_ASK_PENDING_TRANSACTIONS.to_le_bytes()
                 );
 
-                buf[2..].copy_from_slice(&root_block.0);
+                buf[2..].copy_from_slice(root_block.as_bytes());
 
-                Ok(Box::new(buf))
+                Box::new(buf)
             }
 
             Self::PendingTransactions { root_block, pending_transactions } => {
@@ -268,13 +273,13 @@ impl Packet {
 
                 buf.extend(Self::V1_PENDING_TRANSACTIONS.to_le_bytes());
 
-                buf.extend(&root_block.0);
+                buf.extend(root_block.as_bytes());
 
                 for hash in pending_transactions {
-                    buf.extend(&hash.0);
+                    buf.extend(hash.as_bytes());
                 }
 
-                Ok(buf.into_boxed_slice())
+                buf.into_boxed_slice()
             }
 
             Self::AskPendingBlocks { root_block } => {
@@ -284,9 +289,9 @@ impl Packet {
                     &Self::V1_ASK_PENDING_BLOCKS.to_le_bytes()
                 );
 
-                buf[2..].copy_from_slice(&root_block.0);
+                buf[2..].copy_from_slice(root_block.as_bytes());
 
-                Ok(Box::new(buf))
+                Box::new(buf)
             }
 
             Self::PendingBlocks { root_block, pending_blocks } => {
@@ -294,19 +299,19 @@ impl Packet {
 
                 buf.extend(Self::V1_PENDING_BLOCKS.to_le_bytes());
 
-                buf.extend(&root_block.0);
+                buf.extend(root_block.as_bytes());
 
                 for (hash, approvals) in pending_blocks {
-                    buf.extend(&hash.0);
+                    buf.extend(hash.as_bytes());
 
-                    buf.write_usize_varint(approvals.len())?;
+                    buf.extend(varint::write_u64(approvals.len() as u64));
 
                     for approval in approvals {
                         buf.extend(&approval.to_bytes());
                     }
                 }
 
-                Ok(buf.into_boxed_slice())
+                buf.into_boxed_slice()
             }
 
             Self::AskTransaction { root_block, transaction } => {
@@ -316,10 +321,10 @@ impl Packet {
                     &Self::V1_ASK_TRANSACTION.to_le_bytes()
                 );
 
-                buf[2..2 + Hash::SIZE].copy_from_slice(&root_block.0);
-                buf[2 + Hash::SIZE..].copy_from_slice(&transaction.0);
+                buf[2..2 + Hash::SIZE].copy_from_slice(root_block.as_bytes());
+                buf[2 + Hash::SIZE..].copy_from_slice(transaction.as_bytes());
 
-                Ok(Box::new(buf))
+                Box::new(buf)
             }
 
             Self::Transaction { root_block, transaction } => {
@@ -327,10 +332,10 @@ impl Packet {
 
                 buf.extend(Self::V1_TRANSACTION.to_le_bytes());
 
-                buf.extend(&root_block.0);
+                buf.extend(root_block.as_bytes());
                 buf.extend(transaction.to_bytes());
 
-                Ok(buf.into_boxed_slice())
+                buf.into_boxed_slice()
             }
 
             Self::AskBlock { root_block, target_block } => {
@@ -340,10 +345,10 @@ impl Packet {
                     &Self::V1_ASK_BLOCK.to_le_bytes()
                 );
 
-                buf[2..2 + Hash::SIZE].copy_from_slice(&root_block.0);
-                buf[2 + Hash::SIZE..66].copy_from_slice(&target_block.0);
+                buf[2..2 + Hash::SIZE].copy_from_slice(root_block.as_bytes());
+                buf[2 + Hash::SIZE..66].copy_from_slice(target_block.as_bytes());
 
-                Ok(Box::new(buf))
+                Box::new(buf)
             }
 
             Self::Block { root_block, block } => {
@@ -351,10 +356,10 @@ impl Packet {
 
                 buf.extend(Self::V1_BLOCK.to_le_bytes());
 
-                buf.extend(&root_block.0);
-                buf.extend(block.to_bytes()?);
+                buf.extend(root_block.as_bytes());
+                buf.extend(block.to_bytes());
 
-                Ok(buf.into_boxed_slice())
+                buf.into_boxed_slice()
             }
 
             Self::ApproveBlock {
@@ -368,36 +373,52 @@ impl Packet {
                     &Self::V1_APPROVE_BLOCK.to_le_bytes()
                 );
 
-                buf[2..2 + Hash::SIZE].copy_from_slice(&root_block.0);
-                buf[2 + Hash::SIZE..2 + Hash::SIZE * 2].copy_from_slice(&target_block.0);
+                buf[2..2 + Hash::SIZE].copy_from_slice(root_block.as_bytes());
+
+                buf[2 + Hash::SIZE..2 + Hash::SIZE * 2].copy_from_slice(
+                    target_block.as_bytes()
+                );
+
                 buf[2 + Hash::SIZE * 2..].copy_from_slice(&approval.to_bytes());
 
-                Ok(Box::new(buf))
+                Box::new(buf)
             }
         }
     }
 
     /// Convert bytes slice to a packet.
-    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, PacketError> {
+    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, PacketDecodeError> {
         let bytes = bytes.as_ref();
 
-        if bytes.len() < 2 {
-            return Err(PacketError::PacketTooShort);
+        let n = bytes.len();
+
+        if n < 2 {
+            return Err(PacketDecodeError::TooShort {
+                got: n,
+                expected: 2
+            });
         }
 
         match u16::from_le_bytes([bytes[0], bytes[1]]) {
             Self::V1_HEARTBEAT => Ok(Self::Heartbeat),
 
             Self::V1_ASK_NODES => {
-                if bytes.len() < 6 {
-                    return Err(PacketError::PacketTooShort);
+                if n < 3 {
+                    return Err(PacketDecodeError::TooShort {
+                        got: n,
+                        expected: 3
+                    });
                 }
 
+                let (Some(max_nodes), _) = varint::read_u64(&bytes[2..]) else {
+                    return Err(PacketDecodeError::InvalidParam {
+                        packet_type: "AskNodes",
+                        param: "max_nodes"
+                    });
+                };
+
                 Ok(Self::AskNodes {
-                    max_nodes: u32::from_le_bytes([
-                        bytes[2], bytes[3],
-                        bytes[4], bytes[5]
-                    ])
+                    max_nodes
                 })
             }
 
@@ -440,7 +461,10 @@ impl Packet {
                             i += 19;
                         }
 
-                        _ => return Err(PacketError::InvalidNodeAddrType)
+                        _ => return Err(PacketDecodeError::InvalidParam {
+                            packet_type: "Nodes",
+                            param: "format"
+                        })
                     }
                 }
 
@@ -450,18 +474,30 @@ impl Packet {
             }
 
             Self::V1_ASK_HISTORY => {
-                if bytes.len() < Hash::SIZE + 4 {
-                    return Err(PacketError::PacketTooShort);
+                if n < Hash::SIZE + 4 {
+                    return Err(PacketDecodeError::TooShort {
+                        got: n,
+                        expected: Hash::SIZE + 4
+                    });
                 }
 
                 let mut root_block = [0; Hash::SIZE];
 
                 root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
-                let mut bytes = Cursor::new(bytes[2 + Hash::SIZE..].to_vec());
+                let (Some(offset), bytes) = varint::read_u64(&bytes[2 + Hash::SIZE..]) else {
+                    return Err(PacketDecodeError::InvalidParam {
+                        packet_type: "AskHistory",
+                        param: "offset"
+                    });
+                };
 
-                let offset = bytes.read_u64_varint()?;
-                let max_length = bytes.read_u64_varint()?;
+                let (Some(max_length), _) = varint::read_u64(bytes) else {
+                    return Err(PacketDecodeError::InvalidParam {
+                        packet_type: "AskHistory",
+                        param: "max_length"
+                    });
+                };
 
                 Ok(Self::AskHistory {
                     root_block: Hash::from(root_block),
@@ -471,23 +507,36 @@ impl Packet {
             }
 
             Self::V1_HISTORY => {
-                if bytes.len() < Hash::SIZE + 2 {
-                    return Err(PacketError::PacketTooShort);
+                if n < 2 + Hash::SIZE {
+                    return Err(PacketDecodeError::TooShort {
+                        got: n,
+                        expected: 2 + Hash::SIZE
+                    });
                 }
 
                 let mut root_block = [0; Hash::SIZE];
 
                 root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
-                let mut bytes = Cursor::new(bytes[2 + Hash::SIZE..].to_vec());
-
-                let offset = bytes.read_u64_varint()?;
+                let (Some(offset), bytes) = varint::read_u64(&bytes[2 + Hash::SIZE..]) else {
+                    return Err(PacketDecodeError::InvalidParam {
+                        packet_type: "History",
+                        param: "offset"
+                    });
+                };
 
                 let mut history = Vec::new();
                 let mut hash = [0; Hash::SIZE];
 
-                while bytes.read_exact(&mut hash).is_ok() {
+                let n = bytes.len();
+                let mut i = 0;
+
+                while i < n {
+                    hash.copy_from_slice(&bytes[i..i + Hash::SIZE]);
+
                     history.push(Hash::from(hash));
+
+                    i += Hash::SIZE;
                 }
 
                 Ok(Self::History {
@@ -498,8 +547,11 @@ impl Packet {
             }
 
             Self::V1_ASK_PENDING_TRANSACTIONS => {
-                if bytes.len() < Hash::SIZE + 2 {
-                    return Err(PacketError::PacketTooShort);
+                if n < 2 + Hash::SIZE {
+                    return Err(PacketDecodeError::TooShort {
+                        got: n,
+                        expected: 2 + Hash::SIZE
+                    });
                 }
 
                 let mut root_block = [0; Hash::SIZE];
@@ -512,21 +564,31 @@ impl Packet {
             }
 
             Self::V1_PENDING_TRANSACTIONS => {
-                if bytes.len() < Hash::SIZE + 2 {
-                    return Err(PacketError::PacketTooShort);
+                if n < 2 + Hash::SIZE {
+                    return Err(PacketDecodeError::TooShort {
+                        got: n,
+                        expected: 2 + Hash::SIZE
+                    });
                 }
 
                 let mut root_block = [0; Hash::SIZE];
 
                 root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
-                let mut bytes = Cursor::new(bytes[2 + Hash::SIZE..].to_vec());
-                let mut hash = [0; Hash::SIZE];
+                let bytes = &bytes[2 + Hash::SIZE..];
 
                 let mut transactions = Vec::new();
+                let mut hash = [0; Hash::SIZE];
 
-                while bytes.read_exact(&mut hash).is_ok() {
+                let n = bytes.len();
+                let mut i = 0;
+
+                while i < n {
+                    hash.copy_from_slice(&bytes[i..i + Hash::SIZE]);
+
                     transactions.push(Hash::from(hash));
+
+                    i += Hash::SIZE;
                 }
 
                 Ok(Self::PendingTransactions {
@@ -536,8 +598,11 @@ impl Packet {
             }
 
             Self::V1_ASK_PENDING_BLOCKS => {
-                if bytes.len() < Hash::SIZE + 2 {
-                    return Err(PacketError::PacketTooShort);
+                if n < 2 + Hash::SIZE {
+                    return Err(PacketDecodeError::TooShort {
+                        got: n,
+                        expected: 2 + Hash::SIZE
+                    });
                 }
 
                 let mut root_block = [0; Hash::SIZE];
@@ -550,34 +615,55 @@ impl Packet {
             },
 
             Self::V1_PENDING_BLOCKS => {
-                if bytes.len() < Hash::SIZE + 2 {
-                    return Err(PacketError::PacketTooShort);
+                if n < 2 + Hash::SIZE {
+                    return Err(PacketDecodeError::TooShort {
+                        got: n,
+                        expected: 2 + Hash::SIZE
+                    });
                 }
 
                 let mut root_block = [0; Hash::SIZE];
 
                 root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
-                let mut bytes = Cursor::new(bytes[2 + Hash::SIZE..].to_vec());
+                let mut bytes = &bytes[2 + Hash::SIZE..];
 
                 let mut hash = [0; Hash::SIZE];
                 let mut approval = [0; Signature::SIZE];
 
                 let mut blocks = Vec::new();
 
-                while bytes.read_exact(&mut hash).is_ok() {
-                    let len = bytes.read_usize_varint()?;
+                while bytes.len() > Hash::SIZE {
+                    hash.copy_from_slice(&bytes[..Hash::SIZE]);
 
-                    let mut approvals = Vec::with_capacity(len);
+                    let (Some(approvals_num), new_bytes) = varint::read_u64(&bytes[Hash::SIZE..]) else {
+                        return Err(PacketDecodeError::InvalidParam {
+                            packet_type: "PandingBlocks",
+                            param: "blocks[].hash"
+                        });
+                    };
 
-                    for _ in 0..len {
-                        bytes.read_exact(&mut approval)?;
+                    let approvals_num = approvals_num as usize;
+
+                    bytes = new_bytes;
+
+                    let mut approvals = Vec::with_capacity(approvals_num);
+
+                    for _ in 0..approvals_num {
+                        approval.copy_from_slice(
+                            &bytes[..Signature::SIZE]
+                        );
 
                         let Some(approval) = Signature::from_bytes(&approval) else {
-                            return Err(PacketError::InvalidSignature);
+                            return Err(PacketDecodeError::InvalidParam {
+                                packet_type: "PandingBlocks",
+                                param: "blocks[].approvals[].approval"
+                            });
                         };
 
                         approvals.push(approval);
+
+                        bytes = &bytes[Signature::SIZE..];
                     }
 
                     blocks.push((
@@ -593,8 +679,11 @@ impl Packet {
             }
 
             Self::V1_ASK_TRANSACTION => {
-                if bytes.len() < 2 + Hash::SIZE * 2 {
-                    return Err(PacketError::PacketTooShort);
+                if n < 2 + Hash::SIZE * 2 {
+                    return Err(PacketDecodeError::TooShort {
+                        got: n,
+                        expected: 2 + Hash::SIZE * 2
+                    });
                 }
 
                 let mut root_block = [0; Hash::SIZE];
@@ -610,8 +699,11 @@ impl Packet {
             }
 
             Self::V1_TRANSACTION => {
-                if bytes.len() < Hash::SIZE + 2 {
-                    return Err(PacketError::PacketTooShort);
+                if n < 2 + Hash::SIZE {
+                    return Err(PacketDecodeError::TooShort {
+                        got: n,
+                        expected: 2 + Hash::SIZE
+                    });
                 }
 
                 let mut root_block = [0; Hash::SIZE];
@@ -625,8 +717,11 @@ impl Packet {
             }
 
             Self::V1_ASK_BLOCK => {
-                if bytes.len() < 2 + Hash::SIZE * 2 {
-                    return Err(PacketError::PacketTooShort);
+                if n < 2 + Hash::SIZE * 2 {
+                    return Err(PacketDecodeError::TooShort {
+                        got: n,
+                        expected: 2 + Hash::SIZE * 2
+                    });
                 }
 
                 let mut root_block = [0; Hash::SIZE];
@@ -642,8 +737,11 @@ impl Packet {
             }
 
             Self::V1_BLOCK => {
-                if bytes.len() < 2 + Hash::SIZE {
-                    return Err(PacketError::PacketTooShort);
+                if n < 2 + Hash::SIZE {
+                    return Err(PacketDecodeError::TooShort {
+                        got: n,
+                        expected: 2 + Hash::SIZE
+                    });
                 }
 
                 let mut root_block = [0; Hash::SIZE];
@@ -657,8 +755,11 @@ impl Packet {
             }
 
             Self::V1_APPROVE_BLOCK => {
-                if bytes.len() < 2 + Hash::SIZE * 2 + Signature::SIZE {
-                    return Err(PacketError::PacketTooShort);
+                if n < 2 + Hash::SIZE * 2 + Signature::SIZE {
+                    return Err(PacketDecodeError::TooShort {
+                        got: n,
+                        expected: 2 + Hash::SIZE * 2 + Signature::SIZE
+                    });
                 }
 
                 let mut root_block = [0; Hash::SIZE];
@@ -670,7 +771,10 @@ impl Packet {
                 approval.copy_from_slice(&bytes[2 + Hash::SIZE * 2..]);
 
                 let Some(approval) = Signature::from_bytes(&approval) else {
-                    return Err(PacketError::InvalidSignature);
+                    return Err(PacketDecodeError::InvalidParam {
+                        packet_type: "ApproveBlock",
+                        param: "approval"
+                    });
                 };
 
                 Ok(Self::ApproveBlock {
@@ -680,7 +784,7 @@ impl Packet {
                 })
             }
 
-            packet_type => Err(PacketError::UnknownPacketType(packet_type))
+            packet_type => Err(PacketDecodeError::UnsupportedType(packet_type))
         }
     }
 }
@@ -693,7 +797,7 @@ impl AsRef<Packet> for Packet {
 }
 
 #[test]
-fn test_serialize() -> Result<(), PacketError> {
+fn test_serialize() -> Result<(), PacketDecodeError> {
     use rand_chacha::ChaCha8Rng;
     use rand_chacha::rand_core::SeedableRng;
 
@@ -711,7 +815,7 @@ fn test_serialize() -> Result<(), PacketError> {
             $(
                 let packet = $packet;
 
-                assert_eq!(Packet::from_bytes(packet.to_bytes()?)?, packet);
+                assert_eq!(Packet::from_bytes(packet.to_bytes())?, packet);
             )+
         };
     }
@@ -720,7 +824,7 @@ fn test_serialize() -> Result<(), PacketError> {
         Packet::Heartbeat,
 
         Packet::AskNodes {
-            max_nodes: u32::MAX
+            max_nodes: u64::MAX
         },
 
         Packet::Nodes {

@@ -87,6 +87,13 @@ impl From<[u8; 32]> for Hash {
     }
 }
 
+impl From<&'_ Hash> for Hash {
+    #[inline(always)]
+    fn from(value: &'_ Hash) -> Self {
+        *value
+    }
+}
+
 impl From<Hash> for [u8; 32] {
     #[inline(always)]
     fn from(value: Hash) -> Self {

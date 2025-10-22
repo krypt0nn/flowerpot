@@ -40,7 +40,7 @@ pub fn handle<S: Storage>(
     );
 
     // Verify the block and obtain its hash.
-    let (is_valid, hash, verifying_key) = match block.verify() {
+    let (is_valid, verifying_key) = match block.verify() {
         Ok(result) => result,
         Err(err) => {
             #[cfg(feature = "tracing")]
@@ -61,7 +61,7 @@ pub fn handle<S: Storage>(
         tracing::warn!(
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            hash = hash.to_base64(),
+            hash = block.current_hash().to_base64(),
             verifying_key = verifying_key.to_base64(),
             "received invalid block"
         );
@@ -71,7 +71,7 @@ pub fn handle<S: Storage>(
 
     // Check if we already have this block, and if we do - then merge approvals
     // because already stored block can have more than in what we received.
-    if let Some(curr_block) = state.handler.pending_blocks.read().get(&hash) {
+    if let Some(curr_block) = state.handler.pending_blocks.read().get(block.current_hash()) {
         for approval in curr_block.approvals() {
             if !block.approvals.contains(approval) {
                 block.approvals.push(approval.clone());
@@ -81,13 +81,13 @@ pub fn handle<S: Storage>(
 
     // Check this block using the provided filter.
     if let Some(filter) = &state.handler.options.blocks_filter
-        && !filter(&hash, &verifying_key, &block)
+        && !filter(block.current_hash(), &verifying_key, &block)
     {
         #[cfg(feature = "tracing")]
         tracing::debug!(
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            hash = hash.to_base64(),
+            hash = block.current_hash().to_base64(),
             verifying_key = verifying_key.to_base64(),
             "received block which was filtered out"
         );
@@ -97,7 +97,7 @@ pub fn handle<S: Storage>(
 
     // Check the block's approval status.
     let status = BlockStatus::validate(
-        hash,
+        block.current_hash(),
         verifying_key,
         block.approvals(),
         state.handler.validators.read().iter()
@@ -153,7 +153,7 @@ pub fn handle<S: Storage>(
                 // If this block is the potential new block for the blockchain
                 // then, if options allow it, we should store it in the pending
                 // blocks pool.
-                if last_block == block.previous() {
+                if last_block == block.previous_hash() {
                     #[cfg(feature = "tracing")]
                     tracing::info!(
                         local_id = base64::encode(state.stream.local_id()),
@@ -198,7 +198,7 @@ pub fn handle<S: Storage>(
             tracing::warn!(
                 local_id = base64::encode(state.stream.local_id()),
                 peer_id = base64::encode(state.stream.peer_id()),
-                hash = hash.to_base64(),
+                hash = block.current_hash().to_base64(),
                 "received invalid block"
             );
         }
@@ -210,7 +210,7 @@ pub fn handle<S: Storage>(
                 ?err,
                 local_id = base64::encode(state.stream.local_id()),
                 peer_id = base64::encode(state.stream.peer_id()),
-                hash = hash.to_base64(),
+                hash = block.current_hash().to_base64(),
                 "failed to validate received block"
             );
         }

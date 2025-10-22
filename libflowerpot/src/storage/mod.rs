@@ -68,7 +68,7 @@ pub trait Storage: Clone {
     /// default hash (zeros).
     fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error> {
         match self.read_block(hash)? {
-            Some(block) => Ok(Some(*block.previous())),
+            Some(block) => Ok(Some(*block.previous_hash())),
             None => Ok(None)
         }
     }
@@ -130,7 +130,7 @@ pub trait Storage: Clone {
                 && let BlockContent::Transactions(transactions) = block.content()
             {
                 for curr_transaction in transactions {
-                    if &curr_transaction.hash() == transaction {
+                    if curr_transaction.hash() == transaction {
                         return Ok(Some(*block_hash));
                     }
                 }
@@ -158,7 +158,7 @@ pub trait Storage: Clone {
 
         if let BlockContent::Transactions(transactions) = block.content() {
             return Ok(transactions.iter()
-                .find(|tr| &tr.hash() == transaction)
+                .find(|tr| tr.hash() == transaction)
                 .cloned());
         }
 
@@ -201,14 +201,14 @@ pub trait Storage: Clone {
             return Ok(None);
         };
 
-        let mut block = self.read_block(block.previous())?;
+        let mut block = self.read_block(block.previous_hash())?;
 
         while let Some(inner) = &block {
             if let BlockContent::Validators(validators) = inner.content() {
                 return Ok(Some(validators.to_vec()));
             }
 
-            block = self.read_block(inner.previous())?;
+            block = self.read_block(inner.previous_hash())?;
         }
 
         let Some(root_block) = self.root_block()? else {
@@ -219,7 +219,7 @@ pub trait Storage: Clone {
             return Ok(Some(vec![]));
         };
 
-        let Ok((_, _, public_key)) = root_block.verify() else {
+        let Ok((_, public_key)) = root_block.verify() else {
             return Ok(Some(vec![]));
         };
 
@@ -251,7 +251,7 @@ pub trait Storage: Clone {
                 return Ok(Some(validators.to_vec()));
             }
 
-            block = self.read_block(inner.previous())?;
+            block = self.read_block(inner.previous_hash())?;
         }
 
         let Some(root_block) = self.root_block()? else {
@@ -262,7 +262,7 @@ pub trait Storage: Clone {
             return Ok(Some(vec![]));
         };
 
-        let Ok((_, _, public_key)) = root_block.verify() else {
+        let Ok((_, public_key)) = root_block.verify() else {
             return Ok(Some(vec![]));
         };
 
@@ -417,23 +417,17 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     assert!(block_1.is_root());
 
-    let block_1_hash = block_1.hash().unwrap();
-
     let block_2 = Block::new(
         &signing_key,
-        block_1_hash,
+        block_1.current_hash(),
         BlockContent::data("Block 2".as_bytes())
     ).unwrap();
 
-    let block_2_hash = block_2.hash().unwrap();
-
     let block_3 = Block::new(
         &signing_key,
-        block_2_hash,
+        block_2.current_hash(),
         BlockContent::data("Block 3".as_bytes())
     ).unwrap();
-
-    let block_3_hash = block_3.hash().unwrap();
 
     // Prepare alternative test blocks.
 
@@ -447,23 +441,17 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     assert!(block_1_alt.is_root());
 
-    let block_1_alt_hash = block_1_alt.hash().unwrap();
-
     let block_2_alt = Block::new(
         &signing_key_alt,
-        block_1_hash,
+        block_1.current_hash(),
         BlockContent::data("Alternative block 2".as_bytes())
     ).unwrap();
 
-    let block_2_alt_hash = block_2_alt.hash().unwrap();
-
     let block_3_alt = Block::new(
         &signing_key_alt,
-        block_2_hash,
+        block_2.current_hash(),
         BlockContent::data("Alternative block 3".as_bytes())
     ).unwrap();
-
-    let block_3_alt_hash = block_3_alt.hash().unwrap();
 
     // 1. Out of order writing.
     //
@@ -475,13 +463,13 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     assert!(storage.tail_block()?.is_none());
 
     assert!(!storage.has_block(&Hash::default())?);
-    assert!(!storage.has_block(&block_2_hash)?);
+    assert!(!storage.has_block(block_1.current_hash())?);
 
     assert!(storage.next_block(&Hash::default())?.is_none());
-    assert!(storage.next_block(&block_2_hash)?.is_none());
+    assert!(storage.next_block(block_2.current_hash())?.is_none());
 
     assert!(storage.read_block(&Hash::default())?.is_none());
-    assert!(storage.read_block(&block_2_hash)?.is_none());
+    assert!(storage.read_block(block_2.current_hash())?.is_none());
 
     assert_eq!(storage.blocks().count(), 0);
 
@@ -493,23 +481,23 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     assert!(storage.write_block(&block_1)?);
     assert!(!storage.write_block(&block_3)?);
 
-    assert_eq!(storage.root_block()?, Some(block_1_hash));
-    assert_eq!(storage.tail_block()?, Some(block_1_hash));
+    assert_eq!(storage.root_block()?, Some(*block_1.current_hash()));
+    assert_eq!(storage.tail_block()?, Some(*block_1.current_hash()));
 
     assert!(!storage.has_block(&Hash::default())?);
-    assert!(storage.has_block(&block_1_hash)?);
-    assert!(!storage.has_block(&block_2_hash)?);
-    assert!(!storage.has_block(&block_3_hash)?);
+    assert!(storage.has_block(block_1.current_hash())?);
+    assert!(!storage.has_block(block_2.current_hash())?);
+    assert!(!storage.has_block(block_3.current_hash())?);
 
-    assert_eq!(storage.next_block(&Hash::default())?, Some(block_1_hash));
-    assert!(storage.next_block(&block_1_hash)?.is_none());
-    assert!(storage.next_block(&block_2_hash)?.is_none());
-    assert!(storage.next_block(&block_3_hash)?.is_none());
+    assert_eq!(storage.next_block(&Hash::default())?, Some(*block_1.current_hash()));
+    assert!(storage.next_block(block_1.current_hash())?.is_none());
+    assert!(storage.next_block(block_2.current_hash())?.is_none());
+    assert!(storage.next_block(block_3.current_hash())?.is_none());
 
     assert!(storage.read_block(&Hash::default())?.is_none());
-    assert_eq!(storage.read_block(&block_1_hash)?, Some(block_1.clone()));
-    assert!(storage.read_block(&block_2_hash)?.is_none());
-    assert!(storage.read_block(&block_3_hash)?.is_none());
+    assert_eq!(storage.read_block(block_1.current_hash())?, Some(block_1.clone()));
+    assert!(storage.read_block(block_2.current_hash())?.is_none());
+    assert!(storage.read_block(block_3.current_hash())?.is_none());
 
     assert_eq!(storage.blocks().count(), 1);
 
@@ -520,28 +508,28 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     assert!(storage.write_block(&block_2)?);
     assert!(storage.write_block(&block_3)?);
 
-    assert_eq!(storage.root_block()?, Some(block_1_hash));
-    assert_eq!(storage.tail_block()?, Some(block_3_hash));
+    assert_eq!(storage.root_block()?, Some(*block_1.current_hash()));
+    assert_eq!(storage.tail_block()?, Some(*block_3.current_hash()));
 
     assert!(!storage.has_block(&Hash::default())?);
-    assert!(storage.has_block(&block_1_hash)?);
-    assert!(storage.has_block(&block_2_hash)?);
-    assert!(storage.has_block(&block_3_hash)?);
+    assert!(storage.has_block(block_1.current_hash())?);
+    assert!(storage.has_block(block_2.current_hash())?);
+    assert!(storage.has_block(block_3.current_hash())?);
 
-    assert_eq!(storage.next_block(&Hash::default())?, Some(block_1_hash));
-    assert_eq!(storage.next_block(&block_1_hash)?, Some(block_2_hash));
-    assert_eq!(storage.next_block(&block_2_hash)?, Some(block_3_hash));
-    assert!(storage.next_block(&block_3_hash)?.is_none());
+    assert_eq!(storage.next_block(&Hash::default())?, Some(*block_1.current_hash()));
+    assert_eq!(storage.next_block(block_1.current_hash())?, Some(*block_2.current_hash()));
+    assert_eq!(storage.next_block(block_2.current_hash())?, Some(*block_3.current_hash()));
+    assert!(storage.next_block(block_3.current_hash())?.is_none());
 
     assert!(storage.prev_block(&Hash::default())?.is_none());
-    assert_eq!(storage.prev_block(&block_1_hash)?, Some(Hash::default()));
-    assert_eq!(storage.prev_block(&block_2_hash)?, Some(block_1_hash));
-    assert_eq!(storage.prev_block(&block_3_hash)?, Some(block_2_hash));
+    assert_eq!(storage.prev_block(block_1.current_hash())?, Some(Hash::default()));
+    assert_eq!(storage.prev_block(block_2.current_hash())?, Some(*block_1.current_hash()));
+    assert_eq!(storage.prev_block(block_3.current_hash())?, Some(*block_2.current_hash()));
 
     assert!(storage.read_block(&Hash::default())?.is_none());
-    assert_eq!(storage.read_block(&block_1_hash)?, Some(block_1.clone()));
-    assert_eq!(storage.read_block(&block_2_hash)?, Some(block_2.clone()));
-    assert_eq!(storage.read_block(&block_3_hash)?, Some(block_3.clone()));
+    assert_eq!(storage.read_block(block_1.current_hash())?, Some(block_1.clone()));
+    assert_eq!(storage.read_block(block_2.current_hash())?, Some(block_2.clone()));
+    assert_eq!(storage.read_block(block_3.current_hash())?, Some(block_3.clone()));
 
     assert_eq!(storage.blocks().count(), 3);
 
@@ -557,26 +545,26 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     assert!(storage.write_block(&block_3_alt)?);
 
-    assert_eq!(storage.root_block()?, Some(block_1_hash));
-    assert_eq!(storage.tail_block()?, Some(block_3_alt_hash));
+    assert_eq!(storage.root_block()?, Some(*block_1.current_hash()));
+    assert_eq!(storage.tail_block()?, Some(*block_3_alt.current_hash()));
 
     assert!(!storage.has_block(&Hash::default())?);
-    assert!(storage.has_block(&block_1_hash)?);
-    assert!(storage.has_block(&block_2_hash)?);
-    assert!(!storage.has_block(&block_3_hash)?);
-    assert!(storage.has_block(&block_3_alt_hash)?);
+    assert!(storage.has_block(block_1.current_hash())?);
+    assert!(storage.has_block(block_2.current_hash())?);
+    assert!(!storage.has_block(block_3.current_hash())?);
+    assert!(storage.has_block(block_3_alt.current_hash())?);
 
-    assert_eq!(storage.next_block(&Hash::default())?, Some(block_1_hash));
-    assert_eq!(storage.next_block(&block_1_hash)?, Some(block_2_hash));
-    assert_eq!(storage.next_block(&block_2_hash)?, Some(block_3_alt_hash));
-    assert!(storage.next_block(&block_3_hash)?.is_none());
-    assert!(storage.next_block(&block_3_alt_hash)?.is_none());
+    assert_eq!(storage.next_block(&Hash::default())?, Some(*block_1.current_hash()));
+    assert_eq!(storage.next_block(block_1.current_hash())?, Some(*block_2.current_hash()));
+    assert_eq!(storage.next_block(block_2.current_hash())?, Some(*block_3_alt.current_hash()));
+    assert!(storage.next_block(block_3.current_hash())?.is_none());
+    assert!(storage.next_block(block_3_alt.current_hash())?.is_none());
 
     assert!(storage.read_block(&Hash::default())?.is_none());
-    assert_eq!(storage.read_block(&block_1_hash)?, Some(block_1.clone()));
-    assert_eq!(storage.read_block(&block_2_hash)?, Some(block_2.clone()));
-    assert!(storage.read_block(&block_3_hash)?.is_none());
-    assert_eq!(storage.read_block(&block_3_alt_hash)?, Some(block_3_alt.clone()));
+    assert_eq!(storage.read_block(block_1.current_hash())?, Some(block_1.clone()));
+    assert_eq!(storage.read_block(block_2.current_hash())?, Some(block_2.clone()));
+    assert!(storage.read_block(block_3.current_hash())?.is_none());
+    assert_eq!(storage.read_block(block_3_alt.current_hash())?, Some(block_3_alt.clone()));
 
     assert_eq!(storage.blocks().count(), 3);
 
@@ -588,32 +576,32 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     assert!(storage.write_block(&block_2_alt)?);
 
-    assert_eq!(storage.root_block()?, Some(block_1_hash));
-    assert_eq!(storage.tail_block()?, Some(block_2_alt_hash));
+    assert_eq!(storage.root_block()?, Some(*block_1.current_hash()));
+    assert_eq!(storage.tail_block()?, Some(*block_2_alt.current_hash()));
 
     assert!(!storage.has_block(&Hash::default())?);
-    assert!(storage.has_block(&block_1_hash)?);
-    assert!(!storage.has_block(&block_2_hash)?);
-    assert!(storage.has_block(&block_2_alt_hash)?);
-    assert!(!storage.has_block(&block_3_hash)?);
-    assert!(!storage.has_block(&block_3_alt_hash)?);
+    assert!(storage.has_block(block_1.current_hash())?);
+    assert!(!storage.has_block(block_2.current_hash())?);
+    assert!(storage.has_block(block_2_alt.current_hash())?);
+    assert!(!storage.has_block(block_3.current_hash())?);
+    assert!(!storage.has_block(block_3_alt.current_hash())?);
 
-    assert_eq!(storage.next_block(&Hash::default())?, Some(block_1_hash));
-    assert_eq!(storage.next_block(&block_1_hash)?, Some(block_2_alt_hash));
+    assert_eq!(storage.next_block(&Hash::default())?, Some(*block_1.current_hash()));
+    assert_eq!(storage.next_block(block_1.current_hash())?, Some(*block_2_alt.current_hash()));
 
-    assert!(storage.next_block(&block_2_hash)?.is_none());
-    assert!(storage.next_block(&block_2_alt_hash)?.is_none());
-    assert!(storage.next_block(&block_3_hash)?.is_none());
-    assert!(storage.next_block(&block_3_alt_hash)?.is_none());
+    assert!(storage.next_block(block_2.current_hash())?.is_none());
+    assert!(storage.next_block(block_2_alt.current_hash())?.is_none());
+    assert!(storage.next_block(block_3.current_hash())?.is_none());
+    assert!(storage.next_block(block_3_alt.current_hash())?.is_none());
 
     assert!(storage.read_block(&Hash::default())?.is_none());
-    assert_eq!(storage.read_block(&block_1_hash)?, Some(block_1.clone()));
+    assert_eq!(storage.read_block(block_1.current_hash())?, Some(block_1.clone()));
 
-    assert!(storage.read_block(&block_2_hash)?.is_none());
-    assert_eq!(storage.read_block(&block_2_alt_hash)?, Some(block_2_alt.clone()));
+    assert!(storage.read_block(block_2.current_hash())?.is_none());
+    assert_eq!(storage.read_block(block_2_alt.current_hash())?, Some(block_2_alt.clone()));
 
-    assert!(storage.read_block(&block_3_hash)?.is_none());
-    assert!(storage.read_block(&block_3_alt_hash)?.is_none());
+    assert!(storage.read_block(block_3.current_hash())?.is_none());
+    assert!(storage.read_block(block_3_alt.current_hash())?.is_none());
 
     assert_eq!(storage.blocks().count(), 2);
 
@@ -626,36 +614,36 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     assert!(storage.write_block(&block_1_alt)?);
 
-    assert_eq!(storage.root_block()?, Some(block_1_alt_hash));
-    assert_eq!(storage.tail_block()?, Some(block_1_alt_hash));
+    assert_eq!(storage.root_block()?, Some(*block_1_alt.current_hash()));
+    assert_eq!(storage.tail_block()?, Some(*block_1_alt.current_hash()));
 
     assert!(!storage.has_block(&Hash::default())?);
-    assert!(!storage.has_block(&block_1_hash)?);
-    assert!(storage.has_block(&block_1_alt_hash)?);
-    assert!(!storage.has_block(&block_2_hash)?);
-    assert!(!storage.has_block(&block_2_alt_hash)?);
-    assert!(!storage.has_block(&block_3_hash)?);
-    assert!(!storage.has_block(&block_3_alt_hash)?);
+    assert!(!storage.has_block(block_1.current_hash())?);
+    assert!(storage.has_block(block_1_alt.current_hash())?);
+    assert!(!storage.has_block(block_2.current_hash())?);
+    assert!(!storage.has_block(block_2_alt.current_hash())?);
+    assert!(!storage.has_block(block_3.current_hash())?);
+    assert!(!storage.has_block(block_3_alt.current_hash())?);
 
-    assert_eq!(storage.next_block(&Hash::default())?, Some(block_1_alt_hash));
+    assert_eq!(storage.next_block(&Hash::default())?, Some(*block_1_alt.current_hash()));
 
-    assert!(storage.next_block(&block_1_hash)?.is_none());
-    assert!(storage.next_block(&block_1_alt_hash)?.is_none());
-    assert!(storage.next_block(&block_2_hash)?.is_none());
-    assert!(storage.next_block(&block_2_alt_hash)?.is_none());
-    assert!(storage.next_block(&block_3_hash)?.is_none());
-    assert!(storage.next_block(&block_3_alt_hash)?.is_none());
+    assert!(storage.next_block(block_1.current_hash())?.is_none());
+    assert!(storage.next_block(block_1_alt.current_hash())?.is_none());
+    assert!(storage.next_block(block_2.current_hash())?.is_none());
+    assert!(storage.next_block(block_2_alt.current_hash())?.is_none());
+    assert!(storage.next_block(block_3.current_hash())?.is_none());
+    assert!(storage.next_block(block_3_alt.current_hash())?.is_none());
 
     assert!(storage.read_block(&Hash::default())?.is_none());
 
-    assert!(storage.read_block(&block_1_hash)?.is_none());
-    assert_eq!(storage.read_block(&block_1_alt_hash)?, Some(block_1_alt.clone()));
+    assert!(storage.read_block(block_1.current_hash())?.is_none());
+    assert_eq!(storage.read_block(block_1_alt.current_hash())?, Some(block_1_alt.clone()));
 
-    assert!(storage.read_block(&block_2_hash)?.is_none());
-    assert!(storage.read_block(&block_2_alt_hash)?.is_none());
+    assert!(storage.read_block(block_2.current_hash())?.is_none());
+    assert!(storage.read_block(block_2_alt.current_hash())?.is_none());
 
-    assert!(storage.read_block(&block_3_hash)?.is_none());
-    assert!(storage.read_block(&block_3_alt_hash)?.is_none());
+    assert!(storage.read_block(block_3.current_hash())?.is_none());
+    assert!(storage.read_block(block_3_alt.current_hash())?.is_none());
 
     assert_eq!(storage.blocks().count(), 1);
 
@@ -672,22 +660,18 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     let block_2_alt = Block::new(
         &signing_key_alt,
-        block_1_alt_hash,
+        block_1_alt.current_hash(),
         BlockContent::validators([validator_1.verifying_key()])
     ).unwrap();
 
-    let block_2_alt_hash = block_2_alt.hash().unwrap();
-
     let block_3_alt = Block::new(
         &validator_1,
-        block_2_alt_hash,
+        block_2_alt.current_hash(),
         BlockContent::validators([
             validator_2.verifying_key(),
             validator_3.verifying_key()
         ])
     ).unwrap();
-
-    let block_3_alt_hash = block_3_alt.hash().unwrap();
 
     // 7. Validator blocks.
 
@@ -696,34 +680,34 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     // Block 1 (root)
     assert_eq!(
-        storage.get_validators_before_block(&block_1_alt_hash)?,
+        storage.get_validators_before_block(block_1_alt.current_hash())?,
         Some(vec![signing_key_alt.verifying_key()])
     );
 
     assert_eq!(
-        storage.get_validators_after_block(&block_1_alt_hash)?,
+        storage.get_validators_after_block(block_1_alt.current_hash())?,
         Some(vec![signing_key_alt.verifying_key()])
     );
 
     // Block 2 (root -> validator 1)
     assert_eq!(
-        storage.get_validators_before_block(&block_2_alt_hash)?,
+        storage.get_validators_before_block(block_2_alt.current_hash())?,
         Some(vec![signing_key_alt.verifying_key()])
     );
 
     assert_eq!(
-        storage.get_validators_after_block(&block_2_alt_hash)?,
+        storage.get_validators_after_block(block_2_alt.current_hash())?,
         Some(vec![validator_1.verifying_key()])
     );
 
     // Block 3 (validator 1 -> validators 2 and 3)
     assert_eq!(
-        storage.get_validators_before_block(&block_3_alt_hash)?,
+        storage.get_validators_before_block(block_3_alt.current_hash())?,
         Some(vec![validator_1.verifying_key()])
     );
 
     assert_eq!(
-        storage.get_validators_after_block(&block_3_alt_hash)?,
+        storage.get_validators_after_block(block_3_alt.current_hash())?,
         Some(vec![
             validator_2.verifying_key(),
             validator_3.verifying_key()
@@ -757,29 +741,22 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
         &validator_3, b"Test duplicate 2".to_vec()
     ).unwrap(); // duplicate
 
-    let transaction_1_hash = transaction_1.hash();
-    let transaction_2_hash = transaction_2.hash();
-    let transaction_3_hash = transaction_3.hash();
-    let transaction_4_hash = transaction_4.hash();
-
     // Block with two duplicate transactions.
     let mut block_4 = Block::new(
         &validator_1,
-        block_3_alt_hash,
+        block_3_alt.current_hash(),
         BlockContent::transactions([
-            transaction_1,
-            transaction_2
+            transaction_1.clone(),
+            transaction_2.clone()
         ])
     ).unwrap();
 
     block_4.approve_with(&validator_3).unwrap();
 
-    let block_4_hash = block_4.hash().unwrap();
-
     // Block with one non-existing transaction.
     let mut block_5 = Block::new(
         &validator_1,
-        block_3_alt_hash,
+        block_3_alt.current_hash(),
         BlockContent::transactions([
             transaction_3.clone()
         ])
@@ -787,20 +764,16 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     block_5.approve_with(&validator_3).unwrap();
 
-    let block_5_hash = block_5.hash().unwrap();
-
     // Block with already existing transaction.
     let mut block_6 = Block::new(
         &validator_1,
-        block_5_hash,
+        block_5.current_hash(),
         BlockContent::transactions([
-            transaction_4
+            transaction_4.clone()
         ])
     ).unwrap();
 
     block_6.approve_with(&validator_3).unwrap();
-
-    let block_6_hash = block_6.hash().unwrap();
 
     // 8. Test transaction blocks.
     //
@@ -808,25 +781,25 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     // Block 5 must be accepted.
     // Block 6 must be rejected because it has the same transaction as block 5.
 
-    assert_eq!(transaction_1_hash, transaction_2_hash);
-    assert_eq!(transaction_3_hash, transaction_4_hash);
+    assert_eq!(transaction_1.hash(), transaction_2.hash());
+    assert_eq!(transaction_3.hash(), transaction_4.hash());
 
     assert!(!storage.write_block(&block_4)?);
     assert!(storage.write_block(&block_5)?);
     assert!(!storage.write_block(&block_6)?);
 
-    assert!(!storage.has_block(&block_4_hash)?);
-    assert!(storage.has_block(&block_5_hash)?);
-    assert!(!storage.has_block(&block_6_hash)?);
+    assert!(!storage.has_block(block_4.current_hash())?);
+    assert!(storage.has_block(block_5.current_hash())?);
+    assert!(!storage.has_block(block_6.current_hash())?);
 
-    assert!(!storage.has_transaction(&transaction_1_hash)?);
-    assert!(storage.has_transaction(&transaction_3_hash)?);
+    assert!(!storage.has_transaction(transaction_1.hash())?);
+    assert!(storage.has_transaction(transaction_3.hash())?);
 
-    assert!(storage.find_transaction(&transaction_1_hash)?.is_none());
-    assert_eq!(storage.find_transaction(&transaction_3_hash)?, Some(block_5_hash));
+    assert!(storage.find_transaction(transaction_1.hash())?.is_none());
+    assert_eq!(storage.find_transaction(transaction_3.hash())?, Some(*block_5.current_hash()));
 
-    assert!(storage.read_transaction(&transaction_1_hash)?.is_none());
-    assert_eq!(storage.read_transaction(&transaction_3_hash)?, Some(transaction_3));
+    assert!(storage.read_transaction(transaction_1.hash())?.is_none());
+    assert_eq!(storage.read_transaction(transaction_3.hash())?, Some(transaction_3));
 
     Ok(())
 }

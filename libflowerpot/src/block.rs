@@ -16,25 +16,62 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::io::{Read, Cursor};
-
 use time::UtcDateTime;
-use varint_rs::{VarintReader, VarintWriter};
 
-use crate::crypto::hash::*;
-use crate::crypto::sign::*;
-use crate::transaction::*;
+use crate::varint;
+use crate::crypto::hash::{Hash, Hasher};
+use crate::crypto::sign::{SigningKey, VerifyingKey, Signature, SignatureError};
+use crate::transaction::{Transaction, TransactionDecodeError};
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("failed to serialize block to bytes: {0}")]
-    Serialize(#[source] std::io::Error),
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+pub enum BlockDecodeError {
+    #[error("block header is too short: {got} bytes got, at least {expected} expected")]
+    TooShort {
+        got: usize,
+        expected: usize
+    },
 
-    #[error("failed to sign new block: {0}")]
-    Sign(#[source] k256::ecdsa::Error),
+    #[error("unsupported block format: {0:0X}")]
+    UnsupportedFormat(u8),
 
-    #[error("failed to verify the block's signature: {0}")]
-    Verify(#[source] k256::ecdsa::Error)
+    #[error("invalid block creation timestamp format")]
+    InvalidTimestamp,
+
+    #[error("invalid block signature format")]
+    InvalidSignature,
+
+    #[error("invalid block approvals number format")]
+    InvalidApprovalsNumber,
+
+    #[error("invalid format of a block approval with index {0}")]
+    InvalidApproval(usize),
+
+    #[error("failed to decode block' content: {0}")]
+    DecodeContent(#[from] BlockContentDecodeError)
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+pub enum BlockContentDecodeError {
+    #[error("block content is too short: {got} bytes got, at least {expected} expected")]
+    TooShort {
+        got: usize,
+        expected: usize
+    },
+
+    #[error("unsupported block content format: {0:0X}")]
+    UnsupportedFormat(u8),
+
+    #[error("invalid transaction len format in the transactions block's content")]
+    TransactionsInvalidTransactionLen,
+
+    #[error("failed to decode transaction from the transactions block's content: {0}")]
+    DecodeTransaction(#[from] TransactionDecodeError),
+
+    #[error("invalid content size of the validators block")]
+    ValidatorsInvalidSize,
+
+    #[error("invalid verifying key format in the validators block's content")]
+    ValidatorsInvalidVerifyingKey
 }
 
 /// Block validation status.
@@ -84,7 +121,7 @@ impl BlockStatus {
         verifying_key: impl Into<VerifyingKey>,
         approvals: impl IntoIterator<Item = &'a Signature>,
         validators: impl AsRef<[VerifyingKey]>
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, SignatureError> {
         let block_hash: Hash = block_hash.into();
         let verifying_key: VerifyingKey = verifying_key.into();
 
@@ -100,8 +137,7 @@ impl BlockStatus {
 
         for approval in approvals {
             // Verify that approval is correct.
-            let (valid, approval_public_key) = approval.verify(block_hash)
-                .map_err(Error::Verify)?;
+            let (valid, approval_public_key) = approval.verify(block_hash)?;
 
             // Reject invalid approval, approvals from non-validators and
             // self-approvals from the block's author.
@@ -138,23 +174,23 @@ impl BlockStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
-    pub(crate) previous: Hash,
+    pub(crate) previous_hash: Hash,
+    pub(crate) current_hash: Hash,
     pub(crate) timestamp: UtcDateTime,
     pub(crate) content: BlockContent,
     pub(crate) sign: Signature,
-    pub(crate) approvals: Vec<Signature>,
-    pub(crate) precomputed_hash: Option<Hash>
+    pub(crate) approvals: Vec<Signature>
 }
 
 impl Block {
     /// Create new block from provided previous block's hash and content using
     /// validator's signing key.
     pub fn new(
-        validator: impl AsRef<SigningKey>,
-        previous: impl Into<Hash>,
+        signing_key: impl AsRef<SigningKey>,
+        previous_hash: impl Into<Hash>,
         content: impl Into<BlockContent>
-    ) -> Result<Self, Error> {
-        let previous: Hash = previous.into();
+    ) -> Result<Self, SignatureError> {
+        let previous_hash: Hash = previous_hash.into();
         let content: BlockContent = content.into();
 
         let timestamp = UtcDateTime::now()
@@ -163,83 +199,76 @@ impl Block {
 
         let mut hasher = Hasher::new();
 
-        hasher.update(previous.as_bytes());
+        hasher.update(previous_hash.as_bytes());
         hasher.update(timestamp.unix_timestamp().to_le_bytes());
-        hasher.update(content.to_bytes().map_err(Error::Serialize)?);
+        hasher.update(content.to_bytes());
 
-        let sign = Signature::create(validator, hasher.finalize())
-            .map_err(Error::Sign)?;
+        let current_hash = hasher.finalize();
+
+        let sign = Signature::create(signing_key, current_hash)?;
 
         Ok(Self {
-            previous,
+            previous_hash,
+            current_hash,
             timestamp,
             content,
             sign,
-            approvals: vec![],
-            precomputed_hash: None
+            approvals: vec![]
         })
     }
 
+    /// Hash of the previous block.
     #[inline(always)]
-    pub const fn previous(&self) -> &Hash {
-        &self.previous
+    pub const fn previous_hash(&self) -> &Hash {
+        &self.previous_hash
     }
 
+    /// Hash of the current block.
+    ///
+    /// This value is pre-calculated for performance reasons and is stored in
+    /// the struct, so no computations are performed.
+    #[inline(always)]
+    pub const fn current_hash(&self) -> &Hash {
+        &self.current_hash
+    }
+
+    /// Current block creation timestamp (up to seconds precision).
     #[inline(always)]
     pub const fn timestamp(&self) -> &UtcDateTime {
         &self.timestamp
     }
 
+    /// Content of the current block.
     #[inline(always)]
     pub const fn content(&self) -> &BlockContent {
         &self.content
     }
 
+    /// Signature of the current block.
     #[inline(always)]
     pub const fn sign(&self) -> &Signature {
         &self.sign
     }
 
     #[inline(always)]
-    pub fn approvals(&self) -> &[Signature] {
+    pub const fn approvals(&self) -> &Vec<Signature> {
         &self.approvals
     }
 
     /// Return `true` if the current block is root of the blockchain.
     #[inline]
     pub fn is_root(&self) -> bool {
-        self.previous == Hash::default()
-    }
-
-    /// Calculate hash of the current block.
-    pub fn hash(&self) -> Result<Hash, Error> {
-        if let Some(hash) = self.precomputed_hash {
-            return Ok(hash);
-        }
-
-        let mut hasher = Hasher::new();
-
-        hasher.update(self.previous.as_bytes());
-        hasher.update(self.timestamp.unix_timestamp().to_le_bytes());
-        hasher.update(self.content.to_bytes().map_err(Error::Serialize)?);
-
-        Ok(hasher.finalize())
+        self.previous_hash == Hash::default()
     }
 
     /// Add approval signature to the block.
     ///
     /// Return `Ok(false)` if signature is not valid.
-    pub fn approve(&mut self, approval: Signature) -> Result<bool, Error> {
+    pub fn approve(&mut self, approval: Signature) -> Result<bool, SignatureError> {
         if !self.approvals.contains(&approval) {
-            let hash = self.hash()?;
+            let (is_valid, verifying_key) = approval.verify(self.current_hash())?;
 
-            self.precomputed_hash = Some(hash);
-
-            let (is_valid, verifying_key) = approval.verify(hash)
-                .map_err(Error::Verify)?;
-
-            let (_, curr_verifying_key) = self.sign.verify(hash)
-                .map_err(Error::Verify)?;
+            let (_, curr_verifying_key) = self.sign.verify(self.current_hash())?;
 
             if !is_valid || verifying_key == curr_verifying_key {
                 return Ok(false);
@@ -258,20 +287,16 @@ impl Block {
     pub fn approve_with(
         &mut self,
         signing_key: impl AsRef<SigningKey>
-    ) -> Result<bool, Error> {
-        let hash = self.hash()?;
-
-        self.precomputed_hash = Some(hash);
-
-        let approval = Signature::create(signing_key.as_ref(), hash)
-            .map_err(Error::Sign)?;
+    ) -> Result<bool, SignatureError> {
+        let approval = Signature::create(
+            signing_key.as_ref(),
+            self.current_hash()
+        )?;
 
         if !self.approvals.contains(&approval) {
-            let (is_valid, verifying_key) = approval.verify(hash)
-                .map_err(Error::Verify)?;
+            let (is_valid, verifying_key) = approval.verify(self.current_hash())?;
 
-            let (_, curr_verifying_key) = self.sign.verify(hash)
-                .map_err(Error::Verify)?;
+            let (_, curr_verifying_key) = self.sign.verify(self.current_hash())?;
 
             if !is_valid || verifying_key == curr_verifying_key {
                 return Ok(false);
@@ -287,12 +312,11 @@ impl Block {
     ///
     /// This method *does not* validate the block's approvals. This must be done
     /// outside of this method using the blockchain's storage.
-    pub fn verify(&self) -> Result<(bool, Hash, VerifyingKey), Error> {
-        let hash = self.hash()?;
-
-        self.sign.verify(hash)
-            .map(|(valid, public_key)| (valid, hash, public_key))
-            .map_err(Error::Verify)
+    #[inline]
+    pub fn verify(
+        &self
+    ) -> Result<(bool, VerifyingKey), SignatureError> {
+        self.sign.verify(self.current_hash())
     }
 
     /// Use provided validators list to verify that the block is approved.
@@ -302,101 +326,156 @@ impl Block {
     pub fn validate(
         &self,
         validators: &[VerifyingKey]
-    ) -> Result<BlockStatus, Error> {
-        // Verify the block and obtain its hash and signer.
-        let (valid, hash, public_key) = self.verify()?;
+    ) -> Result<BlockStatus, SignatureError> {
+        // Verify the block and obtain its signer.
+        let (is_valid, public_key) = self.verify()?;
 
         // Immediately reject the block if it's not valid or its signer is not
         // a validator.
-        if !valid || !validators.contains(&public_key) {
+        if !is_valid || !validators.contains(&public_key) {
             return Ok(BlockStatus::Invalid);
         }
 
         BlockStatus::validate(
-            hash,
+            self.current_hash,
             public_key,
             self.approvals(),
             validators
         )
     }
 
-    /// Encode block into bytes representation.
-    pub fn to_bytes(&self) -> std::io::Result<Box<[u8]>> {
-        let content = self.content.to_bytes()?;
+    /// Encode block into a binary representation.
+    pub fn to_bytes(&self) -> Box<[u8]> {
+        let content = self.content.to_bytes();
         let timestamp = self.timestamp.unix_timestamp();
 
-        let mut block = Vec::new();
+        let mut block = Vec::with_capacity(
+            1 + Hash::SIZE + Signature::SIZE + content.len()
+        );
 
-        block.push(0);                                   // Format version
-        block.extend(self.previous.0);                   // Previous block's hash
-        block.write_i64_varint(timestamp)?;              // Creation timestamp
-        block.extend(self.sign.to_bytes());              // Sign
-        block.write_usize_varint(self.approvals.len())?; // Approvals number
+        // Format version
+        block.push(0);
+
+        // Previous block's hash
+        block.extend(self.previous_hash.as_bytes());
+
+        // Creation timestamp
+        block.extend(varint::write_u64(timestamp as u64));
+
+        // Sign
+        block.extend(self.sign.to_bytes());
+
+        // Approvals number
+        block.extend(varint::write_u64(self.approvals.len() as u64));
 
         for approval in &self.approvals {
-            block.extend(approval.to_bytes()); // Approval signatures
+            // Approval signatures
+            block.extend(approval.to_bytes());
         }
 
-        block.extend(content); // Content
+        // Block's content
+        block.extend(content);
 
-        Ok(block.into_boxed_slice())
+        block.into_boxed_slice()
     }
 
-    /// Decode block from bytes representation.
-    pub fn from_bytes(block: impl AsRef<[u8]>) -> std::io::Result<Self> {
+    /// Decode block from a binary representation.
+    pub fn from_bytes(
+        block: impl AsRef<[u8]>
+    ) -> Result<Self, BlockDecodeError> {
         let block = block.as_ref();
+        let n = block.len();
 
-        if block.len() < Hash::SIZE + Signature::SIZE + 3 {
-            return Err(std::io::Error::other("block is too short"));
+        if n < Hash::SIZE + Signature::SIZE + 3 {
+            return Err(BlockDecodeError::TooShort {
+                got: n,
+                expected: Hash::SIZE + Signature::SIZE + 3
+            });
         }
 
+        // Read block format.
         if block[0] != 0 {
-            return Err(std::io::Error::other("unknown block format"));
+            return Err(BlockDecodeError::UnsupportedFormat(block[0]));
         }
 
-        let mut previous = [0; 32];
+        let mut hasher = Hasher::new();
 
-        previous.copy_from_slice(&block[1..33]);
+        // Read previous block's hash.
+        let mut previous_hash = [0; 32];
 
-        let mut block = Cursor::new(block[33..].to_vec());
+        previous_hash.copy_from_slice(&block[1..33]);
 
-        let timestamp = block.read_i64_varint()?;
+        hasher.update(previous_hash);
 
-        let timestamp = UtcDateTime::from_unix_timestamp(timestamp)
-            .map_err(|_| std::io::Error::other("invalid timestamp"))?;
+        // Read block creation timestamp.
+        let block = &block[33..];
 
+        let (Some(timestamp), block) = varint::read_u64(block) else {
+            return Err(BlockDecodeError::InvalidTimestamp);
+        };
+
+        hasher.update((timestamp as i64).to_le_bytes());
+
+        let timestamp = UtcDateTime::from_unix_timestamp(timestamp as i64)
+            .map_err(|_| BlockDecodeError::InvalidTimestamp)?;
+
+        // Read the block's signature.
         let mut sign = [0; Signature::SIZE];
 
-        block.read_exact(&mut sign)?;
+        sign.copy_from_slice(&block[..Signature::SIZE]);
+
+        let block = &block[Signature::SIZE..];
 
         let sign = Signature::from_bytes(&sign)
-            .ok_or_else(|| std::io::Error::other("invalid signature"))?;
+            .ok_or(BlockDecodeError::InvalidSignature)?;
 
-        let approvals_num = block.read_usize_varint()?;
+        // Decode block approvals number.
 
-        let mut approval = [0; 65];
+        let (Some(approvals_num), block) = varint::read_u64(block) else {
+            return Err(BlockDecodeError::InvalidApprovalsNumber);
+        };
+
+        let approvals_num = approvals_num as usize;
+
+        // Check that all these approvals are presented.
+
+        // TODO: some better calculation instead of plain `3` assumption for varints.
+        if n < Hash::SIZE + Signature::SIZE + 3 + approvals_num * Signature::SIZE {
+            return Err(BlockDecodeError::TooShort {
+                got: n,
+                expected: Hash::SIZE + Signature::SIZE + 3 + approvals_num * Signature::SIZE
+            });
+        }
+
+        // Decode block approvals.
+
+        let mut approval = [0; Signature::SIZE];
         let mut approvals = Vec::with_capacity(approvals_num);
 
-        for _ in 0..approvals_num {
-            block.read_exact(&mut approval)?;
+        for i in 0..approvals_num {
+            approval.copy_from_slice(
+                &block[i * Signature::SIZE..(i + 1) * Signature::SIZE]
+            );
 
             let approval = Signature::from_bytes(&approval)
-                .ok_or_else(|| std::io::Error::other("invalid approval"))?;
+                .ok_or(BlockDecodeError::InvalidApproval(i))?;
 
             approvals.push(approval);
         }
 
-        let mut content = Vec::new();
+        // Decode block content.
 
-        block.read_to_end(&mut content)?;
+        let content = &block[approvals_num * Signature::SIZE..];
+
+        hasher.update(content);
 
         Ok(Self {
-            previous: Hash::from(previous),
+            previous_hash: Hash::from(previous_hash),
+            current_hash: hasher.finalize(),
             timestamp,
             content: BlockContent::from_bytes(content)?,
             sign,
-            approvals,
-            precomputed_hash: None
+            approvals
         })
     }
 }
@@ -439,7 +518,7 @@ impl BlockContent {
     }
 
     /// Encode block's content into bytes representation.
-    pub fn to_bytes(&self) -> std::io::Result<Box<[u8]>> {
+    pub fn to_bytes(&self) -> Box<[u8]> {
         let mut content = Vec::new();
 
         match self {
@@ -454,7 +533,7 @@ impl BlockContent {
                 for transaction in transactions {
                     let transaction = transaction.to_bytes();
 
-                    content.write_usize_varint(transaction.len())?;
+                    content.extend(varint::write_u64(transaction.len() as u64));
                     content.extend(transaction);
                 }
             }
@@ -468,16 +547,21 @@ impl BlockContent {
             }
         }
 
-        Ok(content.into_boxed_slice())
+        content.into_boxed_slice()
     }
 
     /// Decode block's content from bytes representation.
-    pub fn from_bytes(content: impl AsRef<[u8]>) -> std::io::Result<Self> {
+    pub fn from_bytes(
+        content: impl AsRef<[u8]>
+    ) -> Result<Self, BlockContentDecodeError> {
         let content = content.as_ref();
         let n = content.len();
 
         if n == 0 {
-            return Err(std::io::Error::other("block content cannot be empty"));
+            return Err(BlockContentDecodeError::TooShort {
+                got: n,
+                expected: 1
+            });
         }
 
         match content[0] {
@@ -495,17 +579,31 @@ impl BlockContent {
                     return Ok(Self::Transactions(Box::new([])));
                 }
 
-                let mut content = Cursor::new(content[1..].to_vec());
+                let mut content = &content[1..];
+
                 let mut transactions = Vec::new();
 
-                while content.position() < n as u64 {
-                    let len = content.read_usize_varint()?;
+                while !content.is_empty() {
+                    let (Some(transaction_len), new_content) = varint::read_u64(content) else {
+                        return Err(BlockContentDecodeError::TransactionsInvalidTransactionLen);
+                    };
 
-                    let mut transaction = vec![0; len];
+                    let transaction_len = transaction_len as usize;
 
-                    content.read_exact(&mut transaction[..len])?;
+                    content = new_content;
 
-                    let transaction = Transaction::from_bytes(transaction)?;
+                    if content.len() < transaction_len {
+                        return Err(BlockContentDecodeError::TooShort {
+                            got: content.len(),
+                            expected: transaction_len
+                        });
+                    }
+
+                    let transaction = Transaction::from_bytes(
+                        &content[..transaction_len]
+                    )?;
+
+                    content = &content[transaction_len..];
 
                     transactions.push(transaction);
                 }
@@ -515,7 +613,7 @@ impl BlockContent {
 
             Self::V1_VALIDATORS_BLOCK => {
                 if (n - 1) % 33 != 0 {
-                    return Err(std::io::Error::other("invalid validators block format"));
+                    return Err(BlockContentDecodeError::ValidatorsInvalidSize);
                 }
 
                 let mut validators = Vec::with_capacity((n - 1) / 33);
@@ -527,7 +625,7 @@ impl BlockContent {
                     validator.copy_from_slice(&content[i..i + VerifyingKey::SIZE]);
 
                     let validator = VerifyingKey::from_bytes(&validator)
-                        .ok_or_else(|| std::io::Error::other("invalid validator key"))?;
+                        .ok_or(BlockContentDecodeError::ValidatorsInvalidVerifyingKey)?;
 
                     validators.push(validator);
 
@@ -537,7 +635,75 @@ impl BlockContent {
                 Ok(Self::Validators(validators.into_boxed_slice()))
             }
 
-            _ => Err(std::io::Error::other("unknown block content format"))
+            format => Err(BlockContentDecodeError::UnsupportedFormat(format))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get_blocks() -> Result<(SigningKey, Vec<Block>), SignatureError> {
+        use rand_chacha::rand_core::SeedableRng;
+
+        let mut rand = rand_chacha::ChaCha20Rng::seed_from_u64(123);
+
+        let signing_key = SigningKey::random(&mut rand);
+
+        let mut blocks = Vec::with_capacity(3);
+
+        // Data block
+
+        let content = BlockContent::data(b"Hello, World!".as_slice());
+
+        blocks.push(Block::new(&signing_key, Hash::default(), content)?);
+
+        // Transactions block
+
+        let content = BlockContent::transactions([
+            Transaction::create(&signing_key, b"Transaction 1".as_slice())?,
+            Transaction::create(&signing_key, b"Transaction 2".as_slice())?,
+            Transaction::create(&signing_key, b"Transaction 3".as_slice())?
+        ]);
+
+        blocks.push(Block::new(&signing_key, Hash::default(), content)?);
+
+        // Validators block
+
+        let content = BlockContent::validators([
+            signing_key.verifying_key()
+        ]);
+
+        blocks.push(Block::new(&signing_key, Hash::default(), content)?);
+
+        Ok((signing_key, blocks))
+    }
+
+    #[test]
+    fn validate() -> Result<(), SignatureError> {
+        let (signing_key, blocks) = get_blocks()?;
+
+        for block in blocks {
+            let (is_valid, verifying_key) = block.verify()?;
+
+            assert!(is_valid);
+            assert_eq!(verifying_key, signing_key.verifying_key());
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn serialize() -> Result<(), Box<dyn std::error::Error>> {
+        let (_, blocks) = get_blocks()?;
+
+        for block in blocks {
+            let serialized = block.to_bytes();
+
+            assert_eq!(Block::from_bytes(serialized)?, block);
+        }
+
+        Ok(())
     }
 }

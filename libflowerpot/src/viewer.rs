@@ -19,8 +19,8 @@
 use std::collections::VecDeque;
 
 use crate::crypto::hash::Hash;
-use crate::crypto::sign::VerifyingKey;
-use crate::block::{Block, BlockContent, BlockStatus, Error as BlockError};
+use crate::crypto::sign::{VerifyingKey, SignatureError};
+use crate::block::{Block, BlockContent, BlockStatus};
 use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 use crate::protocol::network::{PacketStream, PacketStreamError};
@@ -31,7 +31,7 @@ pub enum ViewerError {
     PacketStream(PacketStreamError),
 
     #[error(transparent)]
-    Block(BlockError),
+    Signature(#[from] SignatureError),
 
     #[error("storage error: {0}")]
     Storage(String),
@@ -49,7 +49,6 @@ pub enum ViewerError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidBlock {
     pub block: Block,
-    pub hash: Hash,
     pub verifying_key: VerifyingKey
 }
 
@@ -57,9 +56,17 @@ pub struct ValidBlock {
 /// to traverse blockchain history known to the remote node.
 pub struct Viewer<'stream> {
     stream: &'stream mut PacketStream,
+
+    /// Root block of the blockchain.
     root_block: Hash,
-    current_block: (u64, Hash),
-    pending_history: VecDeque<Hash>,
+
+    /// List of blocks we need to fetch.
+    pending_blocks: (u64, VecDeque<Hash>),
+
+    /// Hash of the previously fetched block.
+    prev_block: Hash,
+
+    /// List of current blockchain validators.
     validators: Vec<(VerifyingKey, u8)>
 }
 
@@ -95,18 +102,17 @@ impl<'stream> Viewer<'stream> {
         };
 
         // Verify the root block and obtain its author.
-        let (is_valid, hash, public_key) = block.verify()
-            .map_err(ViewerError::Block)?;
+        let (is_valid, public_key) = block.verify()?;
 
-        if !is_valid || hash != root_block {
+        if !is_valid || block.current_hash() != &root_block {
             return Err(ViewerError::InvalidBlock);
         }
 
         Ok(Self {
             stream,
             root_block,
-            current_block: (0, hash),
-            pending_history: VecDeque::new(),
+            pending_blocks: (0, VecDeque::from([*block.current_hash()])),
+            prev_block: Hash::default(),
             validators: vec![(public_key, 0)]
         })
     }
@@ -156,6 +162,7 @@ impl<'stream> Viewer<'stream> {
 
         // Find the tail block's index.
         let mut i = 0;
+        let mut prev_block = Hash::default();
 
         for hash in storage.history() {
             let hash = hash.map_err(|err| ViewerError::Storage(err.to_string()))?;
@@ -165,13 +172,14 @@ impl<'stream> Viewer<'stream> {
             }
 
             i += 1;
+            prev_block = hash;
         }
 
         Ok(Some(Self {
             stream,
             root_block,
-            current_block: (i, tail_block),
-            pending_history: VecDeque::new(),
+            pending_blocks: (i, VecDeque::from([tail_block])), // TODO: should be the next block from the tail
+            prev_block,
             validators: validators.into_iter()
                 .map(|validator| (validator, 0)) // FIXME: 0 is not correct
                 .collect()
@@ -179,23 +187,24 @@ impl<'stream> Viewer<'stream> {
     }
 
     /// Get root block of the viewer's blockchain.
-    #[inline]
+    #[inline(always)]
     pub const fn root_block(&self) -> &Hash {
         &self.root_block
     }
 
-    /// Get current block of the viewer's blockchain.
-    ///
-    /// This is the same block which was returned by the last `forward` pass.
-    #[inline]
-    pub const fn current_block(&self) -> &Hash {
-        &self.current_block.1
+    /// Current viewer block offset.
+    #[inline(always)]
+    pub const fn offset(&self) -> u64 {
+        self.pending_blocks.0
     }
 
-    /// Get index of the viewer's current block.
-    #[inline]
-    pub const fn current_block_index(&self) -> u64 {
-        self.current_block.0
+    /// Hash of the previously fetched block.
+    ///
+    /// This method will return a hash of the block which was fetched by the
+    /// last `forward` method call.
+    #[inline(always)]
+    pub const fn prev_block(&self) -> &Hash {
+        &self.prev_block
     }
 
     /// Get list of current block validators.
@@ -209,54 +218,56 @@ impl<'stream> Viewer<'stream> {
     /// node, verify and return it. If we've reached the end of the known
     /// history then `None` is returned.
     pub fn forward(&mut self) -> Result<Option<ValidBlock>, ViewerError> {
-        // Ask for the blockchain history if the history pool is empty.
-        let pending_hash = if let Some(hash) = self.pending_history.pop_front() {
-            hash
-        } else {
-            self.stream.send(&Packet::AskHistory {
-                root_block: self.root_block,
-                offset: self.current_block.0,
-                max_length: Self::MAX_HISTORY_LENGTH
-            }).map_err(ViewerError::PacketStream)?;
+        // Read the pending block hash.
+        let pending_block = match self.pending_blocks.1.front() {
+            // Directly if we have pending blocks history.
+            Some(block) => *block,
 
-            let history = self.stream.peek(|packet| {
-                if let Packet::History {
-                    root_block: received_root_block,
-                    offset: received_offset,
-                    ..
-                } = packet {
-                    return received_root_block == &self.root_block
-                        && received_offset == &self.current_block.0;
+            // Or by asking the network node.
+            None => {
+                // Ask and peak the history packet.
+                self.stream.send(&Packet::AskHistory {
+                    root_block: self.root_block,
+                    offset: self.pending_blocks.0,
+                    max_length: Self::MAX_HISTORY_LENGTH
+                }).map_err(ViewerError::PacketStream)?;
+
+                let history = self.stream.peek(|packet| {
+                    if let Packet::History {
+                        root_block: received_root_block,
+                        offset: received_offset,
+                        ..
+                    } = packet {
+                        return received_root_block == &self.root_block
+                            && received_offset == &self.pending_blocks.0;
+                    }
+
+                    false
+                }).map_err(ViewerError::PacketStream)?;
+
+                let Packet::History { history, .. } = history else {
+                    return Err(ViewerError::InvalidHistory);
+                };
+
+                // We've reached the end of the known history.
+                if history.is_empty() {
+                    return Ok(None);
                 }
 
-                false
-            }).map_err(ViewerError::PacketStream)?;
+                // Extend the local history pool and return the first entry
+                // (a pending block).
+                let pending_block = history[0];
 
-            let Packet::History { history, .. } = history else {
-                return Err(ViewerError::InvalidHistory);
-            };
+                self.pending_blocks.1.extend(history);
 
-            // We've reached the end of the known history.
-            if history.len() < 2 {
-                return Ok(None);
+                pending_block
             }
-
-            // First block of the history is different from what we expected.
-            if history[0] != self.current_block.1 {
-                return Err(ViewerError::InvalidHistory);
-            }
-
-            if history.len() > 2 {
-                self.pending_history.extend(&history[2..]);
-            }
-
-            history[1]
         };
 
-        // Request the block.
+        // Request and peek the pending block.
         self.stream.send(Packet::AskBlock {
             root_block: self.root_block,
-            target_block: pending_hash
+            target_block: pending_block
         }).map_err(ViewerError::PacketStream)?;
 
         let packet = self.stream.peek(|packet| {
@@ -274,13 +285,17 @@ impl<'stream> Viewer<'stream> {
             return Err(ViewerError::InvalidBlock);
         };
 
+        // Decline the block if it doesn't match the previously stored block.
+        if block.previous_hash() != &self.prev_block {
+            return Err(ViewerError::InvalidBlock);
+        }
+
         // Validate the received block.
         let validators = self.current_validators()
             .cloned()
             .collect::<Vec<_>>();
 
-        let status = block.validate(&validators)
-            .map_err(ViewerError::Block)?;
+        let status = block.validate(&validators)?;
 
         let BlockStatus::Approved {
             hash,
@@ -316,13 +331,13 @@ impl<'stream> Viewer<'stream> {
                 .collect();
         }
 
-        // Update current block info.
-        self.current_block.0 += 1;
-        self.current_block.1 = hash;
+        // Shift pending blocks history forward and return obtained block.
+        self.pending_blocks.0 += 1;
+        self.pending_blocks.1.pop_front();
+        self.prev_block = hash;
 
         Ok(Some(ValidBlock {
             block,
-            hash,
             verifying_key
         }))
     }
@@ -333,6 +348,7 @@ impl<'stream> Viewer<'stream> {
 /// fork according to the protocol agreements.
 pub struct BatchedViewer<'stream> {
     viewers: Vec<Viewer<'stream>>,
+    root_block: Hash,
     prev_block: Hash
 }
 
@@ -351,7 +367,8 @@ impl<'stream> BatchedViewer<'stream> {
 
         Ok(Self {
             viewers,
-            prev_block: root_block
+            root_block,
+            prev_block: Hash::default()
         })
     }
 
@@ -359,7 +376,8 @@ impl<'stream> BatchedViewer<'stream> {
     /// assume that all the blocks in that storage are validates and that the
     /// provided streams' endpoints have the same history.
     ///
-    /// Return `Ok(None)` if storage doesn't have any blocks.
+    /// Return `Ok(None)` if storage doesn't have any blocks or no remote node
+    /// viewers available.
     pub fn open_from_storage<S: Storage>(
         streams: impl IntoIterator<Item = &'stream mut PacketStream>,
         storage: &S
@@ -368,37 +386,64 @@ impl<'stream> BatchedViewer<'stream> {
         S::Error: 'static
     {
         let mut viewers = Vec::new();
-
-        for stream in streams {
-            match Viewer::open_from_storage(stream, storage)? {
-                Some(viewer) => viewers.push(viewer),
-                None => return Ok(None)
-            }
-        }
-
         let mut prev_block = Hash::default();
 
-        for viewer in &viewers {
-            let curr_block = *viewer.current_block();
+        let root_block = storage.root_block()
+            .map_err(|err| ViewerError::Storage(err.to_string()))?;
 
-            if prev_block != Hash::default() && prev_block != curr_block {
-                return Err(ViewerError::BatchedViewerOutOfSync);
+        let Some(root_block) = root_block else {
+            return Ok(None);
+        };
+
+        // TODO: prioritize streams with higher offset value instead of the
+        //       first stream in the list as it currently happens.
+        for stream in streams {
+            let Some(viewer) = Viewer::open_from_storage(stream, storage)? else {
+                return Ok(None);
+            };
+
+            let viewer_prev_block = viewer.prev_block();
+
+            // Update the locally stored prev block.
+            if prev_block == Hash::default() {
+                prev_block = *viewer_prev_block;
             }
 
-            prev_block = curr_block;
+            // Ignore remote node with different history overview.
+            else if &prev_block != viewer_prev_block {
+                continue;
+            }
+
+            viewers.push(viewer);
+        }
+
+        if viewers.is_empty() {
+            return Ok(None);
         }
 
         Ok(Some(Self {
             viewers,
+            root_block,
             prev_block
         }))
     }
 
-    /// Get current block of the blockchain.
+    /// Get root block of the viewer's blockchain.
+    pub const fn root_block(&self) -> &Hash {
+        &self.root_block
+    }
+
+    /// Current viewer block offset.
+    pub fn offset(&self) -> u64 {
+        todo!("fetch from viewers")
+    }
+
+    /// Hash of the previously fetched block.
     ///
-    /// This is the same block which was returned by the last `forward` pass.
-    #[inline]
-    pub const fn current_block(&self) -> &Hash {
+    /// This method will return a hash of the block which was fetched by the
+    /// last `forward` method call.
+    #[inline(always)]
+    pub const fn prev_block(&self) -> &Hash {
         &self.prev_block
     }
 
@@ -437,7 +482,10 @@ impl<'stream> BatchedViewer<'stream> {
             let block = viewer.forward()?;
 
             if let Some(block) = block {
-                if block.block.previous() != &self.prev_block {
+                dbg!(block.block.previous_hash());
+                dbg!(self.prev_block);
+
+                if block.block.previous_hash() != &self.prev_block {
                     // TODO: remove the viewer (has different history than us)
 
                     continue;
@@ -469,7 +517,9 @@ impl<'stream> BatchedViewer<'stream> {
             return Ok(None);
         };
 
-        self.prev_block = block.hash;
+        dbg!(block.block.current_hash());
+
+        self.prev_block = *block.block.current_hash();
 
         Ok(Some(block))
     }
@@ -497,12 +547,11 @@ impl<'stream> BatchedViewer<'stream> {
             .map_err(|err| ViewerError::Storage(err.to_string()))?
             .map(|block| {
                 match block.verify() {
-                    Ok((false, _, _)) => Ok(None),
+                    Ok((false, _)) => Ok(None),
 
-                    Ok((true, hash, verifying_key)) => {
+                    Ok((true, verifying_key)) => {
                         Ok(Some(ValidBlock {
                             block,
-                            hash,
                             verifying_key
                         }))
                     }
@@ -510,11 +559,13 @@ impl<'stream> BatchedViewer<'stream> {
                     Err(err) => Err(err)
                 }
             })
-            .transpose()
-            .map_err(ViewerError::Block)?
+            .transpose()?
             .flatten();
 
         let network_block = self.forward()?;
+
+        dbg!(storage_block.as_ref().map(|b| b.block.current_hash()));
+        dbg!(network_block.as_ref().map(|b| b.block.current_hash()));
 
         match (network_block, storage_block) {
             (Some(network_block), Some(storage_block)) => {
@@ -529,13 +580,13 @@ impl<'stream> BatchedViewer<'stream> {
                 );
 
                 if network_distance < storage_distance {
-                    self.prev_block = network_block.hash;
+                    self.prev_block = *network_block.block.current_hash();
 
                     Ok(Some(network_block))
                 }
 
                 else {
-                    self.prev_block = storage_block.hash;
+                    self.prev_block = *storage_block.block.current_hash();
 
                     Ok(Some(storage_block))
                 }
@@ -543,7 +594,7 @@ impl<'stream> BatchedViewer<'stream> {
 
             (Some(block), None) |
             (None, Some(block)) => {
-                self.prev_block = block.hash;
+                self.prev_block = *block.block.current_hash();
 
                 Ok(Some(block))
             }

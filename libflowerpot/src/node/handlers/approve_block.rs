@@ -125,7 +125,7 @@ pub fn handle<S: Storage>(
         }
 
         // Verify this block (mainly to obtain its public key).
-        let (is_valid, hash, verifying_key) = match block.verify() {
+        let (is_valid, verifying_key) = match block.verify() {
             Ok(result) => result,
             Err(err) => {
                 #[cfg(feature = "tracing")]
@@ -146,7 +146,7 @@ pub fn handle<S: Storage>(
             tracing::error!(
                 local_id = base64::encode(state.stream.local_id()),
                 peer_id = base64::encode(state.stream.peer_id()),
-                hash = hash.to_base64(),
+                hash = block.current_hash().to_base64(),
                 verifying_key = verifying_key.to_base64(),
                 "approved a pending block which turned to be invalid (how did it get here?)"
             );
@@ -156,7 +156,7 @@ pub fn handle<S: Storage>(
 
         // Validate the block.
         let status = BlockStatus::validate(
-            hash,
+            block.current_hash(),
             verifying_key,
             block.approvals(),
             state.handler.validators.read().as_slice()
@@ -185,7 +185,7 @@ pub fn handle<S: Storage>(
                     ?err,
                     local_id = base64::encode(state.stream.local_id()),
                     peer_id = base64::encode(state.stream.peer_id()),
-                    hash = hash.to_base64(),
+                    hash = block.current_hash().to_base64(),
                     "failed to validate newly approved block"
                 );
 

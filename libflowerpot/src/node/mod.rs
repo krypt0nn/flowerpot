@@ -27,7 +27,7 @@ use crate::crypto::base64;
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::{Signature, SigningKey, VerifyingKey};
 use crate::transaction::Transaction;
-use crate::block::{Block, BlockContent, Error as BlockError};
+use crate::block::{Block, BlockContent, BlockDecodeError};
 use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 use crate::protocol::network::{PacketStream, PacketStreamError};
@@ -48,7 +48,7 @@ pub enum NodeError<S: Storage> {
     Storage(S::Error),
 
     #[error(transparent)]
-    Block(BlockError)
+    Block(BlockDecodeError)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -360,10 +360,18 @@ impl<S: Storage> Node<S> {
                 break;
             };
 
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                curr_block_hash = block.block.current_hash().to_base64(),
+                prev_block_hash = block.block.previous_hash().to_base64(),
+                author = block.verifying_key.to_base64(),
+                "read block"
+            );
+
             // Index stored transactions.
             if let BlockContent::Transactions(transactions) = block.block.content() {
                 for transaction in transactions {
-                    self.indexed_transactions.insert(transaction.hash());
+                    self.indexed_transactions.insert(*transaction.hash());
                 }
             }
 
@@ -373,7 +381,7 @@ impl<S: Storage> Node<S> {
                     .map_err(NodeError::Storage)?;
             }
 
-            history.push(block.hash);
+            history.push(*block.block.current_hash());
         }
 
         self.validators = viewer.current_validators()

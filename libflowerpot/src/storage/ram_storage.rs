@@ -20,19 +20,19 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use crate::crypto::hash::Hash;
-use crate::crypto::sign::VerifyingKey;
+use crate::crypto::sign::{VerifyingKey, SignatureError};
 use crate::transaction::Transaction;
-use crate::block::{Block, BlockContent, Error as BlockError};
+use crate::block::{Block, BlockContent};
 
 use super::Storage;
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub enum RamStorageError {
     #[error("failed to lock internal data")]
     Lock,
 
-    #[error(transparent)]
-    Block(#[from] BlockError)
+    #[error("failed to verify signature: {0}")]
+    Signature(#[from] SignatureError)
 }
 
 fn has_transaction(
@@ -41,7 +41,7 @@ fn has_transaction(
 ) -> bool {
     for block in blocks.values() {
         if let BlockContent::Transactions(transactions) = block.content()
-            && transactions.iter().any(|tr| &tr.hash() == transaction)
+            && transactions.iter().any(|tr| tr.hash() == transaction)
         {
             return true;
         }
@@ -56,7 +56,7 @@ fn find_transaction(
 ) -> Option<Hash> {
     for (block_hash, block) in blocks.iter() {
         if let BlockContent::Transactions(transactions) = block.content()
-            && transactions.iter().any(|tr| &tr.hash() == transaction)
+            && transactions.iter().any(|tr| tr.hash() == transaction)
         {
             return Some(*block_hash);
         }
@@ -72,7 +72,7 @@ fn read_transaction(
     for block in blocks.values() {
         if let BlockContent::Transactions(transactions) = block.content() {
             let transaction = transactions.iter()
-                .find(|tr| &tr.hash() == transaction);
+                .find(|tr| tr.hash() == transaction);
 
             if let Some(transaction) = transaction.cloned() {
                 return Some(transaction);
@@ -97,7 +97,7 @@ impl RamStorage {
     /// order.
     pub fn new<T: Into<Block>>(
         history: impl IntoIterator<Item = T>
-    ) -> Result<Option<Self>, Error> {
+    ) -> Result<Option<Self>, RamStorageError> {
         let storage = Self::default();
 
         for block in history {
@@ -111,11 +111,11 @@ impl RamStorage {
 }
 
 impl Storage for RamStorage {
-    type Error = Error;
+    type Error = RamStorageError;
 
     fn root_block(&self) -> Result<Option<Hash>, Self::Error> {
         let Ok(lock) = self.history.read() else {
-            return Err(Error::Lock);
+            return Err(RamStorageError::Lock);
         };
 
         Ok(lock.first().copied())
@@ -123,7 +123,7 @@ impl Storage for RamStorage {
 
     fn tail_block(&self) -> Result<Option<Hash>, Self::Error> {
         let Ok(lock) = self.history.read() else {
-            return Err(Error::Lock);
+            return Err(RamStorageError::Lock);
         };
 
         Ok(lock.last().copied())
@@ -131,7 +131,7 @@ impl Storage for RamStorage {
 
     fn has_block(&self, hash: &Hash) -> Result<bool, Self::Error> {
         let Ok(lock) = self.blocks.read() else {
-            return Err(Error::Lock);
+            return Err(RamStorageError::Lock);
         };
 
         Ok(lock.contains_key(hash))
@@ -143,7 +143,7 @@ impl Storage for RamStorage {
         }
 
         let Ok(history) = self.history.read() else {
-            return Err(Error::Lock);
+            return Err(RamStorageError::Lock);
         };
 
         match history.iter().position(|block| block == hash) {
@@ -158,7 +158,7 @@ impl Storage for RamStorage {
         }
 
         let Ok(history) = self.history.read() else {
-            return Err(Error::Lock);
+            return Err(RamStorageError::Lock);
         };
 
         match history.iter().position(|block| block == hash) {
@@ -170,7 +170,7 @@ impl Storage for RamStorage {
 
     fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error> {
         let Ok(blocks) = self.blocks.read() else {
-            return Err(Error::Lock);
+            return Err(RamStorageError::Lock);
         };
 
         Ok(blocks.get(hash).cloned())
@@ -186,7 +186,7 @@ impl Storage for RamStorage {
             for transaction in transactions {
                 let hash = transaction.hash();
 
-                if !hashes.insert(hash) || has_transaction(blocks, &hash) {
+                if !hashes.insert(hash) || has_transaction(blocks, hash) {
                     return true;
                 }
             }
@@ -197,7 +197,7 @@ impl Storage for RamStorage {
         // Check that there's no duplicate transactions.
         if let BlockContent::Transactions(transactions) = block.content() {
             let Ok(blocks) = self.blocks.read() else {
-                return Err(Error::Lock);
+                return Err(RamStorageError::Lock);
             };
 
             if has_duplicate_transactions(&blocks, transactions) {
@@ -212,10 +212,10 @@ impl Storage for RamStorage {
             self.blocks.write(),
             self.history.write()
         ) else {
-            return Err(Error::Lock);
+            return Err(RamStorageError::Lock);
         };
 
-        let hash = block.hash()?;
+        let hash = *block.current_hash();
 
         // Ignore block if it's already stored.
         if blocks.contains_key(&hash) {
@@ -229,7 +229,7 @@ impl Storage for RamStorage {
                 return Ok(false);
             }
 
-            let (is_valid, _, public_key) = block.verify()?;
+            let (is_valid, public_key) = block.verify()?;
 
             // Although it's not a part of convention for this method why would
             // we need an invalid block stored here?
@@ -238,7 +238,7 @@ impl Storage for RamStorage {
             }
 
             let Ok(mut root_validator) = self.root_validator.write() else {
-                return Err(Error::Lock);
+                return Err(RamStorageError::Lock);
             };
 
             history.clear();
@@ -250,7 +250,7 @@ impl Storage for RamStorage {
         }
 
         // Reject out-of-history blocks.
-        else if !blocks.contains_key(block.previous()) {
+        else if !blocks.contains_key(block.previous_hash()) {
             return Ok(false);
         }
 
@@ -259,7 +259,7 @@ impl Storage for RamStorage {
         //
         // If the previous block is the last block of the history then we add
         // the new one to the end of the blockchain.
-        else if history.last() == Some(&block.previous) {
+        else if history.last() == Some(block.previous_hash()) {
             history.push(hash);
             blocks.insert(hash, block.clone());
         }
@@ -269,7 +269,7 @@ impl Storage for RamStorage {
             // Find the index of the previous block.
             let mut i = 0;
 
-            while &history[i] != block.previous() {
+            while &history[i] != block.previous_hash() {
                 i += 1;
             }
 
@@ -300,7 +300,7 @@ impl Storage for RamStorage {
         transaction: &Hash
     ) -> Result<bool, Self::Error> {
         let lock = self.blocks.read()
-            .map_err(|_| Error::Lock)?;
+            .map_err(|_| RamStorageError::Lock)?;
 
         Ok(has_transaction(&lock, transaction))
     }
@@ -311,7 +311,7 @@ impl Storage for RamStorage {
         transaction: &Hash
     ) -> Result<Option<Hash>, Self::Error> {
         let lock = self.blocks.read()
-            .map_err(|_| Error::Lock)?;
+            .map_err(|_| RamStorageError::Lock)?;
 
         Ok(find_transaction(&lock, transaction))
     }
@@ -322,7 +322,7 @@ impl Storage for RamStorage {
         transaction: &Hash
     ) -> Result<Option<Transaction>, Self::Error> {
         let lock = self.blocks.read()
-            .map_err(|_| Error::Lock)?;
+            .map_err(|_| RamStorageError::Lock)?;
 
         Ok(read_transaction(&lock, transaction))
     }
@@ -338,7 +338,7 @@ impl Storage for RamStorage {
             self.blocks.read(),
             self.history.read()
         ) else {
-            return Err(Error::Lock);
+            return Err(RamStorageError::Lock);
         };
 
         // No block - no validators.
@@ -363,7 +363,7 @@ impl Storage for RamStorage {
             // validators for it are the signer of this block.
             if i == 0 {
                 let Ok(Some(root_validator)) = self.root_validator.read().as_deref().cloned() else {
-                    return Err(Error::Lock);
+                    return Err(RamStorageError::Lock);
                 };
 
                 return Ok(Some(vec![root_validator]));
@@ -392,7 +392,7 @@ impl Storage for RamStorage {
             self.blocks.read(),
             self.history.read()
         ) else {
-            return Err(Error::Lock);
+            return Err(RamStorageError::Lock);
         };
 
         // No block - no validators.
@@ -423,7 +423,7 @@ impl Storage for RamStorage {
             // validator is the signer of this block.
             else if i == 0 {
                 let Ok(Some(root_validator)) = self.root_validator.read().as_deref().cloned() else {
-                    return Err(Error::Lock);
+                    return Err(RamStorageError::Lock);
                 };
 
                 return Ok(Some(vec![root_validator]));
@@ -435,7 +435,7 @@ impl Storage for RamStorage {
 }
 
 #[test]
-fn test() -> Result<(), Error> {
+fn test() -> Result<(), RamStorageError> {
     let storage = RamStorage::default();
 
     super::test_storage(&storage)?;

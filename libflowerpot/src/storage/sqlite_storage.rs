@@ -296,6 +296,7 @@ impl Storage for SqliteStorage {
                     1 => {
                         let mut query = lock.prepare_cached("
                             SELECT
+                                hash,
                                 data,
                                 sign
                             FROM v1_block_transactions
@@ -304,6 +305,7 @@ impl Storage for SqliteStorage {
 
                         let rows = query.query_map([id], |row| {
                             Ok((
+                                row.get::<_, [u8; Hash::SIZE]>("hash")?,
                                 row.get::<_, Box<[u8]>>("data")?,
                                 row.get::<_, [u8; Signature::SIZE]>("sign")?
                             ))
@@ -312,9 +314,10 @@ impl Storage for SqliteStorage {
                         let mut transactions = Vec::new();
 
                         for row in rows {
-                            let (data, sign) = row?;
+                            let (hash, data, sign) = row?;
 
                             transactions.push(Transaction {
+                                hash: Hash::from(hash),
                                 data,
                                 sign: Signature::from_bytes(&sign)
                                     .ok_or_else(|| rusqlite::Error::InvalidQuery)?
@@ -370,14 +373,14 @@ impl Storage for SqliteStorage {
                 }
 
                 Ok(Some(Block {
-                    previous: Hash::from(previous_hash),
+                    previous_hash: Hash::from(previous_hash),
+                    current_hash: *hash,
                     timestamp: UtcDateTime::from_unix_timestamp(timestamp)
                         .map_err(|_| rusqlite::Error::InvalidQuery)?,
                     content,
                     sign: Signature::from_bytes(&sign)
                         .ok_or_else(|| rusqlite::Error::InvalidQuery)?,
-                    approvals,
-                    precomputed_hash: None
+                    approvals
                 }))
             }
 
@@ -409,8 +412,8 @@ impl Storage for SqliteStorage {
             };
 
             let block_id = query.insert((
-                block.previous().0,
-                hash.0,
+                block.previous_hash().as_bytes(),
+                hash.as_bytes(),
                 block.timestamp().unix_timestamp(),
                 block.sign().to_bytes(),
                 block_type
@@ -478,7 +481,7 @@ impl Storage for SqliteStorage {
             for transaction in transactions {
                 let hash = transaction.hash();
 
-                if !hashes.insert(hash) || has_transaction(database, &hash)? {
+                if !hashes.insert(hash) || has_transaction(database, hash)? {
                     return Ok(true);
                 }
             }
@@ -488,7 +491,7 @@ impl Storage for SqliteStorage {
 
         let mut lock = self.0.lock();
 
-        let (is_valid, hash, _) = block.verify()
+        let (is_valid, _) = block.verify()
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
 
         // Although it's not a part of convention for this method why would
@@ -498,7 +501,7 @@ impl Storage for SqliteStorage {
         }
 
         // Ignore block if it's already stored.
-        if has_block(&lock, &hash)? {
+        if has_block(&lock, block.current_hash())? {
             return Ok(false);
         }
 
@@ -521,13 +524,13 @@ impl Storage for SqliteStorage {
             transaction.prepare_cached("DELETE FROM v1_blocks")?
                 .execute(())?;
 
-            insert_block(&transaction, &hash, block)?;
+            insert_block(&transaction, block.current_hash(), block)?;
 
             transaction.commit()?;
         }
 
         // Reject out-of-history blocks.
-        else if !has_block(&lock, block.previous())? {
+        else if !has_block(&lock, block.previous_hash())? {
             return Ok(false);
         }
 
@@ -536,10 +539,10 @@ impl Storage for SqliteStorage {
         //
         // If the previous block is the last block of the history then we add
         // the new one to the end of the blockchain.
-        else if tail_block(&lock)? == Some(block.previous) {
+        else if tail_block(&lock)? == Some(*block.previous_hash()) {
             let transaction = lock.transaction()?;
 
-            insert_block(&transaction, &hash, block)?;
+            insert_block(&transaction, block.current_hash(), block)?;
 
             transaction.commit()?;
         }
@@ -552,7 +555,7 @@ impl Storage for SqliteStorage {
                 SELECT id FROM v1_blocks WHERE current_hash = ?1
             ")?;
 
-            let id = query.query_one([block.previous().0], |row| {
+            let id = query.query_one([block.previous_hash().as_bytes()], |row| {
                 row.get::<_, i64>("id")
             })?;
 
@@ -561,7 +564,7 @@ impl Storage for SqliteStorage {
             transaction.prepare("DELETE FROM v1_blocks WHERE id > ?1")?
                 .execute([id])?;
 
-            insert_block(&transaction, &hash, block)?;
+            insert_block(&transaction, block.current_hash(), block)?;
 
             transaction.commit()?;
         }
@@ -605,6 +608,7 @@ impl Storage for SqliteStorage {
 
         match result {
             Ok((data, sign)) => Ok(Some(Transaction {
+                hash: *transaction,
                 data,
                 sign: Signature::from_bytes(&sign)
                     .ok_or_else(|| rusqlite::Error::InvalidQuery)?

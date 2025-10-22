@@ -106,7 +106,7 @@ fn try_write_block<S: Storage>(
     // If this block is a *replacement* for the last block of the
     // blockchain - then we must compare its xor distance to decide
     // what to do.
-    if n > 1 && &history[n - 2] == block.previous() {
+    if n > 1 && &history[n - 2] == block.previous_hash() {
         // Reject new block if the current one is closer to the
         // previous one.
         if  *current_distance <= new_distance
@@ -128,7 +128,7 @@ fn try_write_block<S: Storage>(
     //
     // Otherwise we are not allowed to modify the blockchain history
     // and thus just abort this function.
-    else if &history[n - 1] != block.previous() {
+    else if &history[n - 1] != block.previous_hash() {
         #[cfg(feature = "tracing")]
         tracing::warn!(
             hash = hash.to_base64(),
@@ -185,8 +185,8 @@ fn try_write_block<S: Storage>(
         for transaction in transactions {
             let hash = transaction.hash();
 
-            pending_transactions.remove(&hash);
-            indexed_transactions.insert(hash);
+            pending_transactions.remove(hash);
+            indexed_transactions.insert(*hash);
         }
     }
 }

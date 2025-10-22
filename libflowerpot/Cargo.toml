@@ -28,7 +28,6 @@ optional = true
 thiserror = "2.0"
 tracing = { version = "0.1", optional = true }
 spin = "0.10"
-varint-rs = "2.2"
 time = "0.3"
 blake3 = "1.8"
 base64 = "0.22"

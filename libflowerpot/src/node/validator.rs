@@ -129,7 +129,8 @@ pub fn run<S: Storage>(
 
                 #[cfg(feature = "tracing")]
                 tracing::debug!(
-                    block_hash = ?block.hash().map(|hash| hash.to_base64()),
+                    curr_block_hash = ?block.current_hash().to_base64(),
+                    prev_block_hash = ?block.previous_hash().to_base64(),
                     author = verifying_key.to_base64(),
                     "share created block"
                 );

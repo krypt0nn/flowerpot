@@ -27,7 +27,7 @@ use chacha20::cipher::{KeyIvInit, StreamCipher};
 use crate::crypto::base64;
 use crate::crypto::key_exchange::{SecretKey, PublicKey};
 
-use super::packets::{Packet, PacketError};
+use super::packets::{Packet, PacketDecodeError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PacketStreamError {
@@ -35,7 +35,7 @@ pub enum PacketStreamError {
     Stream(std::io::Error),
 
     #[error(transparent)]
-    Packet(#[from] PacketError),
+    Packet(#[from] PacketDecodeError),
 
     #[error("unsupported protocol version: {0}")]
     UnsupportedProtocolVersion(u8),
@@ -506,8 +506,7 @@ impl PacketStream {
         packet: impl AsRef<Packet>
     ) -> Result<(), PacketStreamError> {
         let mut packet = packet.as_ref()
-            .to_bytes()
-            .map_err(PacketStreamError::Packet)?;
+            .to_bytes();
 
         let length = packet.len();
 

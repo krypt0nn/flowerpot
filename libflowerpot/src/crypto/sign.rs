@@ -16,6 +16,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+pub use k256::ecdsa::Error as SignatureError;
+
 use k256::ecdsa::signature::hazmat::PrehashVerifier;
 
 use super::base64;
@@ -173,7 +175,7 @@ impl Signature {
     pub fn create(
         signing_key: impl AsRef<SigningKey>,
         hash: impl AsRef<Hash>
-    ) -> Result<Self, k256::ecdsa::Error> {
+    ) -> Result<Self, SignatureError> {
         let (sign, id) = signing_key.as_ref().0
             .sign_prehash_recoverable(hash.as_ref().as_bytes())?;
 
@@ -185,7 +187,7 @@ impl Signature {
     pub fn verify(
         &self,
         hash: impl AsRef<Hash>
-    ) -> Result<(bool, VerifyingKey), k256::ecdsa::Error> {
+    ) -> Result<(bool, VerifyingKey), SignatureError> {
         let hash = hash.as_ref();
 
         let public_key = k256::ecdsa::VerifyingKey::recover_from_prehash(
@@ -251,7 +253,7 @@ impl std::fmt::Display for Signature {
 }
 
 #[test]
-fn test() -> Result<(), k256::ecdsa::Error> {
+fn test() -> Result<(), SignatureError> {
     use rand_chacha::rand_core::SeedableRng;
 
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(123);

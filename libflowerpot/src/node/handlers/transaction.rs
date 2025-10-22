@@ -52,7 +52,7 @@ pub fn handle<S: Storage>(
     }
 
     // Verify received transaction.
-    let (is_valid, hash, verifying_key) = match transaction.verify() {
+    let (is_valid, verifying_key) = match transaction.verify() {
         Ok(result) => result,
         Err(err) => {
             #[cfg(feature = "tracing")]
@@ -73,7 +73,7 @@ pub fn handle<S: Storage>(
         tracing::warn!(
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            hash = hash.to_base64(),
+            hash = transaction.hash().to_base64(),
             verifying_key = verifying_key.to_base64(),
             "received invalid transaction"
         );
@@ -83,13 +83,13 @@ pub fn handle<S: Storage>(
 
     // Skip already stored transactions.
     if let Some(storage) = &state.handler.storage
-        && let Ok(true) = storage.has_transaction(&hash)
+        && let Ok(true) = storage.has_transaction(transaction.hash())
     {
         #[cfg(feature = "tracing")]
         tracing::debug!(
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            hash = hash.to_base64(),
+            hash = transaction.hash().to_base64(),
             verifying_key = verifying_key.to_base64(),
             "received already stored transaction"
         );
@@ -98,14 +98,14 @@ pub fn handle<S: Storage>(
     }
 
     // Reject already indexed transactions.
-    if state.handler.indexed_transactions.read().contains(&hash)
-        || state.handler.pending_transactions.read().contains_key(&hash)
+    if state.handler.indexed_transactions.read().contains(transaction.hash())
+        || state.handler.pending_transactions.read().contains_key(transaction.hash())
     {
         #[cfg(feature = "tracing")]
         tracing::trace!(
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            hash = hash.to_base64(),
+            hash = transaction.hash().to_base64(),
             verifying_key = verifying_key.to_base64(),
             "received already indexed transaction"
         );
@@ -115,13 +115,13 @@ pub fn handle<S: Storage>(
 
     // Check this transaction using the provided filter.
     if let Some(filter) = &state.handler.options.transactions_filter
-        && !filter(&hash, &verifying_key, &transaction)
+        && !filter(transaction.hash(), &verifying_key, &transaction)
     {
         #[cfg(feature = "tracing")]
         tracing::debug!(
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            hash = hash.to_base64(),
+            hash = transaction.hash().to_base64(),
             verifying_key = verifying_key.to_base64(),
             "received transaction which was filtered out"
         );
@@ -133,7 +133,7 @@ pub fn handle<S: Storage>(
     tracing::info!(
         local_id = base64::encode(state.stream.local_id()),
         peer_id = base64::encode(state.stream.peer_id()),
-        hash = hash.to_base64(),
+        hash = transaction.hash().to_base64(),
         verifying_key = verifying_key.to_base64(),
         "accepted new pending transaction"
     );
@@ -146,7 +146,7 @@ pub fn handle<S: Storage>(
 
     // Insert it to the pending transactions pool.
     state.handler.pending_transactions.write()
-        .insert(hash, transaction);
+        .insert(*transaction.hash(), transaction);
 
     true
 }
