@@ -345,8 +345,6 @@ impl<S: Storage> Node<S> {
 
         let mut history = Vec::with_capacity(self.history.len());
 
-        history.push(self.root_block);
-
         loop {
             let block = match &self.storage {
                 Some(storage) => viewer.forward_with_storage(storage)

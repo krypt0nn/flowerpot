@@ -482,9 +482,6 @@ impl<'stream> BatchedViewer<'stream> {
             let block = viewer.forward()?;
 
             if let Some(block) = block {
-                dbg!(block.block.previous_hash());
-                dbg!(self.prev_block);
-
                 if block.block.previous_hash() != &self.prev_block {
                     // TODO: remove the viewer (has different history than us)
 
@@ -516,8 +513,6 @@ impl<'stream> BatchedViewer<'stream> {
         let Some(block) = curr_block else {
             return Ok(None);
         };
-
-        dbg!(block.block.current_hash());
 
         self.prev_block = *block.block.current_hash();
 
@@ -563,9 +558,6 @@ impl<'stream> BatchedViewer<'stream> {
             .flatten();
 
         let network_block = self.forward()?;
-
-        dbg!(storage_block.as_ref().map(|b| b.block.current_hash()));
-        dbg!(network_block.as_ref().map(|b| b.block.current_hash()));
 
         match (network_block, storage_block) {
             (Some(network_block), Some(storage_block)) => {

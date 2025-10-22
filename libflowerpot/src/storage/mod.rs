@@ -124,8 +124,6 @@ pub trait Storage: Clone {
         let mut curr_block = self.root_block()?;
 
         while let Some(block_hash) = &curr_block {
-            dbg!(block_hash);
-
             if let Some(block) = self.read_block(block_hash)?
                 && let BlockContent::Transactions(transactions) = block.content()
             {
