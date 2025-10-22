@@ -400,7 +400,7 @@ impl<S: Storage> Node<S> {
     /// All the non-critical errors will be silenced and displayed in tracing
     /// logs only.
     pub fn start(
-        self,
+        mut self,
         options: NodeOptions
     ) -> Result<NodeHandler<S>, NodeError<S>>
     where
@@ -409,6 +409,28 @@ impl<S: Storage> Node<S> {
     {
         #[cfg(feature = "tracing")]
         tracing::info!("starting the node");
+
+        if let Some(storage) = &self.storage {
+            let validators = match self.history.last() {
+                Some(block) => storage.get_validators_after_block(block)
+                    .map_err(NodeError::Storage)?,
+
+                None => storage.get_validators_before_block(&self.root_block)
+                    .map_err(NodeError::Storage)?
+            };
+
+            if let Some(validators) = validators {
+                #[cfg(feature = "tracing")]
+                tracing::info!(
+                    validators = ?validators.iter()
+                        .map(|validator| validator.to_base64())
+                        .collect::<Vec<_>>(),
+                    "updated validators list"
+                );
+
+                self.validators = validators;
+            }
+        }
 
         let handler = NodeHandler {
             streams: Arc::new(RwLock::new(HashMap::with_capacity(self.streams.len()))),
