@@ -34,6 +34,7 @@ pub enum TrackerError<S: Storage> {
 
 /// Tracker is a special struct that keeps track of the blocks history in the
 /// blockchain and synchronizes it with a storage if it's provided.
+#[derive(Debug, Clone)]
 pub enum Tracker<S: Storage> {
     /// Data + metadata tracker.
     Full(S),
@@ -77,6 +78,15 @@ impl<S: Storage> Tracker<S> {
                 .map_err(TrackerError::Storage),
 
             Self::HeadOnly { blocks, .. } => Ok(blocks.first().copied())
+        }
+    }
+
+    /// Get reference to the blockchain storage if the tracker owns it.
+    #[inline]
+    pub fn storage(&self) -> Option<&S> {
+        match self {
+            Self::Full(storage) => Some(storage),
+            Self::HeadOnly { .. } => None
         }
     }
 
@@ -162,14 +172,35 @@ impl<S: Storage> Tracker<S> {
         &mut self,
         block: &Block
     ) -> Result<bool, TrackerError<S>> {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            curr_hash = block.current_hash().to_base64(),
+            prev_hash = block.previous_hash().to_base64(),
+            "trying to write block to the tracker"
+        );
+
         // Try to get the tail block of the blockchain.
         match self.get_tail_block()? {
             // If there exist a tail block then we need to modify the existing
             // history.
             Some(tail_block) => {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    hash = tail_block.to_base64(),
+                    "tail block found"
+                );
+
                 // If the block is the next one to our tail block then we simply
                 // need to push it to the end of the history and that's it.
                 if block.previous_hash() == &tail_block {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(
+                        curr_hash = block.current_hash().to_base64(),
+                        prev_hash = block.previous_hash().to_base64(),
+                        tail_block = tail_block.to_base64(),
+                        "trying to write block to the end of the known blockchain history, no modifications needed"
+                    );
+
                     match self {
                         Self::Full(storage) => storage.write_block(block)
                             .map_err(TrackerError::Storage),
@@ -193,6 +224,13 @@ impl<S: Storage> Tracker<S> {
                                         // already indexed then revert this
                                         // change and reject the block.
                                         if !transactions.insert(hash) {
+                                            #[cfg(feature = "tracing")]
+                                            tracing::warn!(
+                                                curr_hash = block.current_hash().to_base64(),
+                                                prev_hash = block.previous_hash().to_base64(),
+                                                "received block contained already indexed transactions, rejecting it"
+                                            );
+
                                             // Remove only written transactions
                                             // because they're guaranteed to not
                                             // to be indexed before by previous
@@ -225,6 +263,14 @@ impl<S: Storage> Tracker<S> {
                 // Otherwise this block wants to update the blockchain history.
                 // We must determine whether it's allowed to.
                 else {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(
+                        curr_hash = block.current_hash().to_base64(),
+                        prev_hash = block.previous_hash().to_base64(),
+                        tail_block = tail_block.to_base64(),
+                        "trying to modify existing blockchain history"
+                    );
+
                     todo!("history modification")
                 }
             }
@@ -233,6 +279,13 @@ impl<S: Storage> Tracker<S> {
             // thus we can store received block as the root one, if it is of
             // root type.
             None if block.is_root() => {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    curr_hash = block.current_hash().to_base64(),
+                    prev_hash = block.previous_hash().to_base64(),
+                    "no root block found but received block is of root type, writing it to the tracker"
+                );
+
                 match self {
                     Self::Full(storage) => storage.write_block(block)
                         .map_err(TrackerError::Storage),
@@ -243,6 +296,13 @@ impl<S: Storage> Tracker<S> {
 
                         // Reject the block if it happened to be invalid.
                         if !is_valid {
+                            #[cfg(feature = "tracing")]
+                            tracing::warn!(
+                                curr_hash = block.current_hash().to_base64(),
+                                prev_hash = block.previous_hash().to_base64(),
+                                "received block is not valid, rejecting it"
+                            );
+
                             return Ok(false);
                         }
 
@@ -268,6 +328,13 @@ impl<S: Storage> Tracker<S> {
                                     // already indexed then revert this change
                                     // and reject the block.
                                     if !transactions.insert(*transaction.hash()) {
+                                        #[cfg(feature = "tracing")]
+                                        tracing::warn!(
+                                            curr_hash = block.current_hash().to_base64(),
+                                            prev_hash = block.previous_hash().to_base64(),
+                                            "received block contained already indexed transactions, rejecting it"
+                                        );
+
                                         blocks.clear();
                                         transactions.clear();
                                         validators.clear();
@@ -291,7 +358,16 @@ impl<S: Storage> Tracker<S> {
 
             // Received block is not of a root type, thus we can't use it as a
             // root block of the blockchain and have to reject.
-            None => Ok(false)
+            None => {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    curr_hash = block.current_hash().to_base64(),
+                    prev_hash = block.previous_hash().to_base64(),
+                    "no root block found and received block is not of a root type"
+                );
+
+                Ok(false)
+            }
         }
     }
 }
