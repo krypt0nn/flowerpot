@@ -316,11 +316,22 @@ impl BlockCommands {
 
                 let now = Instant::now();
                 let mut last_repeat = Instant::now();
+                let mut found = false;
 
+                // Check if the block was added to the pending blocks queue.
                 while !handler.pending_blocks().contains_key(&hash)
                     && now.elapsed().as_secs() < wait_timeout
                 {
                     if last_repeat.elapsed().as_secs() >= 5 {
+                        // The block could have been accepted immediately.
+                        if let Ok(Some(tail_block)) = handler.tracker().get_tail_block()
+                            && tail_block == hash
+                        {
+                            found = true;
+
+                            break;
+                        }
+
                         handler.ask_pending_blocks();
 
                         last_repeat = Instant::now();
@@ -329,7 +340,7 @@ impl BlockCommands {
                     std::thread::sleep(Duration::from_secs(1));
                 }
 
-                if handler.pending_blocks().contains_key(&hash) {
+                if found || handler.pending_blocks().contains_key(&hash) {
                     println!("block accepted by the network");
                 } else {
                     println!("block was not accepted by the network");
