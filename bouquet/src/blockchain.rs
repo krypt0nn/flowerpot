@@ -250,9 +250,7 @@ impl BlockchainCommands {
                     }
                 };
 
-                let mut node = Node::new(root_block);
-
-                node.attach_storage(storage.clone());
+                let mut node = Node::from_storage(root_block, storage.clone());
 
                 for address in nodes {
                     println!("connecting to {address}...");
@@ -447,7 +445,10 @@ impl BlockchainCommands {
                     }
                 };
 
-                let mut node = Node::new(root_block);
+                let mut node = match storage {
+                    Some(storage) => Node::from_storage(root_block, storage),
+                    None => Node::new(root_block)
+                };
 
                 for address in nodes {
                     println!("connecting to {address}...");
@@ -465,10 +466,6 @@ impl BlockchainCommands {
                     );
 
                     node.add_stream(stream);
-                }
-
-                if let Some(storage) = storage {
-                    node.attach_storage(storage);
                 }
 
                 for signing_key in signing_keys {
