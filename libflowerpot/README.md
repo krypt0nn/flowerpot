@@ -26,7 +26,7 @@ Some key points:
 
 # Roadmap to v1.0.0 release
 
-- [ ] Transition to abstract transport protocols for communication
+- [x] Transition to abstract transport protocols for communication
     - [x] Implement base protocol and transport abstraction
     - [x] Rewrite client and shards into a single node client
         - [x] Implement viewer struct for a packets stream
@@ -35,22 +35,22 @@ Some key points:
         - [x] Implement streams listening and packets processing
         - [x] Implement node handler to send new transactions and perform other
               client-side actions
-    - [ ] Rewrite validator code
+    - [x] Rewrite validator code
 - [ ] Rework blocks and transactions
     - [x] Remove zstd compression since it's not reliable
     - [x] Remove json serialization
     - [ ] Make transactions have multiple types; implement `Mint` and `Data`
           type transactions
-- [ ] Rework project structure
+- [x] Rework project structure
     - [x] Rename github repository to `flowerpot`
     - [x] Move `libflowerpot` into a separate workspace
-    - [ ] Create `bouquet` CLI tool
+    - [x] Create `bouquet` CLI tool
         - [x] Create keypairs (public/secret keys)
         - [x] Create new transactions
         - [x] Send transactions to the network
         - [x] Create new blockchains
-        - [ ] Connect to a blockchain and monitor its activity
-        - [ ] Show blockchain status
+        - [x] Connect to a blockchain and monitor its activity
+        - [x] Show blockchain status
 - [ ] Implement gas system
     - [ ] Calculate transaction gas usage (`ceil(size_in_bytes * alpha)`)
     - [ ] Calculate total block gas usage (sum of transactions' gas usage)
