@@ -17,7 +17,6 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::crypto::base64;
-use crate::crypto::hash::Hash;
 use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 
@@ -25,7 +24,7 @@ use super::NodeState;
 
 /// Handle `AskHistory` packet.
 ///
-/// Return `false` is critical error occured and node connection must be
+/// Return `false` if critical error occured and node connection must be
 /// terminated.
 pub fn handle<S: Storage>(
     state: &mut NodeState<S>,
@@ -43,12 +42,28 @@ pub fn handle<S: Storage>(
     );
 
     // Then read max allowed amount of blocks' hashes.
-    let history = state.handler.history.read()
-        .iter()
-        .skip(offset as usize)
-        .take(state.handler.options.max_history_length.min(max_length as usize))
-        .copied()
-        .collect::<Box<[Hash]>>();
+    let history = state.handler.tracker()
+        .get_history(
+            offset as usize,
+            state.handler.options.max_history_length.min(max_length as usize)
+        );
+
+    let history = match history {
+        Ok(history) => history,
+        Err(err) => {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                err = err.to_string(),
+                local_id = base64::encode(state.stream.local_id()),
+                peer_id = base64::encode(state.stream.peer_id()),
+                ?offset,
+                ?max_length,
+                "failed to get blockchain history from the tracker"
+            );
+
+            return true;
+        }
+    };
 
     // And try to send them back to the requester.
     if let Err(err) = state.stream.send(Packet::History {
@@ -62,6 +77,7 @@ pub fn handle<S: Storage>(
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
             ?offset,
+            ?max_length,
             ?history,
             "failed to send History packet"
         );

@@ -21,11 +21,11 @@ use crate::block::{Block, BlockStatus};
 use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 
-use super::{NodeState, try_write_block};
+use super::NodeState;
 
 /// Handle `Block` packet.
 ///
-/// Return `false` is critical error occured and node connection must be
+/// Return `false` if critical error occured and node connection must be
 /// terminated.
 pub fn handle<S: Storage>(
     state: &mut NodeState<S>,
@@ -55,8 +55,26 @@ pub fn handle<S: Storage>(
         }
     };
 
+    // Read current validators list from the tracker.
+    let validators = match state.handler.tracker().get_validators() {
+        Ok(validators) => validators,
+        Err(err) => {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                err = err.to_string(),
+                local_id = base64::encode(state.stream.local_id()),
+                peer_id = base64::encode(state.stream.peer_id()),
+                hash = block.current_hash().to_base64(),
+                verifying_key = verifying_key.to_base64(),
+                "failed to read current validators list"
+            );
+
+            return true;
+        }
+    };
+
     // Skip the block if it's invalid.
-    if !is_valid || !state.handler.validators.read().contains(&verifying_key) {
+    if !is_valid || !validators.contains(&verifying_key) {
         #[cfg(feature = "tracing")]
         tracing::warn!(
             local_id = base64::encode(state.stream.local_id()),
@@ -71,7 +89,7 @@ pub fn handle<S: Storage>(
 
     // Check if we already have this block, and if we do - then merge approvals
     // because already stored block can have more than in what we received.
-    if let Some(curr_block) = state.handler.pending_blocks.read().get(block.current_hash()) {
+    if let Some(curr_block) = state.handler.pending_blocks().get(block.current_hash()) {
         for approval in curr_block.approvals() {
             if !block.approvals.contains(approval) {
                 block.approvals.push(approval.clone());
@@ -100,7 +118,7 @@ pub fn handle<S: Storage>(
         block.current_hash(),
         verifying_key,
         block.approvals(),
-        state.handler.validators.read().iter()
+        validators
     );
 
     match status {
@@ -127,12 +145,41 @@ pub fn handle<S: Storage>(
                 .collect();
 
             // Try to write this block.
-            try_write_block(
-                block,
-                hash,
-                &verifying_key,
-                &state.handler
-            );
+            match state.handler.tracker().try_write_block(&block) {
+                Ok(true) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::info!(
+                        local_id = base64::encode(state.stream.local_id()),
+                        peer_id = base64::encode(state.stream.peer_id()),
+                        hash = hash.to_base64(),
+                        verifying_key = verifying_key.to_base64(),
+                        "block was added to the history"
+                    );
+                }
+
+                Ok(false) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::info!(
+                        local_id = base64::encode(state.stream.local_id()),
+                        peer_id = base64::encode(state.stream.peer_id()),
+                        hash = hash.to_base64(),
+                        verifying_key = verifying_key.to_base64(),
+                        "block was not added to the history"
+                    );
+                }
+
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        err = err.to_string(),
+                        local_id = base64::encode(state.stream.local_id()),
+                        peer_id = base64::encode(state.stream.peer_id()),
+                        hash = hash.to_base64(),
+                        verifying_key = verifying_key.to_base64(),
+                        "failed to write block to the tracker"
+                    );
+                }
+            }
         }
 
         // Block is valid but not approved by enough validators.
@@ -142,53 +189,91 @@ pub fn handle<S: Storage>(
             approvals,
             ..
         }) => {
-            // Try to read the last block of the blockchain.
-            if let Some(last_block) = state.handler.history.read().last() {
-                // Update received block's approvals list to remove any invalid
-                // signatures.
-                block.approvals = approvals.into_iter()
-                    .map(|(approval, _)| approval)
-                    .collect();
-
-                // If this block is the potential new block for the blockchain
-                // then, if options allow it, we should store it in the pending
-                // blocks pool.
-                if last_block == block.previous_hash() {
-                    #[cfg(feature = "tracing")]
-                    tracing::info!(
-                        local_id = base64::encode(state.stream.local_id()),
-                        peer_id = base64::encode(state.stream.peer_id()),
-                        hash = hash.to_base64(),
-                        verifying_key = verifying_key.to_base64(),
-                        "accepted new pending block"
-                    );
-
-                    // If we already have block with this hash - we can compare
-                    // them, and if the new one is different - we should
-                    // broadcast it to other network nodes.
-                    if let Some(prev) = state.handler.pending_blocks.read().get(&hash)
-                        && prev != &block
-                    {
-                        state.broadcast(Packet::Block {
-                            root_block: state.handler.root_block,
-                            block: block.clone()
-                        });
-                    }
-
-                    state.handler.pending_blocks.write()
-                        .insert(hash, block);
-                }
-
-                else {
+            let tail_block = match state.handler.tracker().get_tail_block() {
+                Ok(tail_block) => tail_block,
+                Err(err) => {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(
                         local_id = base64::encode(state.stream.local_id()),
                         peer_id = base64::encode(state.stream.peer_id()),
                         hash = hash.to_base64(),
                         verifying_key = verifying_key.to_base64(),
-                        "new approved block was not accepted due to being out of history"
+                        err = err.to_string(),
+                        "failed to get tail block from the tracker"
                     );
+
+                    return true;
                 }
+            };
+
+            // Update received block's approvals list to remove any invalid
+            // signatures.
+            block.approvals = approvals.into_iter()
+                .map(|(approval, _)| approval)
+                .collect();
+
+            // If we don't have tail block (so we don't have root block either),
+            // and received block is of root type - then store it.
+            if tail_block.is_none() && block.is_root() {
+                #[cfg(feature = "tracing")]
+                tracing::info!(
+                    local_id = base64::encode(state.stream.local_id()),
+                    peer_id = base64::encode(state.stream.peer_id()),
+                    hash = hash.to_base64(),
+                    verifying_key = verifying_key.to_base64(),
+                    "accepted new pending block of root type"
+                );
+
+                // Broadcast this block if we didn't have it before.
+                if state.handler.pending_blocks().get(&hash) != Some(&block) {
+                    state.broadcast(Packet::Block {
+                        root_block: state.handler.root_block,
+                        block: block.clone()
+                    });
+                }
+
+                // Store this block in the pending queue.
+                state.handler.pending_blocks_mut()
+                    .insert(hash, block);
+            }
+
+            // Otherwise, if received block is continuation of the known
+            // blockchain history.
+            //
+            // TODO: technically we should also accept 1 block deeper than the
+            //       tail since tail block is not fixated yet.
+            else if tail_block.as_ref() == Some(block.previous_hash()) {
+                #[cfg(feature = "tracing")]
+                tracing::info!(
+                    local_id = base64::encode(state.stream.local_id()),
+                    peer_id = base64::encode(state.stream.peer_id()),
+                    hash = hash.to_base64(),
+                    verifying_key = verifying_key.to_base64(),
+                    "accepted new pending block as blockchain history continuation"
+                );
+
+                // Broadcast this block if we didn't have it before.
+                if state.handler.pending_blocks().get(&hash) != Some(&block) {
+                    state.broadcast(Packet::Block {
+                        root_block: state.handler.root_block,
+                        block: block.clone()
+                    });
+                }
+
+                // Store this block in the pending queue.
+                state.handler.pending_blocks_mut()
+                    .insert(hash, block);
+            }
+
+            else {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    local_id = base64::encode(state.stream.local_id()),
+                    peer_id = base64::encode(state.stream.peer_id()),
+                    hash = hash.to_base64(),
+                    verifying_key = verifying_key.to_base64(),
+                    "rejected out of history block"
+                );
             }
         }
 

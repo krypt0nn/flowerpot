@@ -23,11 +23,11 @@ use crate::block::BlockStatus;
 use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 
-use super::{NodeState, try_write_block};
+use super::NodeState;
 
 /// Handle `ApproveBlock` packet.
 ///
-/// Return `false` is critical error occured and node connection must be
+/// Return `false` if critical error occured and node connection must be
 /// terminated.
 pub fn handle<S: Storage>(
     state: &mut NodeState<S>,
@@ -62,8 +62,26 @@ pub fn handle<S: Storage>(
         }
     };
 
+    // Read current validators list from the tracker.
+    let validators = match state.handler.tracker().get_validators() {
+        Ok(validators) => validators,
+        Err(err) => {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                err = err.to_string(),
+                local_id = base64::encode(state.stream.local_id()),
+                peer_id = base64::encode(state.stream.peer_id()),
+                target_block = target_block.to_base64(),
+                approval = approval.to_base64(),
+                "failed to read current validators list"
+            );
+
+            return true;
+        }
+    };
+
     // Skip approval if it's invalid.
-    if !is_valid || !state.handler.validators.read().contains(&verifying_key) {
+    if !is_valid || !validators.contains(&verifying_key) {
         #[cfg(feature = "tracing")]
         tracing::warn!(
             local_id = base64::encode(state.stream.local_id()),
@@ -77,7 +95,7 @@ pub fn handle<S: Storage>(
     }
 
     // Add this approval to the block if we have it.
-    let mut lock = state.handler.pending_blocks.write();
+    let mut lock = state.handler.pending_blocks_mut();
     let mut broadcast_approval = false;
     let mut write_block = None;
 
@@ -141,7 +159,7 @@ pub fn handle<S: Storage>(
         };
 
         // Skip the block if it's invalid.
-        if !is_valid || !state.handler.validators.read().contains(&verifying_key) {
+        if !is_valid || !validators.contains(&verifying_key) {
             #[cfg(feature = "tracing")]
             tracing::error!(
                 local_id = base64::encode(state.stream.local_id()),
@@ -159,13 +177,12 @@ pub fn handle<S: Storage>(
             block.current_hash(),
             verifying_key,
             block.approvals(),
-            state.handler.validators.read().as_slice()
+            validators.as_slice()
         );
 
         match status {
             Ok(BlockStatus::Approved {
                 hash,
-                verifying_key,
                 approvals,
                 ..
             }) => {
@@ -176,7 +193,7 @@ pub fn handle<S: Storage>(
                     .collect();
 
                 // Order this block to be written.
-                write_block = Some((hash, verifying_key));
+                write_block = Some(hash);
             }
 
             Err(err) => {
@@ -207,17 +224,47 @@ pub fn handle<S: Storage>(
         });
     }
 
-    // If we've approved that this block can now
-    // be written to the blockchain storage.
-    if let Some((hash, public_key)) = write_block {
+    // If we've approved that this block can now be written to the blockchain
+    // storage.
+    if let Some(hash) = write_block {
         // Try to write this block.
-        if let Some(block) = state.handler.pending_blocks.write().remove(&hash) {
-            try_write_block(
-                block,
-                hash,
-                &public_key,
-                &state.handler
-            );
+        if let Some(block) = state.handler.pending_blocks_mut().remove(&hash) {
+            // Try to write this block.
+            match state.handler.tracker().try_write_block(&block) {
+                Ok(true) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::info!(
+                        local_id = base64::encode(state.stream.local_id()),
+                        peer_id = base64::encode(state.stream.peer_id()),
+                        hash = hash.to_base64(),
+                        verifying_key = verifying_key.to_base64(),
+                        "block was added to the history"
+                    );
+                }
+
+                Ok(false) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::info!(
+                        local_id = base64::encode(state.stream.local_id()),
+                        peer_id = base64::encode(state.stream.peer_id()),
+                        hash = hash.to_base64(),
+                        verifying_key = verifying_key.to_base64(),
+                        "block was not added to the history"
+                    );
+                }
+
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        err = err.to_string(),
+                        local_id = base64::encode(state.stream.local_id()),
+                        peer_id = base64::encode(state.stream.peer_id()),
+                        hash = hash.to_base64(),
+                        verifying_key = verifying_key.to_base64(),
+                        "failed to write block to the tracker"
+                    );
+                }
+            }
         }
     }
 

@@ -26,7 +26,7 @@ use super::NodeState;
 
 /// Handle `AskPendingBlocks` packet.
 ///
-/// Return `false` is critical error occured and node connection must be
+/// Return `false` if critical error occured and node connection must be
 /// terminated.
 pub fn handle<S: Storage>(state: &mut NodeState<S>) -> bool {
     #[cfg(feature = "tracing")]

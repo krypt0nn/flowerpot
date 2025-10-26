@@ -25,7 +25,7 @@ use super::NodeState;
 
 /// Handle `AskBlock` packet.
 ///
-/// Return `false` is critical error occured and node connection must be
+/// Return `false` if critical error occured and node connection must be
 /// terminated.
 pub fn handle<S: Storage>(
     state: &mut NodeState<S>,
@@ -41,7 +41,7 @@ pub fn handle<S: Storage>(
     );
 
     // If this block is pending.
-    if let Some(block) = state.handler.pending_blocks.read().get(&target_block) {
+    if let Some(block) = state.handler.pending_blocks().get(&target_block) {
         // Then try to send it back.
         if let Err(err) = state.stream.send(Packet::Block {
             root_block: state.handler.root_block,
@@ -59,10 +59,10 @@ pub fn handle<S: Storage>(
         }
     }
 
-    // Otherwise, if we have a storage available.
-    else if let Some(storage) = &state.handler.storage {
+    // Otherwise check if it's already stored.
+    else {
         // Then try to read block from that storage.
-        match storage.read_block(&target_block) {
+        match state.handler.tracker().read_block(&target_block) {
             // If we've found the block.
             Ok(Some(block)) => {
                 // Then try to send it back.
@@ -82,15 +82,14 @@ pub fn handle<S: Storage>(
                 }
             }
 
-            // If block doesn't exist - then do
-            // nothing.
+            // If block doesn't exist - then do nothing.
             Ok(None) => (),
 
             // And if we failed - log it.
             Err(err) => {
                 #[cfg(feature = "tracing")]
                 tracing::error!(
-                    ?err,
+                    err = err.to_string(),
                     local_id = base64::encode(state.stream.local_id()),
                     peer_id = base64::encode(state.stream.peer_id()),
                     "failed to read block from the storage"

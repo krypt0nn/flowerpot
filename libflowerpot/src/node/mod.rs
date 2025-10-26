@@ -16,30 +16,37 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
-use spin::{RwLock, RwLockReadGuard};
+use spin::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::{Signature, SigningKey, VerifyingKey};
 use crate::transaction::Transaction;
-use crate::block::{Block, BlockContent, BlockDecodeError};
+use crate::block::{Block, BlockDecodeError};
 use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 use crate::protocol::network::{PacketStream, PacketStreamError};
 use crate::viewer::{BatchedViewer, ViewerError};
 
+pub mod tracker;
+
 mod validator;
 mod handlers;
+
+use tracker::{Tracker, TrackerError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError<S: Storage> {
     #[error(transparent)]
     PacketStream(PacketStreamError),
+
+    #[error(transparent)]
+    Tracker(TrackerError<S>),
 
     #[error(transparent)]
     Viewer(ViewerError),
@@ -212,18 +219,26 @@ impl Default for NodeOptions {
 }
 
 pub struct Node<S: Storage> {
+    /// Hash of the root block that the current node serves.
     root_block: Hash,
+
+    /// Table of connections to other nodes, [remote_id] => [stream].
     streams: HashMap<[u8; 32], PacketStream>,
-    storage: Option<S>,
+
+    /// List of signing keys which can be used to sign new blocks or approve
+    /// received ones.
     owned_validators: Vec<SigningKey>,
 
-    history: Vec<Hash>,
-    validators: Vec<VerifyingKey>,
-    current_distance: Hash,
-
-    indexed_transactions: HashSet<Hash>,
+    /// Table of pending transactions which are meant to be added into a new
+    /// block, [transaction_hash] => [transaction].
     pending_transactions: HashMap<Hash, Transaction>,
-    pending_blocks: HashMap<Hash, Block>
+
+    /// Table of pending blocks which are meant to be approved and added to the
+    /// blockchain history, [block_hash] => [block].
+    pending_blocks: HashMap<Hash, Block>,
+
+    /// Blockchain history tracker.
+    tracker: Tracker<S>
 }
 
 impl<S: Storage> Node<S> {
@@ -232,16 +247,22 @@ impl<S: Storage> Node<S> {
         Self {
             root_block: root_block.into(),
             streams: HashMap::new(),
-            storage: None,
             owned_validators: Vec::new(),
-
-            history: Vec::new(),
-            validators: Vec::new(),
-            current_distance: Hash::from([0xFF; 32]),
-
-            indexed_transactions: HashSet::new(),
             pending_transactions: HashMap::new(),
-            pending_blocks: HashMap::new()
+            pending_blocks: HashMap::new(),
+            tracker: Tracker::default()
+        }
+    }
+
+    /// Create new node with provided root block hash and blockchain storage.
+    pub fn from_storage(root_block: impl Into<Hash>, storage: S) -> Self {
+        Self {
+            root_block: root_block.into(),
+            streams: HashMap::new(),
+            owned_validators: Vec::new(),
+            pending_transactions: HashMap::new(),
+            pending_blocks: HashMap::new(),
+            tracker: Tracker::from_storage(storage)
         }
     }
 
@@ -250,13 +271,6 @@ impl<S: Storage> Node<S> {
         if !self.streams.contains_key(stream.peer_id()) {
             self.streams.insert(*stream.peer_id(), stream);
         }
-
-        self
-    }
-
-    /// Add blockchain storage to the node.
-    pub fn attach_storage(&mut self, storage: S) -> &mut Self {
-        self.storage = Some(storage);
 
         self
     }
@@ -311,11 +325,7 @@ impl<S: Storage> Node<S> {
         #[cfg(feature = "tracing")]
         tracing::info!("synchronizing node state");
 
-        if self.streams.is_empty() && self.storage.is_none() {
-            return Ok(());
-        }
-
-        let mut viewer = match &self.storage {
+        let mut viewer = match self.tracker.storage() {
             Some(storage) => {
                 let viewer = BatchedViewer::open_from_storage(
                     self.streams.values_mut(),
@@ -343,10 +353,8 @@ impl<S: Storage> Node<S> {
             }
         };
 
-        let mut history = Vec::with_capacity(self.history.len());
-
         loop {
-            let block = match &self.storage {
+            let block = match self.tracker.storage() {
                 Some(storage) => viewer.forward_with_storage(storage)
                     .map_err(NodeError::Viewer)?,
 
@@ -366,26 +374,10 @@ impl<S: Storage> Node<S> {
                 "read block"
             );
 
-            // Index stored transactions.
-            if let BlockContent::Transactions(transactions) = block.block.content() {
-                for transaction in transactions {
-                    self.indexed_transactions.insert(*transaction.hash());
-                }
-            }
-
-            // If storage is available - then update it.
-            if let Some(storage) = &self.storage {
-                storage.write_block(&block.block)
-                    .map_err(NodeError::Storage)?;
-            }
-
-            history.push(*block.block.current_hash());
+            // Try to write received block to the tracker.
+            self.tracker.try_write_block(&block.block)
+                .map_err(NodeError::Tracker)?;
         }
-
-        self.validators = viewer.current_validators()
-            .map_err(NodeError::Viewer)?;
-
-        self.history = history;
 
         Ok(())
     }
@@ -400,52 +392,23 @@ impl<S: Storage> Node<S> {
     /// All the non-critical errors will be silenced and displayed in tracing
     /// logs only.
     pub fn start(
-        mut self,
+        self,
         options: NodeOptions
     ) -> Result<NodeHandler<S>, NodeError<S>>
     where
-        S: Send + 'static,
+        S: Send + Sync + 'static,
         S::Error: Send + 'static
     {
         #[cfg(feature = "tracing")]
         tracing::info!("starting the node");
 
-        if let Some(storage) = &self.storage {
-            let validators = match self.history.last() {
-                Some(block) => storage.get_validators_after_block(block)
-                    .map_err(NodeError::Storage)?,
-
-                None => storage.get_validators_before_block(&self.root_block)
-                    .map_err(NodeError::Storage)?
-            };
-
-            if let Some(validators) = validators {
-                #[cfg(feature = "tracing")]
-                tracing::info!(
-                    validators = ?validators.iter()
-                        .map(|validator| validator.to_base64())
-                        .collect::<Vec<_>>(),
-                    "updated validators list"
-                );
-
-                self.validators = validators;
-            }
-        }
-
         let handler = NodeHandler {
+            root_block: self.root_block,
             streams: Arc::new(RwLock::new(HashMap::with_capacity(self.streams.len()))),
             options,
-
-            root_block: self.root_block,
-            storage: self.storage.clone(),
-
-            history: Arc::new(RwLock::new(self.history)),
-            current_distance: Arc::new(RwLock::new(self.current_distance)),
-            validators: Arc::new(RwLock::new(self.validators)),
-
-            indexed_transactions: Arc::new(RwLock::new(self.indexed_transactions)),
             pending_transactions: Arc::new(RwLock::new(self.pending_transactions)),
-            pending_blocks: Arc::new(RwLock::new(self.pending_blocks))
+            pending_blocks: Arc::new(RwLock::new(self.pending_blocks)),
+            tracker: Arc::new(Mutex::new(self.tracker))
         };
 
         // Add streams to the handler.
@@ -479,20 +442,26 @@ impl<S: Storage> Node<S> {
 /// A helper struct connected to the running node. It can be used to perform
 /// client-side operations like announcing transactions to the network.
 #[derive(Debug, Clone)]
-pub struct NodeHandler<S> {
+pub struct NodeHandler<S: Storage> {
+    /// Hash of the root block that the current node serves.
+    root_block: Hash,
+
+    /// Table of connections to other nodes, [remote_id] => [stream].
     streams: Arc<RwLock<HashMap<[u8; 32], Sender<Packet>>>>,
+
+    /// Node options used by the underlying packets handlers.
     options: NodeOptions,
 
-    root_block: Hash,
-    storage: Option<S>,
-
-    history: Arc<RwLock<Vec<Hash>>>,
-    current_distance: Arc<RwLock<Hash>>,
-    validators: Arc<RwLock<Vec<VerifyingKey>>>,
-
-    indexed_transactions: Arc<RwLock<HashSet<Hash>>>,
+    /// Table of pending transactions which are meant to be added into a new
+    /// block, [transaction_hash] => [transaction].
     pending_transactions: Arc<RwLock<HashMap<Hash, Transaction>>>,
-    pending_blocks: Arc<RwLock<HashMap<Hash, Block>>>
+
+    /// Table of pending blocks which are meant to be approved and added to the
+    /// blockchain history, [block_hash] => [block].
+    pending_blocks: Arc<RwLock<HashMap<Hash, Block>>>,
+
+    /// Blockchain history tracker.
+    tracker: Arc<Mutex<Tracker<S>>>
 }
 
 impl<S: Storage> NodeHandler<S> {
@@ -525,6 +494,12 @@ impl<S: Storage> NodeHandler<S> {
         self.streams.write().insert(peer_id, sender);
     }
 
+    /// Get root block targeted by the current node.
+    #[inline(always)]
+    pub const fn root_block(&self) -> &Hash {
+        &self.root_block
+    }
+
     /// Get list of available streams' endpoint IDs.
     pub fn streams(&self) -> Box<[[u8; 32]]> {
         self.streams.read()
@@ -533,16 +508,10 @@ impl<S: Storage> NodeHandler<S> {
             .collect::<Box<[[u8; 32]]>>()
     }
 
-    /// Get list of known blockchain history.
+    /// Get blockchain storage tracker.
     #[inline]
-    pub fn history(&self) -> RwLockReadGuard<'_, Vec<Hash>> {
-        self.history.read()
-    }
-
-    /// Get list of current blockchain validators.
-    #[inline]
-    pub fn validators(&self) -> RwLockReadGuard<'_, Vec<VerifyingKey>> {
-        self.validators.read()
+    pub fn tracker(&self) -> MutexGuard<'_, Tracker<S>> {
+        self.tracker.lock()
     }
 
     /// Get table of known pending transactions.
@@ -553,12 +522,28 @@ impl<S: Storage> NodeHandler<S> {
         self.pending_transactions.read()
     }
 
+    /// Get mutable table of known pending transactions.
+    #[inline]
+    pub fn pending_transactions_mut(
+        &self
+    ) -> RwLockWriteGuard<'_, HashMap<Hash, Transaction>> {
+        self.pending_transactions.write()
+    }
+
     /// Get table of known pending blocks.
     #[inline]
     pub fn pending_blocks(
         &self
     ) -> RwLockReadGuard<'_, HashMap<Hash, Block>> {
         self.pending_blocks.read()
+    }
+
+    /// Get mutable table of known pending blocks.
+    #[inline]
+    pub fn pending_blocks_mut(
+        &self
+    ) -> RwLockWriteGuard<'_, HashMap<Hash, Block>> {
+        self.pending_blocks.write()
     }
 
     fn send(&self, packet: Packet) {

@@ -19,9 +19,6 @@
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use crate::crypto::base64;
-use crate::crypto::hash::Hash;
-use crate::crypto::sign::VerifyingKey;
-use crate::block::{Block, BlockContent};
 use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 use crate::protocol::network::PacketStream;
@@ -71,122 +68,6 @@ impl<S: Storage> NodeState<S> {
 
         for endpoint_id in disconnected {
             self.handler.streams.write().remove(&endpoint_id);
-        }
-    }
-}
-
-/// Try to write provided block to the blockchain. This function
-/// does not verify the block and only performs the writing itself.
-///
-/// Before writing the block it will be compared with the current
-/// one to attempt unfixed block replacement.
-fn try_write_block<S: Storage>(
-    block: Block,
-    hash: Hash,
-    verifying_key: &VerifyingKey,
-    state: &NodeHandler<S>
-) {
-    let mut history = state.history.write();
-    let mut current_distance = state.current_distance.write();
-    let mut validators = state.validators.write();
-
-    let mut indexed_transactions = state.indexed_transactions.write();
-    let mut pending_transactions = state.pending_transactions.write();
-    let mut pending_blocks = state.pending_blocks.write();
-
-    let n = history.len();
-
-    // Distance between the previous block and the new block's
-    // author.
-    let new_distance = crate::block_validator_distance(
-        history[n - 2],
-        verifying_key
-    );
-
-    // If this block is a *replacement* for the last block of the
-    // blockchain - then we must compare its xor distance to decide
-    // what to do.
-    if n > 1 && &history[n - 2] == block.previous_hash() {
-        // Reject new block if the current one is closer to the
-        // previous one.
-        if  *current_distance <= new_distance
-            || (*current_distance == new_distance && history[n - 2] <= hash)
-        {
-            #[cfg(feature = "tracing")]
-            tracing::warn!(
-                hash = hash.to_base64(),
-                "attempted to modify the blockchain history with more distant block"
-            );
-
-            return;
-        }
-    }
-
-    // If this block is a continuation of the blockchain then we
-    // simply push it to the end of the history, update the storage
-    // and validators list, remove related pending transactions.
-    //
-    // Otherwise we are not allowed to modify the blockchain history
-    // and thus just abort this function.
-    else if &history[n - 1] != block.previous_hash() {
-        #[cfg(feature = "tracing")]
-        tracing::warn!(
-            hash = hash.to_base64(),
-            "attempted to modify the blockchain history or write out of the known history (out of sync node?)"
-        );
-
-        return;
-    }
-
-    // Try to write this block to the blockchain storage.
-    if let Some(storage) = &state.storage {
-        match storage.write_block(&block) {
-            Ok(true) => (),
-
-            Ok(false) => {
-                #[cfg(feature = "tracing")]
-                tracing::warn!(
-                    hash = hash.to_base64(),
-                    "attempted to write new block to the blockchain storage but history was not modified"
-                );
-
-                return;
-            }
-
-            Err(err) => {
-                #[cfg(feature = "tracing")]
-                tracing::error!(
-                    ?err,
-                    hash = hash.to_base64(),
-                    "failed to write new block to the blockchain storage"
-                );
-
-                return;
-            }
-        }
-    }
-
-    // Update in-RAM blocks history.
-    history.push(hash);
-
-    // Update validators list.
-    if let BlockContent::Validators(new_validators) = block.content() {
-        *validators = new_validators.to_vec();
-    }
-
-    // Update current block's distance.
-    *current_distance = new_distance;
-
-    // Remove this block from the pending blocks pool.
-    pending_blocks.remove(&hash);
-
-    // Remove related pending transactions.
-    if let BlockContent::Transactions(transactions) = block.content() {
-        for transaction in transactions {
-            let hash = transaction.hash();
-
-            pending_transactions.remove(hash);
-            indexed_transactions.insert(*hash);
         }
     }
 }

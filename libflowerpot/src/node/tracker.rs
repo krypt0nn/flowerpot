@@ -20,6 +20,7 @@ use std::collections::HashSet;
 
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::{VerifyingKey, SignatureError};
+use crate::transaction::Transaction;
 use crate::block::{Block, BlockContent};
 use crate::storage::Storage;
 
@@ -126,6 +127,40 @@ impl<S: Storage> Tracker<S> {
         }
     }
 
+    /// Try to read transaction from the underlying blockchain storage.
+    ///
+    /// This method will return `Ok(Some(..))` *only* if tracker has a storage.
+    /// Head-only tracker doesn't store any actual data besides the hashes and
+    /// cannot read transactions.
+    pub fn read_transaction(
+        &self,
+        hash: &Hash
+    ) -> Result<Option<Transaction>, TrackerError<S>> {
+        match self {
+            Self::Full(storage) => storage.read_transaction(hash)
+                .map_err(TrackerError::Storage),
+
+            Self::HeadOnly { .. } => Ok(None)
+        }
+    }
+
+    /// Try to read block from the underlying blockchain storage.
+    ///
+    /// This method will return `Ok(Some(..))` *only* if tracker has a storage.
+    /// Head-only tracker doesn't store any actual data besides the hashes and
+    /// cannot read block.
+    pub fn read_block(
+        &self,
+        hash: &Hash
+    ) -> Result<Option<Block>, TrackerError<S>> {
+        match self {
+            Self::Full(storage) => storage.read_block(hash)
+                .map_err(TrackerError::Storage),
+
+            Self::HeadOnly { .. } => Ok(None)
+        }
+    }
+
     /// Try to get a part of the known blockchain history.
     ///
     /// `offset = 0` is the root block of the blockchain.
@@ -155,6 +190,19 @@ impl<S: Storage> Tracker<S> {
 
                 Ok(history)
             }
+        }
+    }
+
+    /// Get list of current blockchain validators.
+    ///
+    /// Returned list is equal to the
+    /// `Storage::get_validators_after(Tracker::get_tail_block())` value.
+    pub fn get_validators(&self) -> Result<Vec<VerifyingKey>, TrackerError<S>> {
+        match self {
+            Self::Full(storage) => storage.get_current_validators()
+                .map_err(TrackerError::Storage),
+
+            Self::HeadOnly { validators, .. } => Ok(validators.clone())
         }
     }
 

@@ -25,7 +25,7 @@ use super::NodeState;
 
 /// Handle `Transaction` packet.
 ///
-/// Return `false` is critical error occured and node connection must be
+/// Return `false` if critical error occured and node connection must be
 /// terminated.
 pub fn handle<S: Storage>(
     state: &mut NodeState<S>,
@@ -81,36 +81,50 @@ pub fn handle<S: Storage>(
         return true;
     }
 
-    // Skip already stored transactions.
-    if let Some(storage) = &state.handler.storage
-        && let Ok(true) = storage.has_transaction(transaction.hash())
-    {
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            local_id = base64::encode(state.stream.local_id()),
-            peer_id = base64::encode(state.stream.peer_id()),
-            hash = transaction.hash().to_base64(),
-            verifying_key = verifying_key.to_base64(),
-            "received already stored transaction"
-        );
-
-        return true;
-    }
-
-    // Reject already indexed transactions.
-    if state.handler.indexed_transactions.read().contains(transaction.hash())
-        || state.handler.pending_transactions.read().contains_key(transaction.hash())
-    {
+    // Skip pending transactions.
+    if state.handler.pending_transactions().contains_key(transaction.hash()) {
         #[cfg(feature = "tracing")]
         tracing::trace!(
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
             hash = transaction.hash().to_base64(),
             verifying_key = verifying_key.to_base64(),
-            "received already indexed transaction"
+            "received pending transaction"
         );
 
         return true;
+    }
+
+    // Skip already stored transactions.
+    match state.handler.tracker().has_transaction(transaction.hash()) {
+        Ok(false) => (),
+
+        Ok(true) => {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                local_id = base64::encode(state.stream.local_id()),
+                peer_id = base64::encode(state.stream.peer_id()),
+                hash = transaction.hash().to_base64(),
+                verifying_key = verifying_key.to_base64(),
+                "received already indexed transaction"
+            );
+
+            return true;
+        }
+
+        Err(err) => {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                err = err.to_string(),
+                local_id = base64::encode(state.stream.local_id()),
+                peer_id = base64::encode(state.stream.peer_id()),
+                hash = transaction.hash().to_base64(),
+                verifying_key = verifying_key.to_base64(),
+                "failed to check if transaction is indexed by the tracker"
+            );
+
+            return true;
+        }
     }
 
     // Check this transaction using the provided filter.
