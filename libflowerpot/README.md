@@ -1,28 +1,97 @@
-# 🪴 libflowerpot - a rust-written blockchain for your decentralized app needs!
+# 🪴 libflowerpot - a rust-written decentralized messages synchronization library
 
 > In development, not ready for production use until `v1.0.0` release!
 
-Libflowerpot is a rust library implementing a PoS/PoW-like blockchain.
-It features a built-in gas system which can be *mined* by blockchain users and
-used to store *raw bytes* in the blockchain as in a globally available data
-storage. This allows you, as a developer, to create decentralized apps which
-could store their data in a common storage which features data integrity,
-identical order of events for all the parties, and built-in decentralized
-networking code.
+Did you ever want to make your own decentralized application? You've most likely
+faced the following problems to solve:
 
-Let's say you want to make a decentralized chat app. You'd need to implement
-a mechanism to synchronize messages between all the users of your chat.
-This library handles decentralized networking and organizes data identically
-to all the users of your app due to the nature of a blockchain.
+- Create new accounts and verify that posted content really belongs to some
+  accounts;
+- Synchronize messages (data packets) between all the peer-to-peer nodes of the
+  network;
+- Make sure that all the nodes in the network have the same packets and that
+  nodes don't miss some of them (like in TCP where we make sure that all parties
+  receive the full data stream);
+- Preferably have a unified ordering of messages between all the parties, so
+  in e.g. a messaging app everybody see messages in the same order.
 
-Some key points:
+These particularly difficult tasks can naturally be solved by *blockchain-like*
+architecture, and that's what this library does!
 
-- Transactions are raw bytes with random seeds for unique hash values;
-- secp256k1 curve for signing (same as in bitcoin);
-- 2/3 of validators must approve new blocks
-  (PoS mechanism for blocks creation speed);
-- Built-in PoW mechanism for gas usage
-  (users are forced to *mine* some "currency" to create transactions).
+## User accounts
+
+An account within the flowerpot network is a secp256k1 elliptic curve (same as
+in bitcoin) keypair consisting of a public and secret keys. The public key is
+used as a user identifier, while secret key is used to send data to the network.
+Elliptic curve based digital signatures protocol (ECDSA) allows to identify and
+verify the authors of all the messages in the network. It also means that at any
+point you can create an infinite amount of accounts *(by default!)* without any
+restrictions.
+
+## User messages
+
+A user message is a raw bytes array. You, as the application author, define
+this raw bytes array format yourself. This can be a protobuf, a bson, or a
+hanf-crafted binary encoding format (which is generally recommended!). Users
+share these messages with each other and store them in a temporary messages
+pool. Libflowerpot allows you to define some filtering rules to restrict what
+messages can be stored in these pools to e.g. ensure proper messages format.
+
+## Messages cost
+
+Each message has a base cost value calculated as `ceil(message_bytes / 1000)`,
+so roughly you "pay" 1 *something* (gas/fee) for each kilobyte of message
+length. Even if your message is shorter than that - you still have to pay 1 KB
+cost. Also note that the cost is integer and doesn't contain floating point.
+
+The final cost of a message is calculated as `base_cost * inflation_factor`.
+The `inflation_factor` value is integer and determined by *you*, the developer
+of the app. If you don't want users to pay anything (e.g. because you've made
+your own mechanism of restricting user accounts and don't need the anti-bot
+prevention) then you define `inflation_factor = 0`. Otherwise you can make a
+funcation which can calculate the factor at any historic point. E.g., you can
+make such a function that will double the `inflation_factor` with every GB of
+users' messages stored.
+
+The gas/fees system is needed to naturally prevent people from abusing
+decentralized network. Normally, if people are not restricted in any way, there
+will be some to create new accounts and flood the network with gibberish values.
+To prevent this you can either implement your own logic of limiting accounts
+creation (e.g. make users to attach special digital signature to their messages
+issued by you), or make users solve some hard computation task (solve PoW task)
+so that all the people using your app will be rate-limited by their computers
+and won't be able to flood the network as easily. The way you implement this
+is chosen by you. Libflowerpot doesn't provide any built-in solution on its own.
+
+## Network authority
+
+After many time spent on designing the project architecture I decided that the
+central authority is an optimal solution. In flowerpot network, there's one
+single account that can approve messages from other users and include them to
+the global history.
+
+Previously, there was a validators system with a BFT-like mechanism of choosing
+a new history block, and a special mechanism of choosing the best history fork.
+
+The main benefit of validators system is that general people can become
+validators of the network and work together to improve its quality, make it more
+decentralized and resistant. Hovewer, to become a validator people would need to
+solve some kind of PoW task. Another problem is that due to lack of economics
+within the network (there's no coin) validators have no benefit in maintaining
+the network, beside altruism or egoism (they could either want to support the
+network or ruin it by creating new validators and delete their signing keys,
+making BFT mechanism unfunctional).
+
+I've decided that it's better to have a single authority issued by the
+application author. After all, it's in their intention to make this authority
+running since they created the application. It's also still possible to create
+your own network and just swap some values in the original application in case
+the original network went down or something else happened.
+
+To put it shortly: validators system creates a lot of problems and provides too
+few benefits in our use case, while central authority is much easier to
+implement and it still can be swapped by community members, creating a parallel
+network (even with content mirroring if some effort is done).
 
 # Roadmap to v1.0.0 release
 
@@ -36,11 +105,9 @@ Some key points:
         - [x] Implement node handler to send new transactions and perform other
               client-side actions
     - [x] Rewrite validator code
-- [ ] Rework blocks and transactions
+- [x] Rework blocks and transactions
     - [x] Remove zstd compression since it's not reliable
     - [x] Remove json serialization
-    - [ ] Make transactions have multiple types; implement `Mint` and `Data`
-          type transactions
 - [x] Rework project structure
     - [x] Rename github repository to `flowerpot`
     - [x] Move `libflowerpot` into a separate workspace
@@ -51,33 +118,30 @@ Some key points:
         - [x] Create new blockchains
         - [x] Connect to a blockchain and monitor its activity
         - [x] Show blockchain status
+- [ ] Get rid of validators system
+    - [ ] Rename transactions into messages
+    - [ ] Remove multiple block types and keep only one with list of messages
+    - [ ] Remove `approvals` field and keep only the block signature
+    - [ ] Update `Storage` trait to know the current history authority instead
+          of knowing validators at any point in time
+    - [ ] Rework the validation mechanism to just check that the block is issued
+          by the authority
+    - [ ] Rework the fork choosing mechanism to prefer the *first* issued block
+          by both looking at its creation time and receiving time recorded by
+          the local node (double check) to prevent history modifications
 - [ ] Implement gas system
-    - [ ] Calculate transaction gas usage (`ceil(size_in_bytes * alpha)`)
-    - [ ] Calculate total block gas usage (sum of transactions' gas usage)
-    - [ ] Calculate gas inflation
-          (`alpha = prev_alpha * 2` or `alpha = prev_alpha / 2`)
-    - [ ] Implement gas-related methods in the storage trait
-    - [ ] Implement `max_gas` field for every transaction
-    - [ ] Withdraw gas from the users' accounts for each staged transaction
-- [ ] Implement mining system
-    - [ ] Implement PoW task based on the [DodoPoW](https://github.com/krypt0nn/dodopow)
-    - [ ] Implement tasks verification and balance updating logic on transaction
-          staging
-    - [ ] Add mining-related functionality to the `bouquet` CLI tool
-- [ ] Rework validators system
-    - [ ] Remove different block types, keep only transactions list
-    - [ ] Add new transaction type which will make its author a validator in
-          cost of burning large amount of gas
-    - [ ] Make blockchain's creator a validator by default
-    - [ ] Choose blocks to approve using xor distance of previous block hash
-          and public keys of every known validator, prioritize pending blocks
-          using these distances
-    - [ ] Give validator which made a new block some gas fee
-          (needs further thinking)
+    - [ ] Implement `inflation_rule` callback to calculate `inflation_factor`
+          value at any history point
+    - [ ] Implement a method to calculate users' messages cost:
+          `ceil(size_in_bytes / 1000) * inflation_factor`
+    - [ ] Implement a `Storage` trait method to get users' balances at any
+          history point
+    - [ ] Update the pending messages accepting logic to check that the user
+          issued the message has enough balance for it
 - [ ] Release preparations
     - [ ] Resolve all the TODO-s and FIXME-s
     - [ ] Prepare technical documentation and standardize the protocol
     - [ ] Test the library in production for some time
 
 Author: [Nikita Podvirnyi](https://github.com/krypt0nn)\
-Licensed under [GPL-3.0](LICENSE)
+Licensed under [GPL-3.0-or-later](LICENSE)
