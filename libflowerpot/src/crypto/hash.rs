@@ -18,8 +18,15 @@
 
 use super::base64;
 
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialOrd, Ord, Hash)]
 pub struct Hash(pub [u8; 32]);
+
+impl Default for Hash {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
 
 impl Hash {
     /// Byte length of the hash.
@@ -34,6 +41,9 @@ impl Hash {
          2,   0, 194, 206,  50,  77, 133, 115,
         40, 168, 154, 253, 246, 174, 123,  68
     ];
+
+    /// Default value of the hash.
+    pub const ZERO: Self = Self([0; Self::SIZE]);
 
     #[inline]
     pub fn hasher() -> Hasher {
@@ -128,6 +138,27 @@ impl std::ops::BitXor for Hash {
         (0..32).for_each(|i| self.0[i] ^= rhs.0[i]);
 
         self
+    }
+}
+
+impl PartialEq for Hash {
+    #[inline]
+    fn eq(&self, other: &Hash) -> bool {
+        constant_time_eq::constant_time_eq_32(&self.0, &other.0)
+    }
+}
+
+impl PartialEq<[u8; Hash::SIZE]> for Hash {
+    #[inline]
+    fn eq(&self, other: &[u8; Hash::SIZE]) -> bool {
+        constant_time_eq::constant_time_eq_32(&self.0, other)
+    }
+}
+
+impl PartialEq<[u8]> for Hash {
+    #[inline]
+    fn eq(&self, other: &[u8]) -> bool {
+        constant_time_eq::constant_time_eq(&self.0, other)
     }
 }
 

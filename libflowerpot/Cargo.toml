@@ -30,6 +30,7 @@ tracing = { version = "0.1", optional = true }
 spin = "0.10"
 time = "0.3"
 blake3 = "1.8"
+constant_time_eq = "0.4"
 base64 = "0.22"
 k256 = { version = "0.13", features = ["ecdh"] }
 chacha20 = { version = "0.9", optional = true }
