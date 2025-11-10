@@ -28,7 +28,21 @@
                     src = ./.;
                     cargoLock.lockFile = ./Cargo.lock;
 
-                    doCheck = false;
+                    meta = with pkgs.lib; {
+                        description = config.package.description;
+                        homepage = config.package.homepage;
+                        license = licenses.gpl3Only;
+
+                        maintainers = [
+                            {
+                                name = "Nikita Podvirnyi";
+                                email = "krypt0nn@vk.com";
+                                matrix = "@krypt0nn:mozilla.org";
+                                github = "krypt0nn";
+                                githubId = 29639507;
+                            }
+                        ];
+                    };
 
                     nativeBuildInputs = with pkgs; [
                         rust-bin.stable.latest.minimal
