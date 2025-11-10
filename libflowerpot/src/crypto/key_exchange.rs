@@ -54,7 +54,7 @@ impl SecretKey {
 
         *blake3::keyed_hash(
             &Self::SALT,
-            shared_secret.raw_secret_bytes().as_slice()
+            shared_secret.raw_secret_bytes()
         ).as_bytes()
     }
 }

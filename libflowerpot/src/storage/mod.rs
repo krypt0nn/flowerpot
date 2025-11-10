@@ -19,21 +19,41 @@
 use std::iter::FusedIterator;
 
 use crate::crypto::hash::Hash;
-use crate::crypto::sign::VerifyingKey;
-use crate::transaction::Transaction;
-use crate::block::{Block, BlockContent};
-
-// FIXME: `write_block` must update the same block if the new variant has more
-//        approvals.
-//
-// TODO: test for the upper case and add tests for different block content
-//       types.
+use crate::message::Message;
+use crate::block::Block;
 
 #[cfg(feature = "ram_storage")]
 pub mod ram_storage;
 
 #[cfg(feature = "sqlite_storage")]
 pub mod sqlite_storage;
+
+/// Possible block writing outcomes according to the standard algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StorageWriteResult {
+    /// Block is appended to the end of the chain.
+    Success,
+
+    /// Provided block is not verified or is in some sort invalid.
+    BlockInvalid,
+
+    /// Provided block is already stored.
+    BlockAlreadyStored,
+
+    /// Provided block has messages with the same hash value.
+    BlockHasDuplicateMessages,
+
+    /// Provided block has messages which are already stored in previous
+    /// blocks.
+    BlockHasDuplicateHistoryMessages,
+
+    /// Storage has no blocks and provided block is not a root block.
+    NotRootBlock,
+
+    /// Provided block cannot be chained to any other stored block (there's no
+    /// block with its prev_hash hash).
+    OutOfHistoryBlock
+}
 
 pub trait Storage: Clone {
     type Error: std::error::Error + Send + 'static;
@@ -68,7 +88,7 @@ pub trait Storage: Clone {
     /// default hash (zeros).
     fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error> {
         match self.read_block(hash)? {
-            Some(block) => Ok(Some(*block.previous_hash())),
+            Some(block) => Ok(Some(*block.prev_hash())),
             None => Ok(None)
         }
     }
@@ -76,59 +96,65 @@ pub trait Storage: Clone {
     /// Read block from its hash. Return `Ok(None)` if there's no such block.
     fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error>;
 
-    /// Write block to the blockchain.
+    /// Try to write a block to the blockchain.
     ///
     /// This method must automatically prune excess blocks if this one modifies
-    /// the history, and write all the transactions from the block's content if
-    /// there's any. History modifications, block and stored transactions must
-    /// be verified outside of this trait so this method must work without extra
-    /// verifications, even if the block is not valid.
+    /// the history. History modifications, block and stored messages must
+    /// be verified outside of this trait so this method should work without
+    /// extra verifications (but they still can be implemented if wanted).
     ///
-    /// Transactions with the same hash must not be allowed. If there's already
-    /// a block with some transaction - this method must return `Ok(false)` and
-    /// forbid writing a new block with the same transaction hash.
+    /// Messages with the same hash must not be allowed. If a new block is
+    /// attempted to be added to the history, then this method must return
+    /// `Ok(false)` if a message in this new block is already stored in some
+    /// previous block.
     ///
     /// Return `Ok(true)` if the blockchain history was modified, otherwise
     /// `Ok(false)`.
     ///
     /// # Blocks writing rules
     ///
-    /// - If a block with the same hash is already stored then do nothing.
-    /// - If there's already a block with the same-hashed transaction stored as
-    ///   what we have in the new block, or if this block has multiple copies
-    ///   of the same-hashed transaction, then reject the new block.
-    /// - If there's no blocks in the storage then
+    /// - If a block with the same hash is already stored then reject it.
+    /// - If the provided block has messages with duplicate hashes then it must
+    ///   be rejected.
+    /// - If there's no blocks in the storage then:
     ///     - If the block is of the root type - store it;
     ///     - Otherwise reject it.
     /// - If there's no block with the provided block's previous hash then
-    ///   reject it because it's out of the history.
+    ///   reject it because it's out of the history (can't be chained to any
+    ///   other block).
     /// - If the provided block's previous hash is stored and the provided block
-    ///   is not stored yet then
-    ///     - If the previous block is the tail block of the history then we
-    ///       simply push it to the end of the blockchain.
-    ///     - If the previous block is not the tail block of the history then we
-    ///       remove all the following blocks and overwrite the history.
-    fn write_block(&self, block: &Block) -> Result<bool, Self::Error>;
+    ///   is not stored yet then:
+    ///     - If the previous block is the tail block of the history then:
+    ///         - If any block message hash is stored on the chain already then
+    ///           the block must be rejected;
+    ///         - Otherwise write this block to the end of the chain.
+    ///     - If the previous block is not the tail block of the history then:
+    ///         - Remove all the following blocks;
+    ///         - If there's no duplicate messages then append the new block to
+    ///           the chain;
+    ///         - Otherwise revert blocks removal and reject new block.
+    fn write_block(
+        &self,
+        block: &Block
+    ) -> Result<StorageWriteResult, Self::Error>;
 
-    /// Check if blockchain has transaction with given hash.
-    fn has_transaction(&self, transaction: &Hash) -> Result<bool, Self::Error> {
-        Ok(self.find_transaction(transaction)?.is_some())
+    /// Check if blockchain has message with given hash.
+    fn has_message(&self, hash: &Hash) -> Result<bool, Self::Error> {
+        Ok(self.find_message(hash)?.is_some())
     }
 
-    /// Find block hash in which transaction with provided hash is stored.
-    /// Return `None` if there's no such transaction.
-    fn find_transaction(
+    /// Find block hash in which message with provided hash is stored. Return
+    /// `Ok(None)` if there's no such message.
+    fn find_message(
         &self,
-        transaction: &Hash
+        hash: &Hash
     ) -> Result<Option<Hash>, Self::Error> {
         let mut curr_block = self.root_block()?;
 
         while let Some(block_hash) = &curr_block {
-            if let Some(block) = self.read_block(block_hash)?
-                && let BlockContent::Transactions(transactions) = block.content()
-            {
-                for curr_transaction in transactions {
-                    if curr_transaction.hash() == transaction {
+            if let Some(block) = self.read_block(block_hash)? {
+                for message in block.messages() {
+                    if message.hash() == hash {
                         return Ok(Some(*block_hash));
                     }
                 }
@@ -140,13 +166,13 @@ pub trait Storage: Clone {
         Ok(None)
     }
 
-    /// Read transaction from its hash. Return `None` if there's no such
-    /// transaction.
-    fn read_transaction(
+    /// Read message from its hash. Return `Ok(None)` if there's no such
+    /// message.
+    fn read_message(
         &self,
-        transaction: &Hash
-    ) -> Result<Option<Transaction>, Self::Error> {
-        let Some(block) = self.find_transaction(transaction)? else {
+        hash: &Hash
+    ) -> Result<Option<Message>, Self::Error> {
+        let Some(block) = self.find_message(hash)? else {
             return Ok(None);
         };
 
@@ -154,16 +180,13 @@ pub trait Storage: Clone {
             return Ok(None);
         };
 
-        if let BlockContent::Transactions(transactions) = block.content() {
-            return Ok(transactions.iter()
-                .find(|tr| tr.hash() == transaction)
-                .cloned());
-        }
-
-        Ok(None)
+        Ok(block.messages()
+            .iter()
+            .find(|tr| tr.hash() == hash)
+            .cloned())
     }
 
-    /// Get iterator over all the blocks stored in the current storage.
+    /// Get iterator over all the blocks hashes stored in the current storage.
     #[inline]
     fn history(&self) -> StorageHistoryIter<'_, Self> where Self: Sized {
         StorageHistoryIter::new(self)
@@ -173,117 +196,6 @@ pub trait Storage: Clone {
     #[inline]
     fn blocks(&self) -> StorageBlocksIter<'_, Self> where Self: Sized {
         StorageBlocksIter::new(self)
-    }
-
-    /// Get list of blockchain validators at the point in time when the block
-    /// with provided hash didn't exist yet. This is needed because validators
-    /// can change over time and we want to know which validators existed at any
-    /// point in time.
-    ///
-    /// The "didn't exist" rule means that if the block with provided hash
-    /// changes validators list then this method should return *previous
-    /// validators* list - so validators who can approve creation of the block
-    /// with provided hash.
-    ///
-    /// By default the root block's signer is the only existing validator.
-    ///
-    /// Return `Ok(None)` if requested block is not stored in the local storage.
-    ///
-    /// > Note: the default implementation is suboptimal and custom
-    /// > implementations are recommended.
-    fn get_validators_before_block(
-        &self,
-        hash: &Hash
-    ) -> Result<Option<Vec<VerifyingKey>>, Self::Error> {
-        let Some(block) = self.read_block(hash)? else {
-            return Ok(None);
-        };
-
-        let mut block = self.read_block(block.previous_hash())?;
-
-        while let Some(inner) = &block {
-            if let BlockContent::Validators(validators) = inner.content() {
-                return Ok(Some(validators.to_vec()));
-            }
-
-            block = self.read_block(inner.previous_hash())?;
-        }
-
-        let Some(root_block) = self.root_block()? else {
-            return Ok(Some(vec![]));
-        };
-
-        let Some(root_block) = self.read_block(&root_block)? else {
-            return Ok(Some(vec![]));
-        };
-
-        let Ok((_, public_key)) = root_block.verify() else {
-            return Ok(Some(vec![]));
-        };
-
-        Ok(Some(vec![public_key]))
-    }
-
-    /// Similar to `get_validators_before_block` but this method should return
-    /// list of validators after the block with provided hash was added to
-    /// the blockchain.
-    ///
-    /// By default the root block's signer is the only existing validator.
-    ///
-    /// Return `Ok(None)` if requested block is not stored in the local storage.
-    ///
-    /// > Note: the default implementation is suboptimal and custom
-    /// > implementations are recommended.
-    fn get_validators_after_block(
-        &self,
-        hash: &Hash
-    ) -> Result<Option<Vec<VerifyingKey>>, Self::Error> {
-        if !self.has_block(hash)? {
-            return Ok(None);
-        }
-
-        let mut block = self.read_block(hash)?;
-
-        while let Some(inner) = &block {
-            if let BlockContent::Validators(validators) = inner.content() {
-                return Ok(Some(validators.to_vec()));
-            }
-
-            block = self.read_block(inner.previous_hash())?;
-        }
-
-        let Some(root_block) = self.root_block()? else {
-            return Ok(Some(vec![]));
-        };
-
-        let Some(root_block) = self.read_block(&root_block)? else {
-            return Ok(Some(vec![]));
-        };
-
-        let Ok((_, public_key)) = root_block.verify() else {
-            return Ok(Some(vec![]));
-        };
-
-        Ok(Some(vec![public_key]))
-    }
-
-    /// Get list of current blockchain validators.
-    ///
-    /// By default the root block's signer is the only existing validator.
-    fn get_current_validators(&self) -> Result<Vec<VerifyingKey>, Self::Error> {
-        let Some(tail_block) = self.tail_block()? else {
-            // No tail block => blockchain is empty, no validators available.
-            return Ok(vec![]);
-        };
-
-        // Can return `None` only if `read_block` decided that tail block
-        // doesn't exist which shouldn't happen.
-        if let Some(validators) = self.get_validators_after_block(&tail_block)? {
-            return Ok(validators);
-        }
-
-        // Fallback value.
-        Ok(vec![])
     }
 }
 
@@ -386,418 +298,389 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     use rand_chacha::rand_core::SeedableRng;
 
     use crate::crypto::sign::SigningKey;
-    use crate::block::BlockContent;
 
     // Obvious checks for empty storage.
 
     assert!(storage.root_block()?.is_none());
     assert!(storage.tail_block()?.is_none());
-    assert!(!storage.has_block(&Hash::default())?);
-    assert!(storage.next_block(&Hash::default())?.is_none());
-    assert!(storage.read_block(&Hash::default())?.is_none());
-    assert!(!storage.has_transaction(&Hash::default())?);
-    assert!(storage.find_transaction(&Hash::default())?.is_none());
-    assert!(storage.read_transaction(&Hash::default())?.is_none());
-    assert_eq!(storage.blocks().count(), 0);
-    assert!(storage.get_current_validators()?.is_empty());
+    assert!(!storage.has_block(&Hash::ZERO)?);
+    assert!(storage.next_block(&Hash::ZERO)?.is_none());
+    assert!(storage.read_block(&Hash::ZERO)?.is_none());
+    assert!(!storage.has_message(&Hash::ZERO)?);
+    assert!(storage.find_message(&Hash::ZERO)?.is_none());
+    assert!(storage.read_message(&Hash::ZERO)?.is_none());
 
-    // Prepare test blocks.
+    assert_eq!(storage.history().count(), 0);
+    assert_eq!(storage.blocks().count(), 0);
+
+    // Prepare test messages.
 
     let mut rng = ChaCha8Rng::seed_from_u64(123);
 
     let signing_key = SigningKey::random(&mut rng);
 
-    let block_1 = Block::new(
-        &signing_key,
-        Hash::default(),
-        BlockContent::data("Block 1".as_bytes())
-    ).unwrap();
+    let message_1 = Message::create(&signing_key, b"Message 1".as_slice()).unwrap();
+    let message_2 = Message::create(&signing_key, b"Message 2".as_slice()).unwrap();
+    let message_3 = Message::create(&signing_key, b"Message 3".as_slice()).unwrap();
+
+    // Prepare test blocks.
+
+    let block_1 = Block::create_root(&signing_key).unwrap();
 
     assert!(block_1.is_root());
+    assert_eq!(block_1.prev_hash(), &Hash::ZERO);
 
-    let block_2 = Block::new(
-        &signing_key,
-        block_1.current_hash(),
-        BlockContent::data("Block 2".as_bytes())
-    ).unwrap();
+    let block_2 = Block::create(&signing_key, block_1.hash(), [
+        message_1.clone()
+    ]).unwrap();
 
-    let block_3 = Block::new(
-        &signing_key,
-        block_2.current_hash(),
-        BlockContent::data("Block 3".as_bytes())
-    ).unwrap();
+    let block_3 = Block::create(&signing_key, block_2.hash(), [
+        message_2.clone(),
+        message_3.clone()
+    ]).unwrap();
 
-    // Prepare alternative test blocks.
+    assert!(!block_2.is_root());
+    assert!(!block_3.is_root());
 
-    let signing_key_alt = SigningKey::random(&mut rng);
-
-    let block_1_alt = Block::new(
-        &signing_key_alt,
-        Hash::default(),
-        BlockContent::data("Alternative block 1".as_bytes())
-    ).unwrap();
-
-    assert!(block_1_alt.is_root());
-
-    let block_2_alt = Block::new(
-        &signing_key_alt,
-        block_1.current_hash(),
-        BlockContent::data("Alternative block 2".as_bytes())
-    ).unwrap();
-
-    let block_3_alt = Block::new(
-        &signing_key_alt,
-        block_2.current_hash(),
-        BlockContent::data("Alternative block 3".as_bytes())
-    ).unwrap();
-
-    // 1. Out of order writing.
+    // 1. Out of order writing without root block stored.
     //
     // Block 2 must be rejected by the method since it's not a root block type.
 
-    assert!(!storage.write_block(&block_2)?);
+    assert_eq!(
+        storage.write_block(&block_2)?,
+        StorageWriteResult::NotRootBlock
+    );
 
     assert!(storage.root_block()?.is_none());
     assert!(storage.tail_block()?.is_none());
 
-    assert!(!storage.has_block(&Hash::default())?);
-    assert!(!storage.has_block(block_1.current_hash())?);
+    assert!(!storage.has_block(&Hash::ZERO)?);
+    assert!(!storage.has_block(block_1.hash())?);
 
-    assert!(storage.next_block(&Hash::default())?.is_none());
-    assert!(storage.next_block(block_2.current_hash())?.is_none());
+    assert!(storage.next_block(&Hash::ZERO)?.is_none());
+    assert!(storage.next_block(block_2.hash())?.is_none());
 
-    assert!(storage.read_block(&Hash::default())?.is_none());
-    assert!(storage.read_block(block_2.current_hash())?.is_none());
+    assert!(storage.read_block(&Hash::ZERO)?.is_none());
+    assert!(storage.read_block(block_2.hash())?.is_none());
 
+    assert_eq!(storage.history().count(), 0);
     assert_eq!(storage.blocks().count(), 0);
 
-    // 2. Out of order writing.
+    // 2. Out of order writing with root block stored.
     //
     // Block 3 must be rejected by the method since block 2 is not stored yet.
     // Block 1 must be written successfully.
 
-    assert!(storage.write_block(&block_1)?);
-    assert!(!storage.write_block(&block_3)?);
+    assert_eq!(
+        storage.write_block(&block_1)?,
+        StorageWriteResult::Success
+    );
 
-    assert_eq!(storage.root_block()?, Some(*block_1.current_hash()));
-    assert_eq!(storage.tail_block()?, Some(*block_1.current_hash()));
+    assert_eq!(
+        storage.write_block(&block_3)?,
+        StorageWriteResult::OutOfHistoryBlock
+    );
 
-    assert!(!storage.has_block(&Hash::default())?);
-    assert!(storage.has_block(block_1.current_hash())?);
-    assert!(!storage.has_block(block_2.current_hash())?);
-    assert!(!storage.has_block(block_3.current_hash())?);
+    assert_eq!(storage.root_block()?, Some(*block_1.hash()));
+    assert_eq!(storage.tail_block()?, Some(*block_1.hash()));
 
-    assert_eq!(storage.next_block(&Hash::default())?, Some(*block_1.current_hash()));
-    assert!(storage.next_block(block_1.current_hash())?.is_none());
-    assert!(storage.next_block(block_2.current_hash())?.is_none());
-    assert!(storage.next_block(block_3.current_hash())?.is_none());
+    assert!(!storage.has_block(&Hash::ZERO)?);
+    assert!(storage.has_block(block_1.hash())?);
+    assert!(!storage.has_block(block_2.hash())?);
+    assert!(!storage.has_block(block_3.hash())?);
 
-    assert!(storage.read_block(&Hash::default())?.is_none());
-    assert_eq!(storage.read_block(block_1.current_hash())?, Some(block_1.clone()));
-    assert!(storage.read_block(block_2.current_hash())?.is_none());
-    assert!(storage.read_block(block_3.current_hash())?.is_none());
+    assert_eq!(storage.next_block(&Hash::ZERO)?, Some(*block_1.hash()));
+    assert!(storage.next_block(block_1.hash())?.is_none());
+    assert!(storage.next_block(block_2.hash())?.is_none());
+    assert!(storage.next_block(block_3.hash())?.is_none());
 
+    assert!(storage.read_block(&Hash::ZERO)?.is_none());
+    assert_eq!(storage.read_block(block_1.hash())?.as_ref(), Some(&block_1));
+    assert!(storage.read_block(block_2.hash())?.is_none());
+    assert!(storage.read_block(block_3.hash())?.is_none());
+
+    assert_eq!(storage.history().count(), 1);
     assert_eq!(storage.blocks().count(), 1);
+
+    assert!(!storage.has_message(message_1.hash())?);
+    assert!(!storage.has_message(message_2.hash())?);
+    assert!(!storage.has_message(message_3.hash())?);
+
+    assert!(storage.find_message(message_1.hash())?.is_none());
+    assert!(storage.find_message(message_2.hash())?.is_none());
+    assert!(storage.find_message(message_3.hash())?.is_none());
+
+    assert!(storage.read_message(message_1.hash())?.is_none());
+    assert!(storage.read_message(message_2.hash())?.is_none());
+    assert!(storage.read_message(message_3.hash())?.is_none());
 
     // 3. In-order writing.
     //
-    // Blocks 2 and 3 must be written to the storage successfully.
-
-    assert!(storage.write_block(&block_2)?);
-    assert!(storage.write_block(&block_3)?);
-
-    assert_eq!(storage.root_block()?, Some(*block_1.current_hash()));
-    assert_eq!(storage.tail_block()?, Some(*block_3.current_hash()));
-
-    assert!(!storage.has_block(&Hash::default())?);
-    assert!(storage.has_block(block_1.current_hash())?);
-    assert!(storage.has_block(block_2.current_hash())?);
-    assert!(storage.has_block(block_3.current_hash())?);
-
-    assert_eq!(storage.next_block(&Hash::default())?, Some(*block_1.current_hash()));
-    assert_eq!(storage.next_block(block_1.current_hash())?, Some(*block_2.current_hash()));
-    assert_eq!(storage.next_block(block_2.current_hash())?, Some(*block_3.current_hash()));
-    assert!(storage.next_block(block_3.current_hash())?.is_none());
-
-    assert!(storage.prev_block(&Hash::default())?.is_none());
-    assert_eq!(storage.prev_block(block_1.current_hash())?, Some(Hash::default()));
-    assert_eq!(storage.prev_block(block_2.current_hash())?, Some(*block_1.current_hash()));
-    assert_eq!(storage.prev_block(block_3.current_hash())?, Some(*block_2.current_hash()));
-
-    assert!(storage.read_block(&Hash::default())?.is_none());
-    assert_eq!(storage.read_block(block_1.current_hash())?, Some(block_1.clone()));
-    assert_eq!(storage.read_block(block_2.current_hash())?, Some(block_2.clone()));
-    assert_eq!(storage.read_block(block_3.current_hash())?, Some(block_3.clone()));
-
-    assert_eq!(storage.blocks().count(), 3);
+    // Blocks 2 and 3 must be written to the storage successfully. Messages 1-3
+    // must be available.
 
     assert_eq!(
-        storage.get_current_validators()?,
-        vec![signing_key.verifying_key()]
+        storage.write_block(&block_2)?,
+        StorageWriteResult::Success
     );
+
+    assert_eq!(
+        storage.write_block(&block_3)?,
+        StorageWriteResult::Success
+    );
+
+    assert_eq!(storage.root_block()?, Some(*block_1.hash()));
+    assert_eq!(storage.tail_block()?, Some(*block_3.hash()));
+
+    assert!(!storage.has_block(&Hash::ZERO)?);
+    assert!(storage.has_block(block_1.hash())?);
+    assert!(storage.has_block(block_2.hash())?);
+    assert!(storage.has_block(block_3.hash())?);
+
+    assert_eq!(storage.next_block(&Hash::ZERO)?, Some(*block_1.hash()));
+    assert_eq!(storage.next_block(block_1.hash())?, Some(*block_2.hash()));
+    assert_eq!(storage.next_block(block_2.hash())?, Some(*block_3.hash()));
+    assert!(storage.next_block(block_3.hash())?.is_none());
+
+    assert!(storage.prev_block(&Hash::ZERO)?.is_none());
+    assert_eq!(storage.prev_block(block_1.hash())?, Some(Hash::ZERO));
+    assert_eq!(storage.prev_block(block_2.hash())?, Some(*block_1.hash()));
+    assert_eq!(storage.prev_block(block_3.hash())?, Some(*block_2.hash()));
+
+    assert!(storage.read_block(&Hash::ZERO)?.is_none());
+    assert_eq!(storage.read_block(block_1.hash())?.as_ref(), Some(&block_1));
+    assert_eq!(storage.read_block(block_2.hash())?.as_ref(), Some(&block_2));
+    assert_eq!(storage.read_block(block_3.hash())?.as_ref(), Some(&block_3));
+
+    assert_eq!(storage.history().count(), 3);
+    assert_eq!(storage.blocks().count(), 3);
+
+    assert!(storage.has_message(message_1.hash())?);
+    assert!(storage.has_message(message_2.hash())?);
+    assert!(storage.has_message(message_3.hash())?);
+
+    assert_eq!(storage.find_message(message_1.hash())?, Some(*block_2.hash()));
+    assert_eq!(storage.find_message(message_2.hash())?, Some(*block_3.hash()));
+    assert_eq!(storage.find_message(message_3.hash())?, Some(*block_3.hash()));
+
+    assert_eq!(storage.read_message(message_1.hash())?.as_ref(), Some(&message_1));
+    assert_eq!(storage.read_message(message_2.hash())?.as_ref(), Some(&message_2));
+    assert_eq!(storage.read_message(message_3.hash())?.as_ref(), Some(&message_3));
 
     // 4. Tail block modification.
     //
     // Block 3 must be correctly replaced by the alternative block 3.
-    // Original block 3 must be removed completely.
+    // Original block 3 must be removed completely. Message 3 must disappear
+    // from the storage.
 
-    assert!(storage.write_block(&block_3_alt)?);
+    let block_3_alt = Block::create(&signing_key, block_2.hash(), [
+        message_2.clone()
+    ]).unwrap();
 
-    assert_eq!(storage.root_block()?, Some(*block_1.current_hash()));
-    assert_eq!(storage.tail_block()?, Some(*block_3_alt.current_hash()));
+    assert_eq!(
+        storage.write_block(&block_3_alt)?,
+        StorageWriteResult::Success
+    );
 
-    assert!(!storage.has_block(&Hash::default())?);
-    assert!(storage.has_block(block_1.current_hash())?);
-    assert!(storage.has_block(block_2.current_hash())?);
-    assert!(!storage.has_block(block_3.current_hash())?);
-    assert!(storage.has_block(block_3_alt.current_hash())?);
+    assert_eq!(storage.root_block()?, Some(*block_1.hash()));
+    assert_eq!(storage.tail_block()?, Some(*block_3_alt.hash()));
 
-    assert_eq!(storage.next_block(&Hash::default())?, Some(*block_1.current_hash()));
-    assert_eq!(storage.next_block(block_1.current_hash())?, Some(*block_2.current_hash()));
-    assert_eq!(storage.next_block(block_2.current_hash())?, Some(*block_3_alt.current_hash()));
-    assert!(storage.next_block(block_3.current_hash())?.is_none());
-    assert!(storage.next_block(block_3_alt.current_hash())?.is_none());
+    assert!(!storage.has_block(&Hash::ZERO)?);
+    assert!(storage.has_block(block_1.hash())?);
+    assert!(storage.has_block(block_2.hash())?);
+    assert!(!storage.has_block(block_3.hash())?);
+    assert!(storage.has_block(block_3_alt.hash())?);
+
+    assert_eq!(storage.next_block(&Hash::ZERO)?, Some(*block_1.hash()));
+    assert_eq!(storage.next_block(block_1.hash())?, Some(*block_2.hash()));
+    assert_eq!(storage.next_block(block_2.hash())?, Some(*block_3_alt.hash()));
+    assert!(storage.next_block(block_3.hash())?.is_none());
+    assert!(storage.next_block(block_3_alt.hash())?.is_none());
 
     assert!(storage.read_block(&Hash::default())?.is_none());
-    assert_eq!(storage.read_block(block_1.current_hash())?, Some(block_1.clone()));
-    assert_eq!(storage.read_block(block_2.current_hash())?, Some(block_2.clone()));
-    assert!(storage.read_block(block_3.current_hash())?.is_none());
-    assert_eq!(storage.read_block(block_3_alt.current_hash())?, Some(block_3_alt.clone()));
+    assert_eq!(storage.read_block(block_1.hash())?.as_ref(), Some(&block_1));
+    assert_eq!(storage.read_block(block_2.hash())?.as_ref(), Some(&block_2));
+    assert!(storage.read_block(block_3.hash())?.is_none());
+    assert_eq!(storage.read_block(block_3_alt.hash())?.as_ref(), Some(&block_3_alt));
 
+    assert_eq!(storage.history().count(), 3);
     assert_eq!(storage.blocks().count(), 3);
+
+    assert!(storage.has_message(message_1.hash())?);
+    assert!(storage.has_message(message_2.hash())?);
+    assert!(!storage.has_message(message_3.hash())?);
+
+    assert_eq!(storage.find_message(message_1.hash())?, Some(*block_2.hash()));
+    assert_eq!(storage.find_message(message_2.hash())?, Some(*block_3_alt.hash()));
+    assert!(storage.find_message(message_3.hash())?.is_none());
+
+    assert_eq!(storage.read_message(message_1.hash())?.as_ref(), Some(&message_1));
+    assert_eq!(storage.read_message(message_2.hash())?.as_ref(), Some(&message_2));
+    assert!(storage.read_message(message_3.hash())?.is_none());
 
     // 5. Middle block modification.
     //
     // Block 2 must be correctly replaced by the alternative block 2.
     // Alternative block 3 must be removed completely since its previous hash
-    // is not correct anymore.
+    // is not correct anymore. Message 1 must disappear since it was stored in
+    // previous block 2.
 
-    assert!(storage.write_block(&block_2_alt)?);
+    let block_2_alt = Block::create(&signing_key, block_1.hash(), [
+        message_2.clone()
+    ]).unwrap();
 
-    assert_eq!(storage.root_block()?, Some(*block_1.current_hash()));
-    assert_eq!(storage.tail_block()?, Some(*block_2_alt.current_hash()));
+    assert_eq!(
+        storage.write_block(&block_2_alt)?,
+        StorageWriteResult::Success
+    );
 
-    assert!(!storage.has_block(&Hash::default())?);
-    assert!(storage.has_block(block_1.current_hash())?);
-    assert!(!storage.has_block(block_2.current_hash())?);
-    assert!(storage.has_block(block_2_alt.current_hash())?);
-    assert!(!storage.has_block(block_3.current_hash())?);
-    assert!(!storage.has_block(block_3_alt.current_hash())?);
+    assert_eq!(storage.root_block()?, Some(*block_1.hash()));
+    assert_eq!(storage.tail_block()?, Some(*block_2_alt.hash()));
 
-    assert_eq!(storage.next_block(&Hash::default())?, Some(*block_1.current_hash()));
-    assert_eq!(storage.next_block(block_1.current_hash())?, Some(*block_2_alt.current_hash()));
+    assert!(!storage.has_block(&Hash::ZERO)?);
+    assert!(storage.has_block(block_1.hash())?);
+    assert!(!storage.has_block(block_2.hash())?);
+    assert!(storage.has_block(block_2_alt.hash())?);
+    assert!(!storage.has_block(block_3.hash())?);
+    assert!(!storage.has_block(block_3_alt.hash())?);
 
-    assert!(storage.next_block(block_2.current_hash())?.is_none());
-    assert!(storage.next_block(block_2_alt.current_hash())?.is_none());
-    assert!(storage.next_block(block_3.current_hash())?.is_none());
-    assert!(storage.next_block(block_3_alt.current_hash())?.is_none());
+    assert_eq!(storage.next_block(&Hash::ZERO)?, Some(*block_1.hash()));
+    assert_eq!(storage.next_block(block_1.hash())?, Some(*block_2_alt.hash()));
 
-    assert!(storage.read_block(&Hash::default())?.is_none());
-    assert_eq!(storage.read_block(block_1.current_hash())?, Some(block_1.clone()));
+    assert!(storage.next_block(block_2.hash())?.is_none());
+    assert!(storage.next_block(block_2_alt.hash())?.is_none());
+    assert!(storage.next_block(block_3.hash())?.is_none());
+    assert!(storage.next_block(block_3_alt.hash())?.is_none());
 
-    assert!(storage.read_block(block_2.current_hash())?.is_none());
-    assert_eq!(storage.read_block(block_2_alt.current_hash())?, Some(block_2_alt.clone()));
+    assert!(storage.read_block(&Hash::ZERO)?.is_none());
+    assert_eq!(storage.read_block(block_1.hash())?.as_ref(), Some(&block_1));
 
-    assert!(storage.read_block(block_3.current_hash())?.is_none());
-    assert!(storage.read_block(block_3_alt.current_hash())?.is_none());
+    assert!(storage.read_block(block_2.hash())?.is_none());
+    assert_eq!(storage.read_block(block_2_alt.hash())?.as_ref(), Some(&block_2_alt));
 
+    assert!(storage.read_block(block_3.hash())?.is_none());
+    assert!(storage.read_block(block_3_alt.hash())?.is_none());
+
+    assert_eq!(storage.history().count(), 2);
     assert_eq!(storage.blocks().count(), 2);
+
+    assert!(!storage.has_message(message_1.hash())?);
+    assert!(storage.has_message(message_2.hash())?);
+    assert!(!storage.has_message(message_3.hash())?);
+
+    assert!(storage.find_message(message_1.hash())?.is_none());
+    assert_eq!(storage.find_message(message_2.hash())?, Some(*block_2_alt.hash()));
+    assert!(storage.find_message(message_3.hash())?.is_none());
+
+    assert!(storage.read_message(message_1.hash())?.is_none());
+    assert_eq!(storage.read_message(message_2.hash())?.as_ref(), Some(&message_2));
+    assert!(storage.read_message(message_3.hash())?.is_none());
 
     // 6. Root block modification.
     //
     // Block 1 must be correctly replaced by the alternative block 1.
     // Alternative block 2 must be removed completely since its previous hash
     // is not correct anymore. No blocks but the alternative block 1 must remain
-    // in the history at that point.
+    // in the history at that point. All the messages must disappear.
 
-    assert!(storage.write_block(&block_1_alt)?);
+    // Hand-crafted root block with hash different to block_1.
+    let block_1_alt = Block::create(&signing_key, Hash::ZERO, [
+        message_1.clone()
+    ]).unwrap();
 
-    assert_eq!(storage.root_block()?, Some(*block_1_alt.current_hash()));
-    assert_eq!(storage.tail_block()?, Some(*block_1_alt.current_hash()));
+    assert_eq!(
+        storage.write_block(&block_1_alt)?,
+        StorageWriteResult::Success
+    );
 
-    assert!(!storage.has_block(&Hash::default())?);
-    assert!(!storage.has_block(block_1.current_hash())?);
-    assert!(storage.has_block(block_1_alt.current_hash())?);
-    assert!(!storage.has_block(block_2.current_hash())?);
-    assert!(!storage.has_block(block_2_alt.current_hash())?);
-    assert!(!storage.has_block(block_3.current_hash())?);
-    assert!(!storage.has_block(block_3_alt.current_hash())?);
+    assert_eq!(storage.root_block()?, Some(*block_1_alt.hash()));
+    assert_eq!(storage.tail_block()?, Some(*block_1_alt.hash()));
 
-    assert_eq!(storage.next_block(&Hash::default())?, Some(*block_1_alt.current_hash()));
+    assert!(!storage.has_block(&Hash::ZERO)?);
+    assert!(!storage.has_block(block_1.hash())?);
+    assert!(storage.has_block(block_1_alt.hash())?);
+    assert!(!storage.has_block(block_2.hash())?);
+    assert!(!storage.has_block(block_2_alt.hash())?);
+    assert!(!storage.has_block(block_3.hash())?);
+    assert!(!storage.has_block(block_3_alt.hash())?);
 
-    assert!(storage.next_block(block_1.current_hash())?.is_none());
-    assert!(storage.next_block(block_1_alt.current_hash())?.is_none());
-    assert!(storage.next_block(block_2.current_hash())?.is_none());
-    assert!(storage.next_block(block_2_alt.current_hash())?.is_none());
-    assert!(storage.next_block(block_3.current_hash())?.is_none());
-    assert!(storage.next_block(block_3_alt.current_hash())?.is_none());
+    assert_eq!(storage.next_block(&Hash::ZERO)?, Some(*block_1_alt.hash()));
 
-    assert!(storage.read_block(&Hash::default())?.is_none());
+    assert!(storage.next_block(block_1.hash())?.is_none());
+    assert!(storage.next_block(block_1_alt.hash())?.is_none());
+    assert!(storage.next_block(block_2.hash())?.is_none());
+    assert!(storage.next_block(block_2_alt.hash())?.is_none());
+    assert!(storage.next_block(block_3.hash())?.is_none());
+    assert!(storage.next_block(block_3_alt.hash())?.is_none());
 
-    assert!(storage.read_block(block_1.current_hash())?.is_none());
-    assert_eq!(storage.read_block(block_1_alt.current_hash())?, Some(block_1_alt.clone()));
+    assert!(storage.read_block(&Hash::ZERO)?.is_none());
 
-    assert!(storage.read_block(block_2.current_hash())?.is_none());
-    assert!(storage.read_block(block_2_alt.current_hash())?.is_none());
+    assert!(storage.read_block(block_1.hash())?.is_none());
+    assert_eq!(storage.read_block(block_1_alt.hash())?.as_ref(), Some(&block_1_alt));
 
-    assert!(storage.read_block(block_3.current_hash())?.is_none());
-    assert!(storage.read_block(block_3_alt.current_hash())?.is_none());
+    assert!(storage.read_block(block_2.hash())?.is_none());
+    assert!(storage.read_block(block_2_alt.hash())?.is_none());
 
+    assert!(storage.read_block(block_3.hash())?.is_none());
+    assert!(storage.read_block(block_3_alt.hash())?.is_none());
+
+    assert_eq!(storage.history().count(), 1);
     assert_eq!(storage.blocks().count(), 1);
 
-    assert_eq!(
-        storage.get_current_validators()?,
-        vec![signing_key_alt.verifying_key()]
-    );
+    assert!(storage.has_message(message_1.hash())?);
+    assert!(!storage.has_message(message_2.hash())?);
+    assert!(!storage.has_message(message_3.hash())?);
 
-    // Prepare validator blocks.
+    assert_eq!(storage.find_message(message_1.hash())?, Some(*block_1_alt.hash()));
+    assert!(storage.find_message(message_2.hash())?.is_none());
+    assert!(storage.find_message(message_3.hash())?.is_none());
 
-    let validator_1 = SigningKey::random(&mut rng);
-    let validator_2 = SigningKey::random(&mut rng);
-    let validator_3 = SigningKey::random(&mut rng);
+    assert_eq!(storage.read_message(message_1.hash())?.as_ref(), Some(&message_1));
+    assert!(storage.read_message(message_2.hash())?.is_none());
+    assert!(storage.read_message(message_3.hash())?.is_none());
 
-    let block_2_alt = Block::new(
-        &signing_key_alt,
-        block_1_alt.current_hash(),
-        BlockContent::validators([validator_1.verifying_key()])
-    ).unwrap();
-
-    let block_3_alt = Block::new(
-        &validator_1,
-        block_2_alt.current_hash(),
-        BlockContent::validators([
-            validator_2.verifying_key(),
-            validator_3.verifying_key()
-        ])
-    ).unwrap();
-
-    // 7. Validator blocks.
-
-    assert!(storage.write_block(&block_2_alt)?);
-    assert!(storage.write_block(&block_3_alt)?);
-
-    // Block 1 (root)
-    assert_eq!(
-        storage.get_validators_before_block(block_1_alt.current_hash())?,
-        Some(vec![signing_key_alt.verifying_key()])
-    );
-
-    assert_eq!(
-        storage.get_validators_after_block(block_1_alt.current_hash())?,
-        Some(vec![signing_key_alt.verifying_key()])
-    );
-
-    // Block 2 (root -> validator 1)
-    assert_eq!(
-        storage.get_validators_before_block(block_2_alt.current_hash())?,
-        Some(vec![signing_key_alt.verifying_key()])
-    );
-
-    assert_eq!(
-        storage.get_validators_after_block(block_2_alt.current_hash())?,
-        Some(vec![validator_1.verifying_key()])
-    );
-
-    // Block 3 (validator 1 -> validators 2 and 3)
-    assert_eq!(
-        storage.get_validators_before_block(block_3_alt.current_hash())?,
-        Some(vec![validator_1.verifying_key()])
-    );
-
-    assert_eq!(
-        storage.get_validators_after_block(block_3_alt.current_hash())?,
-        Some(vec![
-            validator_2.verifying_key(),
-            validator_3.verifying_key()
-        ])
-    );
-
-    // Current validators (block 3)
-    assert_eq!(
-        storage.get_current_validators()?,
-        vec![
-            validator_2.verifying_key(),
-            validator_3.verifying_key()
-        ]
-    );
-
-    // Prepare transaction blocks.
-
-    let transaction_1 = Transaction::create(
-        &validator_1, b"Test duplicate 1".to_vec()
-    ).unwrap();
-
-    let transaction_2 = Transaction::create(
-        &validator_2, b"Test duplicate 1".to_vec()
-    ).unwrap();
-
-    let transaction_3 = Transaction::create(
-        &validator_2, b"Test duplicate 2".to_vec()
-    ).unwrap();
-
-    let transaction_4 = Transaction::create(
-        &validator_3, b"Test duplicate 2".to_vec()
-    ).unwrap(); // duplicate
-
-    // Block with two duplicate transactions.
-    let mut block_4 = Block::new(
-        &validator_1,
-        block_3_alt.current_hash(),
-        BlockContent::transactions([
-            transaction_1.clone(),
-            transaction_2.clone()
-        ])
-    ).unwrap();
-
-    block_4.approve_with(&validator_3).unwrap();
-
-    // Block with one non-existing transaction.
-    let mut block_5 = Block::new(
-        &validator_1,
-        block_3_alt.current_hash(),
-        BlockContent::transactions([
-            transaction_3.clone()
-        ])
-    ).unwrap();
-
-    block_5.approve_with(&validator_3).unwrap();
-
-    // Block with already existing transaction.
-    let mut block_6 = Block::new(
-        &validator_1,
-        block_5.current_hash(),
-        BlockContent::transactions([
-            transaction_4.clone()
-        ])
-    ).unwrap();
-
-    block_6.approve_with(&validator_3).unwrap();
-
-    // 8. Test transaction blocks.
+    // 7. Try to write blocks with the same messages.
     //
-    // Block 4 must be rejected because it has two identical transactions.
-    // Block 5 must be accepted.
-    // Block 6 must be rejected because it has the same transaction as block 5.
+    // New alternative block 2 must be correctly written, but new alternative
+    // block 3 must be rejected since it contains the same message.
 
-    assert_eq!(transaction_1.hash(), transaction_2.hash());
-    assert_eq!(transaction_3.hash(), transaction_4.hash());
+    let new_block_2_alt = Block::create(&signing_key, block_1_alt.hash(), [
+        message_2.clone()
+    ]).unwrap();
 
-    assert!(!storage.write_block(&block_4)?);
-    assert!(storage.write_block(&block_5)?);
-    assert!(!storage.write_block(&block_6)?);
+    let new_block_3_alt = Block::create(&signing_key, new_block_2_alt.hash(), [
+        message_3.clone(),
+        message_1.clone() // repeat block_1_alt
+    ]).unwrap();
 
-    assert!(!storage.has_block(block_4.current_hash())?);
-    assert!(storage.has_block(block_5.current_hash())?);
-    assert!(!storage.has_block(block_6.current_hash())?);
+    assert_eq!(
+        storage.write_block(&new_block_2_alt)?,
+        StorageWriteResult::Success
+    );
 
-    assert!(!storage.has_transaction(transaction_1.hash())?);
-    assert!(storage.has_transaction(transaction_3.hash())?);
+    assert_eq!(
+        storage.write_block(&new_block_3_alt)?,
+        StorageWriteResult::BlockHasDuplicateHistoryMessages
+    );
 
-    assert!(storage.find_transaction(transaction_1.hash())?.is_none());
-    assert_eq!(storage.find_transaction(transaction_3.hash())?, Some(*block_5.current_hash()));
+    assert!(storage.has_block(block_1_alt.hash())?);
+    assert!(storage.has_block(new_block_2_alt.hash())?);
+    assert!(!storage.has_block(new_block_3_alt.hash())?);
 
-    assert!(storage.read_transaction(transaction_1.hash())?.is_none());
-    assert_eq!(storage.read_transaction(transaction_3.hash())?, Some(transaction_3));
+    assert_eq!(storage.history().count(), 2);
+    assert_eq!(storage.blocks().count(), 2);
+
+    assert!(storage.has_message(message_1.hash())?);
+    assert!(storage.has_message(message_2.hash())?);
+    assert!(!storage.has_message(message_3.hash())?);
+
+    assert_eq!(storage.find_message(message_1.hash())?, Some(*block_1_alt.hash()));
+    assert_eq!(storage.find_message(message_2.hash())?, Some(*new_block_2_alt.hash()));
+    assert!(storage.find_message(message_3.hash())?.is_none());
+
+    assert_eq!(storage.read_message(message_1.hash())?.as_ref(), Some(&message_1));
+    assert_eq!(storage.read_message(message_2.hash())?.as_ref(), Some(&message_2));
+    assert!(storage.read_message(message_3.hash())?.is_none());
 
     Ok(())
 }

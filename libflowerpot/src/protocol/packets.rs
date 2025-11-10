@@ -21,7 +21,7 @@ use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
 use crate::varint;
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::Signature;
-use crate::transaction::{Transaction, TransactionDecodeError};
+use crate::message::{Message, MessageDecodeError};
 use crate::block::{Block, BlockDecodeError};
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]
@@ -41,8 +41,8 @@ pub enum PacketDecodeError {
         param: &'static str
     },
 
-    #[error("failed to decode transaction: {0}")]
-    DecodeTransaction(#[from] TransactionDecodeError),
+    #[error("failed to decode message: {0}")]
+    DecodeMessage(#[from] MessageDecodeError),
 
     #[error("failed to decode block: {0}")]
     DecodeBlock(#[from] BlockDecodeError)
@@ -87,19 +87,19 @@ pub enum Packet {
         history: Box<[Hash]>
     },
 
-    /// Ask list of blockchain's pending transactions.
-    AskPendingTransactions {
+    /// Ask list of blockchain's pending messages.
+    AskPendingMessages {
         /// Hash of the blockchain's root block.
         root_block: Hash
     },
 
-    /// List of pending transactions of a blockchain.
-    PendingTransactions {
+    /// List of pending messages of a blockchain.
+    PendingMessages {
         /// Hash of the blockchain's root block.
         root_block: Hash,
 
-        /// List of pending transactions' hashes.
-        pending_transactions: Box<[Hash]>
+        /// List of pending messages' hashes.
+        pending_messages: Box<[Hash]>
     },
 
     /// Ask list of blockchain's pending blocks.
@@ -117,22 +117,22 @@ pub enum Packet {
         pending_blocks: Box<[(Hash, Box<[Signature]>)]>
     },
 
-    /// Ask transaction from a blockchain.
-    AskTransaction {
+    /// Ask for a message stored in a blockchain.
+    AskMessage {
         /// Hash of the blockchain's root block.
         root_block: Hash,
 
-        /// Hash of the transaction you want to receive.
-        transaction: Hash
+        /// Hash of the message you want to receive.
+        message: Hash
     },
 
-    /// Transaction of a blockchain.
-    Transaction {
+    /// Message stored in a blockchain.
+    Message {
         /// Hash of the blockchain's root block.
         root_block: Hash,
 
         /// Transaction of the blockchain.
-        transaction: Transaction
+        message: Message
     },
 
     /// Ask block of a blockchain.
@@ -151,36 +151,23 @@ pub enum Packet {
 
         /// Block of the blockchain.
         block: Block
-    },
-
-    /// Approve block of a blockchain.
-    ApproveBlock {
-        /// Hash of the blockchain's root block.
-        root_block: Hash,
-
-        /// Hash of the block you want to approve.
-        target_block: Hash,
-
-        /// Approval signature.
-        approval: Signature
     }
 }
 
 impl Packet {
-    pub const V1_HEARTBEAT: u16                = 0;
-    pub const V1_ASK_NODES: u16                = 1;
-    pub const V1_NODES: u16                    = 2;
-    pub const V1_ASK_HISTORY: u16              = 3;
-    pub const V1_HISTORY: u16                  = 4;
-    pub const V1_ASK_PENDING_TRANSACTIONS: u16 = 5;
-    pub const V1_PENDING_TRANSACTIONS: u16     = 6;
-    pub const V1_ASK_PENDING_BLOCKS: u16       = 7;
-    pub const V1_PENDING_BLOCKS: u16           = 8;
-    pub const V1_ASK_TRANSACTION: u16          = 9;
-    pub const V1_TRANSACTION: u16              = 10;
-    pub const V1_ASK_BLOCK: u16                = 11;
-    pub const V1_BLOCK: u16                    = 12;
-    pub const V1_APPROVE_BLOCK: u16            = 13;
+    pub const V1_HEARTBEAT: u16            = 0;
+    pub const V1_ASK_NODES: u16            = 1;
+    pub const V1_NODES: u16                = 2;
+    pub const V1_ASK_HISTORY: u16          = 3;
+    pub const V1_HISTORY: u16              = 4;
+    pub const V1_ASK_PENDING_MESSAGES: u16 = 5;
+    pub const V1_PENDING_MESSAGES: u16     = 6;
+    pub const V1_ASK_PENDING_BLOCKS: u16   = 7;
+    pub const V1_PENDING_BLOCKS: u16       = 8;
+    pub const V1_ASK_MESSAGE: u16          = 9;
+    pub const V1_MESSAGE: u16              = 10;
+    pub const V1_ASK_BLOCK: u16            = 11;
+    pub const V1_BLOCK: u16                = 12;
 
     /// Encode packet into a binary representation.
     pub fn to_bytes(&self) -> Box<[u8]> {
@@ -256,11 +243,11 @@ impl Packet {
                 buf.into_boxed_slice()
             }
 
-            Self::AskPendingTransactions { root_block } => {
+            Self::AskPendingMessages { root_block } => {
                 let mut buf = [0; 2 + Hash::SIZE];
 
                 buf[0..2].copy_from_slice(
-                    &Self::V1_ASK_PENDING_TRANSACTIONS.to_le_bytes()
+                    &Self::V1_ASK_PENDING_MESSAGES.to_le_bytes()
                 );
 
                 buf[2..].copy_from_slice(root_block.as_bytes());
@@ -268,14 +255,14 @@ impl Packet {
                 Box::new(buf)
             }
 
-            Self::PendingTransactions { root_block, pending_transactions } => {
+            Self::PendingMessages { root_block, pending_messages } => {
                 let mut buf = Vec::new();
 
-                buf.extend(Self::V1_PENDING_TRANSACTIONS.to_le_bytes());
+                buf.extend(Self::V1_PENDING_MESSAGES.to_le_bytes());
 
                 buf.extend(root_block.as_bytes());
 
-                for hash in pending_transactions {
+                for hash in pending_messages {
                     buf.extend(hash.as_bytes());
                 }
 
@@ -314,26 +301,26 @@ impl Packet {
                 buf.into_boxed_slice()
             }
 
-            Self::AskTransaction { root_block, transaction } => {
+            Self::AskMessage { root_block, message } => {
                 let mut buf = [0; 2 + Hash::SIZE * 2];
 
                 buf[0..2].copy_from_slice(
-                    &Self::V1_ASK_TRANSACTION.to_le_bytes()
+                    &Self::V1_ASK_MESSAGE.to_le_bytes()
                 );
 
                 buf[2..2 + Hash::SIZE].copy_from_slice(root_block.as_bytes());
-                buf[2 + Hash::SIZE..].copy_from_slice(transaction.as_bytes());
+                buf[2 + Hash::SIZE..].copy_from_slice(message.as_bytes());
 
                 Box::new(buf)
             }
 
-            Self::Transaction { root_block, transaction } => {
+            Self::Message { root_block, message } => {
                 let mut buf = Vec::new();
 
-                buf.extend(Self::V1_TRANSACTION.to_le_bytes());
+                buf.extend(Self::V1_MESSAGE.to_le_bytes());
 
                 buf.extend(root_block.as_bytes());
-                buf.extend(transaction.to_bytes());
+                buf.extend(message.to_bytes());
 
                 buf.into_boxed_slice()
             }
@@ -361,32 +348,10 @@ impl Packet {
 
                 buf.into_boxed_slice()
             }
-
-            Self::ApproveBlock {
-                root_block,
-                target_block,
-                approval
-            } => {
-                let mut buf = [0; 2 + Hash::SIZE * 2 + Signature::SIZE];
-
-                buf[0..2].copy_from_slice(
-                    &Self::V1_APPROVE_BLOCK.to_le_bytes()
-                );
-
-                buf[2..2 + Hash::SIZE].copy_from_slice(root_block.as_bytes());
-
-                buf[2 + Hash::SIZE..2 + Hash::SIZE * 2].copy_from_slice(
-                    target_block.as_bytes()
-                );
-
-                buf[2 + Hash::SIZE * 2..].copy_from_slice(&approval.to_bytes());
-
-                Box::new(buf)
-            }
         }
     }
 
-    /// Convert bytes slice to a packet.
+    /// Decode packet from a binary representation.
     pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, PacketDecodeError> {
         let bytes = bytes.as_ref();
 
@@ -546,7 +511,7 @@ impl Packet {
                 })
             }
 
-            Self::V1_ASK_PENDING_TRANSACTIONS => {
+            Self::V1_ASK_PENDING_MESSAGES => {
                 if n < 2 + Hash::SIZE {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
@@ -558,12 +523,12 @@ impl Packet {
 
                 root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
-                Ok(Self::AskPendingTransactions {
+                Ok(Self::AskPendingMessages {
                     root_block: Hash::from(root_block)
                 })
             }
 
-            Self::V1_PENDING_TRANSACTIONS => {
+            Self::V1_PENDING_MESSAGES => {
                 if n < 2 + Hash::SIZE {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
@@ -577,7 +542,7 @@ impl Packet {
 
                 let bytes = &bytes[2 + Hash::SIZE..];
 
-                let mut transactions = Vec::new();
+                let mut messages = Vec::new();
                 let mut hash = [0; Hash::SIZE];
 
                 let n = bytes.len();
@@ -586,14 +551,14 @@ impl Packet {
                 while i < n {
                     hash.copy_from_slice(&bytes[i..i + Hash::SIZE]);
 
-                    transactions.push(Hash::from(hash));
+                    messages.push(Hash::from(hash));
 
                     i += Hash::SIZE;
                 }
 
-                Ok(Self::PendingTransactions {
+                Ok(Self::PendingMessages {
                     root_block: Hash::from(root_block),
-                    pending_transactions: transactions.into_boxed_slice()
+                    pending_messages: messages.into_boxed_slice()
                 })
             }
 
@@ -678,7 +643,7 @@ impl Packet {
                 })
             }
 
-            Self::V1_ASK_TRANSACTION => {
+            Self::V1_ASK_MESSAGE => {
                 if n < 2 + Hash::SIZE * 2 {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
@@ -687,18 +652,18 @@ impl Packet {
                 }
 
                 let mut root_block = [0; Hash::SIZE];
-                let mut transaction = [0; Hash::SIZE];
+                let mut message = [0; Hash::SIZE];
 
                 root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
-                transaction.copy_from_slice(&bytes[2 + Hash::SIZE..]);
+                message.copy_from_slice(&bytes[2 + Hash::SIZE..]);
 
-                Ok(Self::AskTransaction {
+                Ok(Self::AskMessage {
                     root_block: Hash::from(root_block),
-                    transaction: Hash::from(transaction)
+                    message: Hash::from(message)
                 })
             }
 
-            Self::V1_TRANSACTION => {
+            Self::V1_MESSAGE => {
                 if n < 2 + Hash::SIZE {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
@@ -710,9 +675,9 @@ impl Packet {
 
                 root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
-                Ok(Self::Transaction {
+                Ok(Self::Message {
                     root_block: Hash::from(root_block),
-                    transaction: Transaction::from_bytes(&bytes[2 + Hash::SIZE..])?
+                    message: Message::from_bytes(&bytes[2 + Hash::SIZE..])?
                 })
             }
 
@@ -754,36 +719,6 @@ impl Packet {
                 })
             }
 
-            Self::V1_APPROVE_BLOCK => {
-                if n < 2 + Hash::SIZE * 2 + Signature::SIZE {
-                    return Err(PacketDecodeError::TooShort {
-                        got: n,
-                        expected: 2 + Hash::SIZE * 2 + Signature::SIZE
-                    });
-                }
-
-                let mut root_block = [0; Hash::SIZE];
-                let mut target_block = [0; Hash::SIZE];
-                let mut approval = [0; Signature::SIZE];
-
-                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
-                target_block.copy_from_slice(&bytes[2 + Hash::SIZE..2 + Hash::SIZE * 2]);
-                approval.copy_from_slice(&bytes[2 + Hash::SIZE * 2..]);
-
-                let Some(approval) = Signature::from_bytes(&approval) else {
-                    return Err(PacketDecodeError::InvalidParam {
-                        packet_type: "ApproveBlock",
-                        param: "approval"
-                    });
-                };
-
-                Ok(Self::ApproveBlock {
-                    root_block: Hash::from(root_block),
-                    target_block: Hash::from(target_block),
-                    approval
-                })
-            }
-
             packet_type => Err(PacketDecodeError::UnsupportedType(packet_type))
         }
     }
@@ -802,7 +737,6 @@ fn test_serialize() -> Result<(), PacketDecodeError> {
     use rand_chacha::rand_core::SeedableRng;
 
     use crate::crypto::sign::SigningKey;
-    use crate::block::BlockContent;
 
     let mut rng = ChaCha8Rng::seed_from_u64(123);
 
@@ -853,13 +787,13 @@ fn test_serialize() -> Result<(), PacketDecodeError> {
             ])
         },
 
-        Packet::AskPendingTransactions {
+        Packet::AskPendingMessages {
             root_block: Hash::calc(b"Hello, World!")
         },
 
-        Packet::PendingTransactions {
+        Packet::PendingMessages {
             root_block: Hash::calc(b"Hello, World!"),
-            pending_transactions: Box::new([
+            pending_messages: Box::new([
                 Hash::calc(b"Test 1"),
                 Hash::calc(b"Test 2"),
                 Hash::calc(b"Test 3")
@@ -885,14 +819,14 @@ fn test_serialize() -> Result<(), PacketDecodeError> {
             ])
         },
 
-        Packet::AskTransaction {
+        Packet::AskMessage {
             root_block: Hash::calc(b"Hello, World!"),
-            transaction: Hash::calc(b"Test")
+            message: Hash::calc(b"Test")
         },
 
-        Packet::Transaction {
+        Packet::Message {
             root_block: Hash::calc(b"Hello, World!"),
-            transaction: Transaction::create(
+            message: Message::create(
                 &signing_key,
                 [1, 2, 3]
             ).unwrap()
@@ -905,20 +839,11 @@ fn test_serialize() -> Result<(), PacketDecodeError> {
 
         Packet::Block {
             root_block: Hash::calc(b"Hello, World!"),
-            block: Block::new(
-                &signing_key,
-                Hash::default(),
-                BlockContent::data([1, 2, 3])
-            ).unwrap()
-        },
-
-        Packet::ApproveBlock {
-            root_block: Hash::calc(b"Hello, World!"),
-            target_block: Hash::calc(b"Test"),
-            approval: Signature::create(
-                &signing_key,
-                Hash::calc(b"test")
-            ).unwrap()
+            block: Block::create(&signing_key, Hash::ZERO, [
+                Message::create(&signing_key, b"Message 1".as_slice()).unwrap(),
+                Message::create(&signing_key, b"Message 2".as_slice()).unwrap(),
+                Message::create(&signing_key, b"Message 3".as_slice()).unwrap()
+            ]).unwrap()
         }
     );
 

@@ -19,32 +19,32 @@
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::{SigningKey, VerifyingKey, Signature, SignatureError};
 
-#[derive(Debug, Clone, Copy, thiserror::Error)]
-pub enum TransactionDecodeError {
-    #[error("encoded transaction is missing a header")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MessageDecodeError {
+    #[error("encoded Message is missing a header")]
     MissingHeader,
 
-    #[error("unsupported transaction format: {0:0X}")]
+    #[error("unsupported Message format: {0:0X}")]
     UnsupportedFormat(u8),
 
-    #[error("invalid transaction signature format")]
+    #[error("invalid Message signature format")]
     InvalidSignature
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Transaction {
+pub struct Message {
     pub(crate) hash: Hash,
     pub(crate) data: Box<[u8]>,
     pub(crate) sign: Signature
 }
 
-impl Transaction {
-    /// Bytes size of the transaction header.
+impl Message {
+    /// Bytes size of the message header.
     ///
-    /// Consist of the signature and 1 byte format.
-    pub const HEADER_SIZE: usize = Signature::SIZE + 1;
+    /// Consist of 1 byte format and a signature.
+    pub const HEADER_SIZE: usize = 1 + Signature::SIZE;
 
-    /// Create new transaction from the given data using provided signing key.
+    /// Create new message from the given data using provided signing key.
     pub fn create(
         signing_key: impl AsRef<SigningKey>,
         data: impl Into<Box<[u8]>>
@@ -65,7 +65,7 @@ impl Transaction {
         })
     }
 
-    /// Get current transaction's hash.
+    /// Get current message's hash.
     ///
     /// This value is pre-calculated for performance reasons and is stored in
     /// the struct, so no computations are performed.
@@ -74,20 +74,20 @@ impl Transaction {
         &self.hash
     }
 
-    /// Get current transaction's data.
+    /// Get current message's data.
     #[inline(always)]
     pub const fn data(&self) -> &[u8] {
         &self.data
     }
 
-    /// Get current transaction's signature.
+    /// Get current message's signature.
     #[inline(always)]
     pub const fn sign(&self) -> &Signature {
         &self.sign
     }
 
-    /// Derive transaction's author and verify that the transaction's signature
-    /// is valid.
+    /// Derive message's author and verify that the Message's signature is
+    /// valid.
     #[inline]
     pub fn verify(
         &self
@@ -95,30 +95,30 @@ impl Transaction {
         self.sign.verify(self.hash())
     }
 
-    /// Encode transaction into a binary representation.
+    /// Encode message into a binary representation.
     pub fn to_bytes(&self) -> Box<[u8]> {
         let mut bytes = Vec::with_capacity(Self::HEADER_SIZE + self.data.len());
 
         bytes.push(0); // Format version
         bytes.extend(self.sign.to_bytes()); // Fixed-size sign
-        bytes.extend(&self.data); // Transaction data
+        bytes.extend(&self.data); // Message data
 
         bytes.into_boxed_slice()
     }
 
-    /// Decode transaction from a binary representation.
+    /// Decode message from a binary representation.
     pub fn from_bytes(
         bytes: impl AsRef<[u8]>
-    ) -> Result<Self, TransactionDecodeError> {
+    ) -> Result<Self, MessageDecodeError> {
         let bytes = bytes.as_ref();
         let n = bytes.len();
 
         if n < Self::HEADER_SIZE {
-            return Err(TransactionDecodeError::MissingHeader);
+            return Err(MessageDecodeError::MissingHeader);
         }
 
         if bytes[0] != 0 {
-            return Err(TransactionDecodeError::UnsupportedFormat(bytes[0]));
+            return Err(MessageDecodeError::UnsupportedFormat(bytes[0]));
         }
 
         let mut sign = [0; Signature::SIZE];
@@ -126,10 +126,10 @@ impl Transaction {
         sign.copy_from_slice(&bytes[1..Signature::SIZE + 1]);
 
         let sign = Signature::from_bytes(&sign)
-            .ok_or(TransactionDecodeError::InvalidSignature)?;
+            .ok_or(MessageDecodeError::InvalidSignature)?;
 
         if n <= Self::HEADER_SIZE {
-            // Empty transaction.
+            // Empty message.
             Ok(Self {
                 hash: Hash::calc([]),
                 data: Box::new([]),
@@ -153,42 +153,42 @@ impl Transaction {
 mod tests {
     use super::*;
 
-    fn get_transaction() -> Result<(SigningKey, Transaction), Box<dyn std::error::Error>> {
+    fn get_message() -> Result<(SigningKey, Message), Box<dyn std::error::Error>> {
         use rand_chacha::rand_core::SeedableRng;
 
         let mut rand = rand_chacha::ChaCha20Rng::seed_from_u64(123);
 
         let signing_key = SigningKey::random(&mut rand);
 
-        let transaction = Transaction::create(
+        let message = Message::create(
             &signing_key,
             b"hello, world!".to_vec()
         )?;
 
-        Ok((signing_key, transaction))
+        Ok((signing_key, message))
     }
 
     #[test]
     fn validate() -> Result<(), Box<dyn std::error::Error>> {
-        let (signing_key, transaction) = get_transaction()?;
+        let (signing_key, message) = get_message()?;
 
-        let (is_valid, author) = transaction.verify()?;
+        let (is_valid, author) = message.verify()?;
 
         assert!(is_valid);
-        assert_eq!(transaction.hash().to_base64(), "vkhPqCNXEhkbIzEYoEuoXKLwdRCjHpk9yGjncZlOQLs=");
+        assert_eq!(message.hash().to_base64(), "vkhPqCNXEhkbIzEYoEuoXKLwdRCjHpk9yGjncZlOQLs=");
         assert_eq!(author, signing_key.verifying_key());
-        assert_eq!(transaction.data(), b"hello, world!");
+        assert_eq!(message.data(), b"hello, world!");
 
         Ok(())
     }
 
     #[test]
     fn serialize() -> Result<(), Box<dyn std::error::Error>> {
-        let (_, transaction) = get_transaction()?;
+        let (_, message) = get_message()?;
 
-        let serialized = transaction.to_bytes();
+        let serialized = message.to_bytes();
 
-        assert_eq!(Transaction::from_bytes(serialized)?, transaction);
+        assert_eq!(Message::from_bytes(serialized)?, message);
 
         Ok(())
     }

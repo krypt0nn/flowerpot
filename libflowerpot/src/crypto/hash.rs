@@ -18,7 +18,7 @@
 
 use super::base64;
 
-#[derive(Debug, Clone, Copy, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialOrd, Ord)]
 pub struct Hash(pub [u8; 32]);
 
 impl Default for Hash {
@@ -159,6 +159,13 @@ impl PartialEq<[u8]> for Hash {
     #[inline]
     fn eq(&self, other: &[u8]) -> bool {
         constant_time_eq::constant_time_eq(&self.0, other)
+    }
+}
+
+impl std::hash::Hash for Hash {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(&self.0);
     }
 }
 

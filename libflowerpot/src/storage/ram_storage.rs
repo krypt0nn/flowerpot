@@ -21,10 +21,10 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::{VerifyingKey, SignatureError};
-use crate::transaction::Transaction;
-use crate::block::{Block, BlockContent};
+use crate::message::Message;
+use crate::block::Block;
 
-use super::Storage;
+use super::{Storage, StorageWriteResult};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RamStorageError {
@@ -35,14 +35,13 @@ pub enum RamStorageError {
     Signature(#[from] SignatureError)
 }
 
-fn has_transaction(
+#[inline]
+fn has_message(
     blocks: &RwLockReadGuard<'_, HashMap<Hash, Block>>,
-    transaction: &Hash
+    hash: &Hash
 ) -> bool {
     for block in blocks.values() {
-        if let BlockContent::Transactions(transactions) = block.content()
-            && transactions.iter().any(|tr| tr.hash() == transaction)
-        {
+        if block.messages().iter().any(|message| message.hash() == hash) {
             return true;
         }
     }
@@ -50,14 +49,13 @@ fn has_transaction(
     false
 }
 
-fn find_transaction(
+#[inline]
+fn find_message(
     blocks: &RwLockReadGuard<'_, HashMap<Hash, Block>>,
-    transaction: &Hash
+    hash: &Hash
 ) -> Option<Hash> {
     for (block_hash, block) in blocks.iter() {
-        if let BlockContent::Transactions(transactions) = block.content()
-            && transactions.iter().any(|tr| tr.hash() == transaction)
-        {
+        if block.messages().iter().any(|message| message.hash() == hash) {
             return Some(*block_hash);
         }
     }
@@ -65,18 +63,18 @@ fn find_transaction(
     None
 }
 
-fn read_transaction(
+#[inline]
+fn read_message(
     blocks: &RwLockReadGuard<'_, HashMap<Hash, Block>>,
-    transaction: &Hash
-) -> Option<Transaction> {
+    hash: &Hash
+) -> Option<Message> {
     for block in blocks.values() {
-        if let BlockContent::Transactions(transactions) = block.content() {
-            let transaction = transactions.iter()
-                .find(|tr| tr.hash() == transaction);
+        let message = block.messages()
+            .iter()
+            .find(|message| message.hash() == hash);
 
-            if let Some(transaction) = transaction.cloned() {
-                return Some(transaction);
-            }
+        if let Some(message) = message.cloned() {
+            return Some(message);
         }
     }
 
@@ -85,9 +83,14 @@ fn read_transaction(
 
 #[derive(Default, Debug, Clone)]
 pub struct RamStorage {
+    /// Table of stored blocks.
     blocks: Arc<RwLock<HashMap<Hash, Block>>>,
+
+    /// List of blocks hashes in historical order.
     history: Arc<RwLock<Vec<Hash>>>,
-    root_validator: Arc<RwLock<Option<VerifyingKey>>>
+
+    /// Verifying key of the root block author (blockchain validator).
+    validator: Arc<RwLock<Option<VerifyingKey>>>
 }
 
 impl RamStorage {
@@ -101,7 +104,7 @@ impl RamStorage {
         let storage = Self::default();
 
         for block in history {
-            if !storage.write_block(&block.into())? {
+            if storage.write_block(&block.into())? != StorageWriteResult::Success {
                 return Ok(None);
             }
         }
@@ -176,35 +179,7 @@ impl Storage for RamStorage {
         Ok(blocks.get(hash).cloned())
     }
 
-    fn write_block(&self, block: &Block) -> Result<bool, Self::Error> {
-        fn has_duplicate_transactions(
-            blocks: &RwLockReadGuard<'_, HashMap<Hash, Block>>,
-            transactions: &[Transaction]
-        ) -> bool {
-            let mut hashes = HashSet::new();
-
-            for transaction in transactions {
-                let hash = transaction.hash();
-
-                if !hashes.insert(hash) || has_transaction(blocks, hash) {
-                    return true;
-                }
-            }
-
-            false
-        }
-
-        // Check that there's no duplicate transactions.
-        if let BlockContent::Transactions(transactions) = block.content() {
-            let Ok(blocks) = self.blocks.read() else {
-                return Err(RamStorageError::Lock);
-            };
-
-            if has_duplicate_transactions(&blocks, transactions) {
-                return Ok(false);
-            }
-        }
-
+    fn write_block(&self, block: &Block) -> Result<StorageWriteResult, Self::Error> {
         let (
             Ok(mut blocks),
             Ok(mut history)
@@ -215,18 +190,61 @@ impl Storage for RamStorage {
             return Err(RamStorageError::Lock);
         };
 
-        let hash = *block.current_hash();
+        #[inline]
+        fn block_has_duplicate_messages(block: &Block) -> bool {
+            let mut messages = HashSet::new();
+
+            for message in block.messages() {
+                if !messages.insert(message.hash()) {
+                    return true;
+                }
+            }
+
+            false
+        }
+
+        #[inline]
+        fn block_has_duplicate_messages_in_history(
+            block: &Block,
+            blocks: &HashMap<Hash, Block>,
+            history: &[Hash]
+        ) -> bool {
+            let mut messages = HashSet::new();
+
+            for message in block.messages() {
+                if !messages.insert(message.hash()) {
+                    return true;
+                }
+            }
+
+            for hash in history {
+                if let Some(block) = blocks.get(hash) {
+                    for message in block.messages() {
+                        if !messages.insert(message.hash()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            false
+        }
 
         // Ignore block if it's already stored.
-        if blocks.contains_key(&hash) {
-            return Ok(false);
+        if blocks.contains_key(block.hash()) {
+            Ok(StorageWriteResult::BlockAlreadyStored)
+        }
+
+        // Ignore block if it has duplicate messages in it.
+        else if block_has_duplicate_messages(block) {
+            Ok(StorageWriteResult::BlockHasDuplicateMessages)
         }
 
         // Attempt to store the root block of the blockchain.
         else if history.is_empty() || block.is_root() {
             // But reject it if it's not of a root type.
             if !block.is_root() {
-                return Ok(false);
+                return Ok(StorageWriteResult::NotRootBlock);
             }
 
             let (is_valid, public_key) = block.verify()?;
@@ -234,24 +252,26 @@ impl Storage for RamStorage {
             // Although it's not a part of convention for this method why would
             // we need an invalid block stored here?
             if !is_valid {
-                return Ok(false);
+                return Ok(StorageWriteResult::BlockInvalid);
             }
 
-            let Ok(mut root_validator) = self.root_validator.write() else {
+            let Ok(mut validator) = self.validator.write() else {
                 return Err(RamStorageError::Lock);
             };
 
             history.clear();
             blocks.clear();
 
-            history.push(hash);
-            blocks.insert(hash, block.clone());
-            root_validator.replace(public_key);
+            history.push(*block.hash());
+            blocks.insert(*block.hash(), block.clone());
+            validator.replace(public_key);
+
+            Ok(StorageWriteResult::Success)
         }
 
         // Reject out-of-history blocks.
-        else if !blocks.contains_key(block.previous_hash()) {
-            return Ok(false);
+        else if !blocks.contains_key(block.prev_hash()) {
+            Ok(StorageWriteResult::OutOfHistoryBlock)
         }
 
         // At that point we're sure that the block is not stored and its
@@ -259,23 +279,44 @@ impl Storage for RamStorage {
         //
         // If the previous block is the last block of the history then we add
         // the new one to the end of the blockchain.
-        else if history.last() == Some(block.previous_hash()) {
-            history.push(hash);
-            blocks.insert(hash, block.clone());
+        else if history.last() == Some(block.prev_hash()) {
+            // Reject this block if it contains duplicate messages.
+            if block_has_duplicate_messages_in_history(block, &blocks, &history) {
+                return Ok(StorageWriteResult::BlockHasDuplicateHistoryMessages);
+            }
+
+            history.push(*block.hash());
+            blocks.insert(*block.hash(), block.clone());
+
+            Ok(StorageWriteResult::Success)
         }
 
         // Otherwise we need to modify the history.
         else {
             // Find the index of the previous block.
-            let mut i = 0;
+            let n = history.len();
+            let mut i = n - 1;
 
-            while &history[i] != block.previous_hash() {
-                i += 1;
+            while &history[i] != block.prev_hash() {
+                if i == 0 {
+                    break;
+                }
+
+                i -= 1;
+            }
+
+            // Check that the new block has no duplicate messages.
+            if block_has_duplicate_messages_in_history(
+                block,
+                &blocks,
+                if i < n { &history[..i] }
+                    else if n > 0 { &history[..n - 1] }
+                    else { &history }
+            ) {
+                return Ok(StorageWriteResult::BlockHasDuplicateHistoryMessages);
             }
 
             // Remove all the following blocks.
-            let n = history.len();
-
             i += 1;
 
             while i < n {
@@ -287,150 +328,44 @@ impl Storage for RamStorage {
             }
 
             // Push new block to the history.
-            history.push(hash);
-            blocks.insert(hash, block.clone());
-        }
+            history.push(*block.hash());
+            blocks.insert(*block.hash(), block.clone());
 
-        Ok(true)
+            Ok(StorageWriteResult::Success)
+        }
     }
 
     #[inline]
-    fn has_transaction(
+    fn has_message(
         &self,
-        transaction: &Hash
+        hash: &Hash
     ) -> Result<bool, Self::Error> {
         let lock = self.blocks.read()
             .map_err(|_| RamStorageError::Lock)?;
 
-        Ok(has_transaction(&lock, transaction))
+        Ok(has_message(&lock, hash))
     }
 
     #[inline]
-    fn find_transaction(
+    fn find_message(
         &self,
-        transaction: &Hash
+        hash: &Hash
     ) -> Result<Option<Hash>, Self::Error> {
         let lock = self.blocks.read()
             .map_err(|_| RamStorageError::Lock)?;
 
-        Ok(find_transaction(&lock, transaction))
+        Ok(find_message(&lock, hash))
     }
 
     #[inline]
-    fn read_transaction(
+    fn read_message(
         &self,
-        transaction: &Hash
-    ) -> Result<Option<Transaction>, Self::Error> {
+        hash: &Hash
+    ) -> Result<Option<Message>, Self::Error> {
         let lock = self.blocks.read()
             .map_err(|_| RamStorageError::Lock)?;
 
-        Ok(read_transaction(&lock, transaction))
-    }
-
-    fn get_validators_before_block(
-        &self,
-        hash: &Hash
-    ) -> Result<Option<Vec<VerifyingKey>>, Self::Error> {
-        let (
-            Ok(blocks),
-            Ok(history)
-        ) = (
-            self.blocks.read(),
-            self.history.read()
-        ) else {
-            return Err(RamStorageError::Lock);
-        };
-
-        // No block - no validators.
-        if !blocks.contains_key(hash) {
-            return Ok(None);
-        }
-
-        // Find index of the queried block.
-        let mut i = 0;
-        let n = history.len();
-
-        while i < n {
-            if &history[i] == hash {
-                break;
-            }
-
-            i += 1;
-        }
-
-        loop {
-            // If we're looking at the root block of the blockchain then the
-            // validators for it are the signer of this block.
-            if i == 0 {
-                let Ok(Some(root_validator)) = self.root_validator.read().as_deref().cloned() else {
-                    return Err(RamStorageError::Lock);
-                };
-
-                return Ok(Some(vec![root_validator]));
-            }
-
-            // Otherwise we're looking for the validators type block and return
-            // its content once it's found.
-            else {
-                i -= 1;
-
-                if let BlockContent::Validators(validators) = blocks[&history[i]].content() {
-                    return Ok(Some(validators.to_vec()));
-                }
-            }
-        }
-    }
-
-    fn get_validators_after_block(
-        &self,
-        hash: &Hash
-    ) -> Result<Option<Vec<VerifyingKey>>, Self::Error> {
-        let (
-            Ok(blocks),
-            Ok(history)
-        ) = (
-            self.blocks.read(),
-            self.history.read()
-        ) else {
-            return Err(RamStorageError::Lock);
-        };
-
-        // No block - no validators.
-        if !blocks.contains_key(hash) {
-            return Ok(None);
-        }
-
-        // Find index of the queried block.
-        let mut i = 0;
-        let n = history.len();
-
-        while i < n {
-            if &history[i] == hash {
-                break;
-            }
-
-            i += 1;
-        }
-
-        loop {
-            // If current block is of validators type then we return its
-            // content.
-            if let BlockContent::Validators(validators) = blocks[&history[i]].content() {
-                return Ok(Some(validators.to_vec()));
-            }
-
-            // If we're looking at the root block of the blockchain then the
-            // validator is the signer of this block.
-            else if i == 0 {
-                let Ok(Some(root_validator)) = self.root_validator.read().as_deref().cloned() else {
-                    return Err(RamStorageError::Lock);
-                };
-
-                return Ok(Some(vec![root_validator]));
-            }
-
-            i -= 1;
-        }
+        Ok(read_message(&lock, hash))
     }
 }
 
