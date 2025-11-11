@@ -19,14 +19,14 @@
 use std::collections::HashSet;
 
 use crate::crypto::sign::{Signature, SigningKey};
-use crate::block::{Block, BlockContent};
+use crate::block::Block;
 use crate::storage::Storage;
 
 use super::NodeHandler;
 
 pub fn run<S: Storage>(
     handler: NodeHandler<S>,
-    signing_keys: Vec<SigningKey>
+    signing_key: SigningKey
 ) {
     #[cfg(feature = "tracing")]
     tracing::info!("starting the validator thread");
@@ -67,14 +67,6 @@ pub fn run<S: Storage>(
                 break;
             }
         };
-
-        // Keep signing keys which belong to actual blockchain validators.
-        let signing_keys = signing_keys.iter()
-            .map(|signing_key| (signing_key, signing_key.verifying_key()))
-            .filter(|(_, verifying_key)| {
-                validators.contains(verifying_key)
-            })
-            .collect::<Box<[_]>>();
 
         // Take up to max allowed pending transactions.
         let transactions = handler.pending_transactions()

@@ -21,7 +21,7 @@ use std::collections::VecDeque;
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::{VerifyingKey, SignatureError};
 use crate::block::Block;
-use crate::storage::Storage;
+use crate::storage::{Storage, StorageError};
 use crate::protocol::packets::Packet;
 use crate::protocol::network::{PacketStream, PacketStreamError};
 
@@ -33,8 +33,8 @@ pub enum ViewerError {
     #[error(transparent)]
     Signature(#[from] SignatureError),
 
-    #[error("storage error: {0}")]
-    Storage(String),
+    #[error(transparent)]
+    Storage(StorageError),
 
     #[error("stream returned invalid block")]
     InvalidBlock,
@@ -143,11 +143,11 @@ impl<'stream> Viewer<'stream> {
                 Ok(Some(root_block)) => root_block,
 
                 Ok(None) => return Ok(None),
-                Err(err) => return Err(ViewerError::Storage(err.to_string()))
+                Err(err) => return Err(ViewerError::Storage(err))
             }
 
             Ok(None) => return Ok(None),
-            Err(err) => return Err(ViewerError::Storage(err.to_string()))
+            Err(err) => return Err(ViewerError::Storage(err))
         };
 
         // Verify this block.
@@ -162,7 +162,7 @@ impl<'stream> Viewer<'stream> {
 
         // Try to read tail block from the storage.
         let tail_block = storage.tail_block()
-            .map_err(|err| ViewerError::Storage(err.to_string()))?;
+            .map_err(|err| ViewerError::Storage(err))?;
 
         let Some(tail_block) = tail_block else {
             return Ok(None);
@@ -172,15 +172,24 @@ impl<'stream> Viewer<'stream> {
         let mut i = 0;
         let mut prev_block = *root_block.prev_hash();
 
-        for hash in storage.history() {
-            let hash = hash.map_err(|err| ViewerError::Storage(err.to_string()))?;
-
-            if hash == tail_block {
+        loop {
+            if prev_block == tail_block {
                 break;
             }
 
+            let block = storage.next_block(&prev_block)
+                .map_err(|err| ViewerError::Storage(err))?;
+
+            match block {
+                Some(block) => prev_block = block,
+                None => break
+            }
+
             i += 1;
-            prev_block = hash;
+        }
+
+        if prev_block != tail_block {
+            return Err(ViewerError::InvalidHistory);
         }
 
         Ok(Some(Self {
@@ -352,15 +361,12 @@ impl<'stream> BatchedViewer<'stream> {
     pub fn open_from_storage<S: Storage>(
         streams: impl IntoIterator<Item = &'stream mut PacketStream>,
         storage: &S
-    )  -> Result<Option<Self>, ViewerError>
-    where
-        S::Error: 'static
-    {
+    )  -> Result<Option<Self>, ViewerError> {
         let mut viewers = Vec::new();
         let mut prev_block = Hash::default();
 
         let root_block = storage.root_block()
-            .map_err(|err| ViewerError::Storage(err.to_string()))?;
+            .map_err(|err| ViewerError::Storage(err))?;
 
         let Some(root_block) = root_block else {
             return Ok(None);
@@ -473,21 +479,18 @@ impl<'stream> BatchedViewer<'stream> {
     ///
     /// > Note that this method does not modify the provided storage if new
     /// > blocks are received from the network. Only read operations are used.
-    pub fn forward_with_storage<T: Storage>(
+    pub fn forward_with_storage<S: Storage>(
         &mut self,
-        storage: &T
-    ) -> Result<Option<ValidBlock>, ViewerError>
-    where
-        T::Error: 'static
-    {
+        storage: &S
+    ) -> Result<Option<ValidBlock>, ViewerError> {
         let storage_block = storage.next_block(&self.prev_block)
-            .map_err(|err| ViewerError::Storage(err.to_string()))?
+            .map_err(|err| ViewerError::Storage(err))?
             .and_then(|block| {
                 storage.read_block(&block)
                     .transpose()
             })
             .transpose()
-            .map_err(|err| ViewerError::Storage(err.to_string()))?
+            .map_err(|err| ViewerError::Storage(err))?
             .map(|block| {
                 match block.verify() {
                     Ok((false, _)) => Ok(None),

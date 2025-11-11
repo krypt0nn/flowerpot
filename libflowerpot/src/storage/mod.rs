@@ -16,9 +16,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::iter::FusedIterator;
-
 use crate::crypto::hash::Hash;
+use crate::crypto::sign::VerifyingKey;
 use crate::message::Message;
 use crate::block::Block;
 
@@ -55,17 +54,17 @@ pub enum StorageWriteResult {
     OutOfHistoryBlock
 }
 
-pub trait Storage: Clone {
-    type Error: std::error::Error + Send + 'static;
+pub type StorageError = Box<dyn std::error::Error>;
 
+pub trait Storage {
     /// Get hash of the root block if it's available.
-    fn root_block(&self) -> Result<Option<Hash>, Self::Error>;
+    fn root_block(&self) -> Result<Option<Hash>, StorageError>;
 
     /// Get hash of the tail block if it's available.
-    fn tail_block(&self) -> Result<Option<Hash>, Self::Error>;
+    fn tail_block(&self) -> Result<Option<Hash>, StorageError>;
 
     /// Check if blockchain has block with given hash.
-    fn has_block(&self, hash: &Hash) -> Result<bool, Self::Error> {
+    fn has_block(&self, hash: &Hash) -> Result<bool, StorageError> {
         Ok(self.read_block(hash)?.is_some())
     }
 
@@ -79,14 +78,14 @@ pub trait Storage: Clone {
     /// [curr_block] <--- [next_block]
     ///                   ^^^^^^^^^^^^ returned value
     /// ```
-    fn next_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error>;
+    fn next_block(&self, hash: &Hash) -> Result<Option<Hash>, StorageError>;
 
     /// Get hash of a block previous to the one with provided hash. Return
     /// `Ok(None)` if there's no block with provided hash.
     ///
     /// Previous block of the root block of the blockchain must be the
     /// default hash (zeros).
-    fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error> {
+    fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, StorageError> {
         match self.read_block(hash)? {
             Some(block) => Ok(Some(*block.prev_hash())),
             None => Ok(None)
@@ -94,7 +93,7 @@ pub trait Storage: Clone {
     }
 
     /// Read block from its hash. Return `Ok(None)` if there's no such block.
-    fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error>;
+    fn read_block(&self, hash: &Hash) -> Result<Option<Block>, StorageError>;
 
     /// Try to write a block to the blockchain.
     ///
@@ -136,10 +135,10 @@ pub trait Storage: Clone {
     fn write_block(
         &self,
         block: &Block
-    ) -> Result<StorageWriteResult, Self::Error>;
+    ) -> Result<StorageWriteResult, StorageError>;
 
     /// Check if blockchain has message with given hash.
-    fn has_message(&self, hash: &Hash) -> Result<bool, Self::Error> {
+    fn has_message(&self, hash: &Hash) -> Result<bool, StorageError> {
         Ok(self.find_message(hash)?.is_some())
     }
 
@@ -148,7 +147,7 @@ pub trait Storage: Clone {
     fn find_message(
         &self,
         hash: &Hash
-    ) -> Result<Option<Hash>, Self::Error> {
+    ) -> Result<Option<Hash>, StorageError> {
         let mut curr_block = self.root_block()?;
 
         while let Some(block_hash) = &curr_block {
@@ -171,7 +170,7 @@ pub trait Storage: Clone {
     fn read_message(
         &self,
         hash: &Hash
-    ) -> Result<Option<Message>, Self::Error> {
+    ) -> Result<Option<Message>, StorageError> {
         let Some(block) = self.find_message(hash)? else {
             return Ok(None);
         };
@@ -186,114 +185,96 @@ pub trait Storage: Clone {
             .cloned())
     }
 
-    /// Get iterator over all the blocks hashes stored in the current storage.
-    #[inline]
-    fn history(&self) -> StorageHistoryIter<'_, Self> where Self: Sized {
-        StorageHistoryIter::new(self)
-    }
+    /// Get verifying key of the root block signer. Return `Ok(None)` if root
+    /// block is not available.
+    fn get_validator(&self) -> Result<Option<VerifyingKey>, StorageError> {
+        let result = self.root_block()?
+            .map(|hash| self.read_block(&hash))
+            .transpose()?
+            .flatten()
+            .map(|block| {
+                block.verify()
+                    .map(|(_, verifying_key)| verifying_key)
+            });
 
-    /// Get iterator over all the blocks stored in the current storage.
-    #[inline]
-    fn blocks(&self) -> StorageBlocksIter<'_, Self> where Self: Sized {
-        StorageBlocksIter::new(self)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct StorageHistoryIter<'storage, S: Storage> {
-    storage: &'storage S,
-    current_block: Hash
-}
-
-impl<'storage, S: Storage> StorageHistoryIter<'storage, S> {
-    #[inline]
-    pub fn new(storage: &'storage S) -> Self {
-        Self::new_since(storage, Hash::default())
-    }
-
-    #[inline]
-    pub fn new_since(
-        storage: &'storage S,
-        block_hash: impl Into<Hash>
-    ) -> Self {
-        Self {
-            storage,
-            current_block: block_hash.into()
-        }
-    }
-
-    #[inline(always)]
-    pub const fn storage(&self) -> &'storage S {
-        self.storage
-    }
-}
-
-impl<S: Storage> Iterator for StorageHistoryIter<'_, S> {
-    type Item = Result<Hash, S::Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.storage.next_block(&self.current_block) {
-            Ok(Some(next_block)) => {
-                self.current_block = next_block;
-
-                Some(Ok(next_block))
-            }
-
-            Ok(None) => None,
-            Err(err) => Some(Err(err))
-        }
-    }
-}
-
-impl<S: Storage> FusedIterator for StorageHistoryIter<'_, S> {}
-
-#[derive(Debug, Clone)]
-pub struct StorageBlocksIter<'storage, S: Storage>(StorageHistoryIter<'storage, S>);
-
-impl<'storage, S: Storage> StorageBlocksIter<'storage, S> {
-    #[inline]
-    pub fn new(storage: &'storage S) -> Self {
-        Self(StorageHistoryIter::new(storage))
-    }
-
-    #[inline]
-    pub fn new_since(
-        storage: &'storage S,
-        block_hash: impl Into<Hash>
-    ) -> Self {
-        Self(StorageHistoryIter::new_since(storage, block_hash))
-    }
-}
-
-impl<S: Storage> Iterator for StorageBlocksIter<'_, S> {
-    type Item = Result<Block, S::Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let hash = match self.0.next()? {
-            Ok(hash) => hash,
-            Err(err) => return Some(Err(err))
+        // Not particularly true but that's what we get with pre-defined trait
+        // methods.
+        let Some(Ok(verifying_key)) = result else {
+            return Ok(None);
         };
 
-        match self.0.storage.read_block(&hash) {
-            Ok(Some(block)) => Some(Ok(block)),
-            Ok(None) => None,
-            Err(err) => Some(Err(err))
-        }
+        Ok(Some(verifying_key))
     }
 }
 
-impl<S: Storage> FusedIterator for StorageBlocksIter<'_, S> {}
+impl<T> Storage for Box<T> where T: Storage {
+    #[inline]
+    fn root_block(&self) -> Result<Option<Hash>, StorageError> {
+        T::root_block(self)
+    }
 
-impl<'storage, S: Storage> From<StorageHistoryIter<'storage, S>>
-for StorageBlocksIter<'storage, S> {
-    #[inline(always)]
-    fn from(value: StorageHistoryIter<'storage, S>) -> Self {
-        Self(value)
+    #[inline]
+    fn tail_block(&self) -> Result<Option<Hash>, StorageError> {
+        T::tail_block(self)
+    }
+
+    #[inline]
+    fn has_block(&self, hash: &Hash) -> Result<bool, StorageError> {
+        T::has_block(self, hash)
+    }
+
+    #[inline]
+    fn next_block(&self, hash: &Hash) -> Result<Option<Hash>, StorageError> {
+        T::next_block(self, hash)
+    }
+
+    #[inline]
+    fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, StorageError> {
+        T::prev_block(self, hash)
+    }
+
+    #[inline]
+    fn read_block(&self, hash: &Hash) -> Result<Option<Block>, StorageError> {
+        T::read_block(self, hash)
+    }
+
+    #[inline]
+    fn write_block(
+        &self,
+        block: &Block
+    ) -> Result<StorageWriteResult, StorageError> {
+        T::write_block(self, block)
+    }
+
+    #[inline]
+    fn has_message(&self, hash: &Hash) -> Result<bool, StorageError> {
+        T::has_message(self, hash)
+    }
+
+    #[inline]
+    fn find_message(
+        &self,
+        hash: &Hash
+    ) -> Result<Option<Hash>, StorageError> {
+        T::find_message(self, hash)
+    }
+
+    #[inline]
+    fn read_message(
+        &self,
+        hash: &Hash
+    ) -> Result<Option<Message>, StorageError> {
+        T::read_message(self, hash)
+    }
+
+    #[inline]
+    fn get_validator(&self) -> Result<Option<VerifyingKey>, StorageError> {
+        T::get_validator(self)
     }
 }
 
 #[cfg(test)]
-pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
+pub fn test_storage<S: Storage>(storage: &S) -> Result<(), StorageError> {
     use rand_chacha::ChaCha8Rng;
     use rand_chacha::rand_core::SeedableRng;
 
@@ -309,9 +290,6 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     assert!(!storage.has_message(&Hash::ZERO)?);
     assert!(storage.find_message(&Hash::ZERO)?.is_none());
     assert!(storage.read_message(&Hash::ZERO)?.is_none());
-
-    assert_eq!(storage.history().count(), 0);
-    assert_eq!(storage.blocks().count(), 0);
 
     // Prepare test messages.
 
@@ -363,9 +341,6 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     assert!(storage.read_block(&Hash::ZERO)?.is_none());
     assert!(storage.read_block(block_2.hash())?.is_none());
 
-    assert_eq!(storage.history().count(), 0);
-    assert_eq!(storage.blocks().count(), 0);
-
     // 2. Out of order writing with root block stored.
     //
     // Block 3 must be rejected by the method since block 2 is not stored yet.
@@ -398,9 +373,6 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     assert_eq!(storage.read_block(block_1.hash())?.as_ref(), Some(&block_1));
     assert!(storage.read_block(block_2.hash())?.is_none());
     assert!(storage.read_block(block_3.hash())?.is_none());
-
-    assert_eq!(storage.history().count(), 1);
-    assert_eq!(storage.blocks().count(), 1);
 
     assert!(!storage.has_message(message_1.hash())?);
     assert!(!storage.has_message(message_2.hash())?);
@@ -452,9 +424,6 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     assert_eq!(storage.read_block(block_2.hash())?.as_ref(), Some(&block_2));
     assert_eq!(storage.read_block(block_3.hash())?.as_ref(), Some(&block_3));
 
-    assert_eq!(storage.history().count(), 3);
-    assert_eq!(storage.blocks().count(), 3);
-
     assert!(storage.has_message(message_1.hash())?);
     assert!(storage.has_message(message_2.hash())?);
     assert!(storage.has_message(message_3.hash())?);
@@ -502,9 +471,6 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     assert_eq!(storage.read_block(block_2.hash())?.as_ref(), Some(&block_2));
     assert!(storage.read_block(block_3.hash())?.is_none());
     assert_eq!(storage.read_block(block_3_alt.hash())?.as_ref(), Some(&block_3_alt));
-
-    assert_eq!(storage.history().count(), 3);
-    assert_eq!(storage.blocks().count(), 3);
 
     assert!(storage.has_message(message_1.hash())?);
     assert!(storage.has_message(message_2.hash())?);
@@ -560,9 +526,6 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
 
     assert!(storage.read_block(block_3.hash())?.is_none());
     assert!(storage.read_block(block_3_alt.hash())?.is_none());
-
-    assert_eq!(storage.history().count(), 2);
-    assert_eq!(storage.blocks().count(), 2);
 
     assert!(!storage.has_message(message_1.hash())?);
     assert!(storage.has_message(message_2.hash())?);
@@ -624,9 +587,6 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     assert!(storage.read_block(block_3.hash())?.is_none());
     assert!(storage.read_block(block_3_alt.hash())?.is_none());
 
-    assert_eq!(storage.history().count(), 1);
-    assert_eq!(storage.blocks().count(), 1);
-
     assert!(storage.has_message(message_1.hash())?);
     assert!(!storage.has_message(message_2.hash())?);
     assert!(!storage.has_message(message_3.hash())?);
@@ -666,9 +626,6 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), S::Error> {
     assert!(storage.has_block(block_1_alt.hash())?);
     assert!(storage.has_block(new_block_2_alt.hash())?);
     assert!(!storage.has_block(new_block_3_alt.hash())?);
-
-    assert_eq!(storage.history().count(), 2);
-    assert_eq!(storage.blocks().count(), 2);
 
     assert!(storage.has_message(message_1.hash())?);
     assert!(storage.has_message(message_2.hash())?);

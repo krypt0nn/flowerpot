@@ -170,6 +170,16 @@ impl PacketStreamEncryptor {
     }
 }
 
+impl std::fmt::Debug for PacketStreamEncryptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChaCha20(_) => f.debug_struct("ChaCha20").finish(),
+            Self::ChaCha12(_) => f.debug_struct("ChaCha12").finish(),
+            Self::ChaCha8(_)  => f.debug_struct("ChaCha8").finish()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PacketStreamOptions {
     /// List of encryption algorithms which can be used by the packet stream.
@@ -204,6 +214,7 @@ impl Default for PacketStreamOptions {
 
 /// Abstraction over a transport protocol data stream which supports packets
 /// sending and receiving, endpoint validation and optional stream encryption.
+#[derive(Debug)]
 pub struct PacketStream {
     stream: TcpStream,
     local_id: [u8; 32],

@@ -26,9 +26,9 @@ use spin::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::{Signature, SigningKey, VerifyingKey};
-use crate::transaction::Transaction;
+use crate::message::Message;
 use crate::block::{Block, BlockDecodeError};
-use crate::storage::Storage;
+use crate::storage::{Storage, StorageError};
 use crate::protocol::packets::Packet;
 use crate::protocol::network::{PacketStream, PacketStreamError};
 use crate::viewer::{BatchedViewer, ViewerError};
@@ -41,18 +41,18 @@ mod handlers;
 use tracker::{Tracker, TrackerError};
 
 #[derive(Debug, thiserror::Error)]
-pub enum NodeError<S: Storage> {
+pub enum NodeError {
     #[error(transparent)]
     PacketStream(PacketStreamError),
 
     #[error(transparent)]
-    Tracker(TrackerError<S>),
+    Tracker(TrackerError),
 
     #[error(transparent)]
     Viewer(ViewerError),
 
     #[error(transparent)]
-    Storage(S::Error),
+    Storage(StorageError),
 
     #[error(transparent)]
     Block(BlockDecodeError)
@@ -71,28 +71,24 @@ pub struct NodeOptions {
     /// Default is `1024`.
     pub max_history_length: usize,
 
-    /// Maximal size in bytes of a transaction.
+    /// Maximal size in bytes of a user message.
     ///
-    /// Bigger transactions will be rejected immediately upon receiving.
+    /// Bigger messages will be rejected immediately upon receiving.
     ///
-    /// It is recommended to keep this value high enough because network nodes
-    /// spend gas to add transactions to the blockchain which already limits
-    /// how many data they can practically send to the network.
+    /// > This is applied to the `Message` packets only.
     ///
-    /// > This is applied to the `Transaction` packets only.
-    ///
-    /// Default is `33554432` bytes (32 MB).
-    pub max_transaction_size: usize,
+    /// Default is `33554432` bytes (32 MiB).
+    pub max_message_size: usize,
 
-    /// Accept incoming transactions.
+    /// Accept incoming messages.
     ///
-    /// This option disables the `Transaction` packet processing.
+    /// This option disables the `Message` packet processing.
     ///
     /// If disabled your node will not act as a normal blockchain node and
     /// reduce overall network quality.
     ///
     /// Default is `true`.
-    pub accept_transactions: bool,
+    pub accept_messages: bool,
 
     /// Accept incoming blocks.
     ///
@@ -104,191 +100,147 @@ pub struct NodeOptions {
     /// Default is `true`.
     pub accept_blocks: bool,
 
-    /// Resolve missing transactions and fetch them from the remote nodes.
+    /// Resolve missing messages and fetch them from the remote nodes.
     ///
-    /// Nodes exchange special `PendingTransactions` and `PendingBlocks` packets
-    /// to share list of known pending transactions and blocks' hashes. If this
+    /// Nodes exchange special `PendingMessages` and `PendingBlocks` packets
+    /// to share lists of known pending messages' and blocks' hashes. If this
     /// option is disabled, then upon receiving such packet we won't try to
-    /// find out which transactions we're missing and won't try to fetch them.
+    /// find out which messages we're missing and won't try to fetch them.
     ///
-    /// This option is the main mechanism of pending transactions
-    /// synchronization in the network.
-    ///
-    /// If disabled your node will not act as a normal blockchain node and
-    /// reduce overall network quality.
-    ///
-    /// Default is `true`.
-    pub fetch_pending_transactions: bool,
-
-    /// Resolve missing transactions and fetch them from the remote nodes.
-    ///
-    /// Nodes exchange special `PendingTransactions` and `PendingBlocks` packets
-    /// to share list of known pending transactions and blocks' hashes. If this
-    /// option is disabled, then upon receiving such packet we won't try to
-    /// find out which blocks we're missing and won't try to fetch them.
-    ///
-    /// This option is the main mechanism of pending blocks synchronization in
+    /// This option is the main mechanism of pending messages synchronization in
     /// the network.
     ///
     /// If disabled your node will not act as a normal blockchain node and
     /// reduce overall network quality.
     ///
     /// Default is `true`.
-    pub fetch_pending_blocks: bool,
+    pub fetch_pending_messages: bool,
 
-    /// When specified this function will be used to filter incoming
-    /// transactions and accept only those for which the provided function
-    /// returned `true`.
-    ///
-    /// This option is needed when you use blockchain for your own application
-    /// and you want to accept transactions of special format only.
-    ///
-    /// This filter function is applied to the `Transaction` packets only.
-    /// It is not applied to the blocks, so you'd need to specify the
-    /// `blocks_filter` as well.
-    ///
-    /// Default is `None`.
-    pub transactions_filter: Option<fn(&Hash, &VerifyingKey, &Transaction) -> bool>,
-
-    /// When specified this function will be used to filter incoming blocks
+    /// When specified this function will be used to filter incoming messages
     /// and accept only those for which the provided function returned `true`.
     ///
-    /// This option is needed when you use blockchain for your own application
-    /// and you want to accept blocks of special format only.
+    /// This filter function is applied to the `Message` packets only. It is not
+    /// applied to the blocks, so you'd need to specify the `blocks_filter` as
+    /// well.
     ///
-    /// This filter function is applied to the `Block` packets only.
-    ///
-    /// Default is `None`.
-    pub blocks_filter: Option<fn(&Hash, &VerifyingKey, &Block) -> bool>,
+    /// Default is `None` (every message is accepted).
+    pub messages_filter: Option<fn(&Message, &VerifyingKey) -> bool>,
 
-    /// Amount of time a validator thread will wait before starting the
-    /// consensus mechanism. This time is needed so that the node can
-    /// synchronize all the pending data. It is recommended to keep this value
-    /// relatively high, as it will be used only initially and won't affect
-    /// further algorithm work.
+    /// Amount of time a validator thread will wait before starting to create
+    /// new blocks. This time is needed so that the node can synchronize all the
+    /// pending data. It is recommended to keep this value relatively high, as
+    /// it will be used only initially and won't affect further algorithm work.
     ///
     /// Default is `1m`.
     pub validator_warmup_time: Duration,
 
-    /// Minimal amount of transactions needed to form a new block.
+    /// Minimal amount of messages needed to form a new block.
     ///
     /// Default is `1`.
-    pub validator_min_transactions_num: usize,
+    pub validator_min_messages_num: usize,
 
-    /// Maximal amount of transactions needed to form a new block.
+    /// Maximal amount of messages needed to form a new block.
     ///
     /// Default is `128`.
-    pub validator_max_transactions_num: usize,
-
-    /// Amount of time validator will wait to receive pending blocks from other
-    /// validators.
-    ///
-    /// It is recommended to keep this value reasonably high so that blocks can
-    /// be shared between the network nodes. Making this value small will also
-    /// result in approving many different blocks which can be abused by
-    /// malicious validators.
-    ///
-    /// Default is `20s`.
-    pub validator_blocks_await_time: Duration,
-
-    /// Amount of time validator will wait for other validators to send their
-    /// block approvals until starting a new validation round.
-    ///
-    /// Default is `10s`.
-    pub validator_block_approvals_await_time: Duration
+    pub validator_max_messages_num: usize
 }
 
 impl Default for NodeOptions {
     fn default() -> Self {
         Self {
             max_history_length: 1024,
-            max_transaction_size: 32 * 1024 * 1024,
-            accept_transactions: true,
+            max_message_size: 32 * 1024 * 1024,
+            accept_messages: true,
             accept_blocks: true,
-            fetch_pending_transactions: true,
-            fetch_pending_blocks: true,
-            blocks_filter: None,
-            transactions_filter: None,
+            fetch_pending_messages: true,
+            messages_filter: None,
             validator_warmup_time: Duration::from_secs(60),
-            validator_min_transactions_num: 1,
-            validator_max_transactions_num: 128,
-            validator_blocks_await_time: Duration::from_secs(20),
-            validator_block_approvals_await_time: Duration::from_secs(10)
+            validator_min_messages_num: 1,
+            validator_max_messages_num: 128
         }
     }
 }
 
-pub struct Node<S: Storage> {
-    /// Hash of the root block that the current node serves.
-    root_block: Hash,
-
-    /// Table of connections to other nodes, [remote_id] => [stream].
+#[derive(Default)]
+pub struct Node {
+    /// Table of connections to other nodes.
+    ///
+    /// `[remote_id] => [stream]`
     streams: HashMap<[u8; 32], PacketStream>,
 
-    /// List of signing keys which can be used to sign new blocks or approve
-    /// received ones.
-    owned_validators: Vec<SigningKey>,
+    /// Table of validators signing keys for owned blockchains. These are used
+    /// by the node to issue new blocks and send them to the network.
+    ///
+    /// `[root_block] => [signing_key]`
+    validators: HashMap<Hash, SigningKey>,
 
-    /// Table of pending transactions which are meant to be added into a new
-    /// block, [transaction_hash] => [transaction].
-    pending_transactions: HashMap<Hash, Transaction>,
+    /// Table of pending messages which are meant to be added into a new block.
+    ///
+    /// `[root_block] => [message]`
+    pending_messages: HashMap<Hash, Message>,
 
-    /// Table of pending blocks which are meant to be approved and added to the
-    /// blockchain history, [block_hash] => [block].
-    pending_blocks: HashMap<Hash, Block>,
-
-    /// Blockchain history tracker.
-    tracker: Tracker<S>
+    /// Table of blockchain history trackers which are used to keep track of
+    /// blocks history and, if possible, query messages and other data.
+    ///
+    /// `[root_block] => [tracker]`
+    trackers: HashMap<Hash, Tracker>
 }
 
-impl<S: Storage> Node<S> {
-    /// Create new empty node.
-    pub fn new(root_block: impl Into<Hash>) -> Self {
-        Self {
-            root_block: root_block.into(),
-            streams: HashMap::new(),
-            owned_validators: Vec::new(),
-            pending_transactions: HashMap::new(),
-            pending_blocks: HashMap::new(),
-            tracker: Tracker::default()
-        }
-    }
-
-    /// Create new node with provided root block hash and blockchain storage.
-    pub fn from_storage(root_block: impl Into<Hash>, storage: S) -> Self {
-        Self {
-            root_block: root_block.into(),
-            streams: HashMap::new(),
-            owned_validators: Vec::new(),
-            pending_transactions: HashMap::new(),
-            pending_blocks: HashMap::new(),
-            tracker: Tracker::from_storage(storage)
-        }
-    }
-
+impl Node {
     /// Add new packet stream.
     pub fn add_stream(&mut self, stream: PacketStream) -> &mut Self {
-        if !self.streams.contains_key(stream.peer_id()) {
-            self.streams.insert(*stream.peer_id(), stream);
-        }
+        self.streams.insert(*stream.peer_id(), stream);
 
         self
     }
 
     /// Add validator signing key.
     ///
-    /// If set, node will start a background task to create new blocks and send
-    /// approvals for other validators' nodes.
-    ///
-    /// Multiple validator keys are allowed to be stored.
+    /// If set, node will start a background task to issue new blocks for a
+    /// blockchain with provided root block hash.
     pub fn add_validator(
         &mut self,
-        validator: impl Into<SigningKey>
+        root_block: impl Into<Hash>,
+        signing_key: impl Into<SigningKey>
     ) -> &mut Self {
-        let validator: SigningKey = validator.into();
+        self.validators.insert(root_block.into(), signing_key.into());
 
-        if !self.owned_validators.contains(&validator) {
-            self.owned_validators.push(validator);
+        self
+    }
+
+    /// Add tracker to the node.
+    ///
+    /// Root block hash will be queried from the tracker. If `root_block`
+    /// argument is provided, then it will be used if `tracker` has no root
+    /// block stored. If both argument and `tracker` have root block hash, then
+    /// they will be compared, and tracker will be rejected on mismatch.
+    ///
+    /// Trackers with attached storages are prioritized.
+    pub fn add_tracker(
+        &mut self,
+        tracker: Tracker,
+        root_block: Option<&Hash>
+    ) -> &mut Self {
+        let root_block = match (tracker.get_root_block(), root_block) {
+            (Ok(Some(root_block_left)), Some(root_block_right))
+            if &root_block_left == root_block_right => root_block_left,
+
+            (Ok(Some(root_block)), None) => root_block,
+            (_, Some(root_block)) => *root_block,
+
+            _ => return self
+        };
+
+        match self.trackers.get(&root_block) {
+            Some(curr_tracker) => {
+                if curr_tracker.storage().is_none() {
+                    self.trackers.insert(root_block, tracker);
+                }
+            }
+
+            None => {
+                self.trackers.insert(root_block, tracker);
+            }
         }
 
         self
@@ -318,10 +270,7 @@ impl<S: Storage> Node<S> {
     ///    then it's forcely removed from the network. This is needed to prevent
     ///    people from creating validators which don't participate in the
     ///    network maintenance and break the 2/3 validators rule.
-    pub fn sync(&mut self) -> Result<(), NodeError<S>>
-    where
-        S::Error: 'static
-    {
+    pub fn sync(&mut self) -> Result<(), NodeError> {
         #[cfg(feature = "tracing")]
         tracing::info!("synchronizing node state");
 

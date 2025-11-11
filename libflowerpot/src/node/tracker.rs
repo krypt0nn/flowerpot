@@ -17,17 +17,18 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::collections::HashSet;
+use std::borrow::Cow;
 
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::{VerifyingKey, SignatureError};
-use crate::transaction::Transaction;
-use crate::block::{Block, BlockContent};
-use crate::storage::Storage;
+use crate::message::Message;
+use crate::block::Block;
+use crate::storage::{Storage, StorageError, StorageWriteResult};
 
 #[derive(Debug, thiserror::Error)]
-pub enum TrackerError<S: Storage> {
+pub enum TrackerError {
     #[error(transparent)]
-    Storage(S::Error),
+    Storage(StorageError),
 
     #[error("failed to verify block signature: {0}")]
     Signature(#[from] SignatureError)
@@ -35,45 +36,53 @@ pub enum TrackerError<S: Storage> {
 
 /// Tracker is a special struct that keeps track of the blocks history in the
 /// blockchain and synchronizes it with a storage if it's provided.
-#[derive(Debug, Clone)]
-pub enum Tracker<S: Storage> {
+pub enum Tracker {
     /// Data + metadata tracker.
-    Full(S),
+    Full(Box<dyn Storage>),
 
     /// Metadata-only tracker.
     HeadOnly {
+        /// List of messages indexed in the blocks of the blockchain.
+        ///
+        /// This table is needed to prevent double-indexing of messages.
+        messages: HashSet<Hash>,
+
         /// List of blockchain blocks hashes.
         blocks: Vec<Hash>,
 
-        /// List of transactions indexed in the blocks from the blockchain.
-        ///
-        /// This table is needed to prevent double-indexing of transactions.
-        transactions: HashSet<Hash>,
-
-        /// List of the blockchain validators for the next block in the history.
-        validators: Vec<VerifyingKey>
+        /// Verifying key of the root block of the blockchain (validator key).
+        validator: Option<VerifyingKey>
     }
 }
 
-impl<S: Storage> Default for Tracker<S> {
+impl Default for Tracker {
     fn default() -> Self {
         Self::HeadOnly {
+            messages: HashSet::new(),
             blocks: Vec::new(),
-            transactions: HashSet::new(),
-            validators: Vec::new()
+            validator: None
         }
     }
 }
 
-impl<S: Storage> Tracker<S> {
+impl Tracker {
     /// Create new tracker from provided blockchain storage.
-    #[inline(always)]
-    pub const fn from_storage(storage: S) -> Self {
-        Self::Full(storage)
+    #[inline]
+    pub fn from_storage(storage: impl Storage + 'static) -> Self {
+        Self::Full(Box::new(storage))
+    }
+
+    /// Get reference to the blockchain storage if the tracker owns it.
+    #[inline]
+    pub fn storage(&self) -> Option<&Box<dyn Storage>> {
+        match self {
+            Self::Full(storage) => Some(storage),
+            Self::HeadOnly { .. } => None
+        }
     }
 
     /// Try to get the root block of the blockchain.
-    pub fn get_root_block(&self) -> Result<Option<Hash>, TrackerError<S>> {
+    pub fn get_root_block(&self) -> Result<Option<Hash>, TrackerError> {
         match self {
             Self::Full(storage) => storage.root_block()
                 .map_err(TrackerError::Storage),
@@ -82,17 +91,8 @@ impl<S: Storage> Tracker<S> {
         }
     }
 
-    /// Get reference to the blockchain storage if the tracker owns it.
-    #[inline]
-    pub fn storage(&self) -> Option<&S> {
-        match self {
-            Self::Full(storage) => Some(storage),
-            Self::HeadOnly { .. } => None
-        }
-    }
-
     /// Try to get the tail block of the blockchain.
-    pub fn get_tail_block(&self) -> Result<Option<Hash>, TrackerError<S>> {
+    pub fn get_tail_block(&self) -> Result<Option<Hash>, TrackerError> {
         match self {
             Self::Full(storage) => storage.tail_block()
                 .map_err(TrackerError::Storage),
@@ -101,24 +101,35 @@ impl<S: Storage> Tracker<S> {
         }
     }
 
-    /// Try to check if transaction with provided hash is stored in the
-    /// blockchain.
-    pub fn has_transaction(
-        &self,
-        hash: &Hash
-    ) -> Result<bool, TrackerError<S>> {
+    /// Try to get verifying key of the blockchain validator.
+    pub fn get_validator(
+        &self
+    ) -> Result<Option<Cow<VerifyingKey>>, TrackerError> {
         match self {
-            Self::Full(storage) => storage.has_transaction(hash)
+            Self::Full(storage) => storage.get_validator()
+                .map_err(TrackerError::Storage)
+                .map(|value| value.map(Cow::Owned)),
+
+            Self::HeadOnly { validator, .. } => {
+                Ok(validator.as_ref().map(Cow::Borrowed))
+            }
+        }
+    }
+
+    /// Try to check if message with provided hash is stored in the blockchain.
+    pub fn has_message(&self, hash: &Hash) -> Result<bool, TrackerError> {
+        match self {
+            Self::Full(storage) => storage.has_message(hash)
                 .map_err(TrackerError::Storage),
 
-            Self::HeadOnly { transactions, .. } => {
-                Ok(transactions.contains(hash))
+            Self::HeadOnly { messages, .. } => {
+                Ok(messages.contains(hash))
             }
         }
     }
 
     /// Try to check if block with provided hash is stored in the blockchain.
-    pub fn has_block(&self, hash: &Hash) -> Result<bool, TrackerError<S>> {
+    pub fn has_block(&self, hash: &Hash) -> Result<bool, TrackerError> {
         match self {
             Self::Full(storage) => storage.has_block(hash)
                 .map_err(TrackerError::Storage),
@@ -127,17 +138,17 @@ impl<S: Storage> Tracker<S> {
         }
     }
 
-    /// Try to read transaction from the underlying blockchain storage.
+    /// Try to read message from the underlying blockchain storage.
     ///
     /// This method will return `Ok(Some(..))` *only* if tracker has a storage.
     /// Head-only tracker doesn't store any actual data besides the hashes and
     /// cannot read transactions.
-    pub fn read_transaction(
+    pub fn read_message(
         &self,
         hash: &Hash
-    ) -> Result<Option<Transaction>, TrackerError<S>> {
+    ) -> Result<Option<Message>, TrackerError> {
         match self {
-            Self::Full(storage) => storage.read_transaction(hash)
+            Self::Full(storage) => storage.read_message(hash)
                 .map_err(TrackerError::Storage),
 
             Self::HeadOnly { .. } => Ok(None)
@@ -152,7 +163,7 @@ impl<S: Storage> Tracker<S> {
     pub fn read_block(
         &self,
         hash: &Hash
-    ) -> Result<Option<Block>, TrackerError<S>> {
+    ) -> Result<Option<Block>, TrackerError> {
         match self {
             Self::Full(storage) => storage.read_block(hash)
                 .map_err(TrackerError::Storage),
@@ -168,17 +179,59 @@ impl<S: Storage> Tracker<S> {
         &self,
         offset: usize,
         max_length: usize
-    ) -> Result<Box<[Hash]>, TrackerError<S>> {
+    ) -> Result<Box<[Hash]>, TrackerError> {
         match self {
             Self::Full(storage) => {
                 // FIXME: highly suboptimal since by default requires to iterate
                 // over the whole storage to reach the offset position.
 
-                storage.history()
-                    .skip(offset)
-                    .take(max_length)
-                    .collect::<Result<Box<[Hash]>, _>>()
-                    .map_err(TrackerError::Storage)
+                // Obtain hash of the root block.
+                let root_block = storage.root_block()
+                    .map_err(TrackerError::Storage)?;
+
+                let Some(root_block) = root_block else {
+                    return Ok(Box::new([]));
+                };
+
+                // Skip first `offset` blocks.
+                let mut prev_block = root_block;
+                let mut i = 0;
+
+                while i < offset {
+                    let block = storage.next_block(&prev_block)
+                        .map_err(TrackerError::Storage)?;
+
+                    match block {
+                        Some(block) => prev_block = block,
+                        None => break
+                    }
+
+                    i += 1;
+                }
+
+                // Check that we've reached the `offset`-th block.
+                if i != offset {
+                    return Ok(Box::new([]));
+                }
+
+                // Fill the history vector with up to `max_length` block hashes.
+                let mut history = Vec::with_capacity(max_length);
+
+                while i < offset + max_length {
+                    history.push(prev_block);
+
+                    let block = storage.next_block(&prev_block)
+                        .map_err(TrackerError::Storage)?;
+
+                    match block {
+                        Some(block) => prev_block = block,
+                        None => break
+                    }
+
+                    i += 1;
+                }
+
+                Ok(history.into_boxed_slice())
             }
 
             Self::HeadOnly { blocks, .. } => {
@@ -193,37 +246,20 @@ impl<S: Storage> Tracker<S> {
         }
     }
 
-    /// Get list of current blockchain validators.
-    ///
-    /// Returned list is equal to the
-    /// `Storage::get_validators_after(Tracker::get_tail_block())` value.
-    pub fn get_validators(&self) -> Result<Vec<VerifyingKey>, TrackerError<S>> {
-        match self {
-            Self::Full(storage) => storage.get_current_validators()
-                .map_err(TrackerError::Storage),
-
-            Self::HeadOnly { validators, .. } => Ok(validators.clone())
-        }
-    }
-
     /// Try to write provided block to the tracker's metadata and, if provided,
     /// the underlying blockchain storage.
     ///
-    /// **It is expected that the block is already validated.** This method
-    /// doesn't verify the block. It calculates the distance and compares it
-    /// with another blocks to choose the best fork possible, or just pushes
-    /// this block to the end of the blockchain if there's no forks in it.
-    ///
-    /// Return `Ok(true)` if the blockchain history was modified. Otherwise
-    /// return `Ok(false)`.
+    /// **Note:** this method doesn't verify the block and just attempts to
+    /// write it to the metadata / storage. All the checks must happen outside
+    /// of this method!
     pub fn try_write_block(
         &mut self,
         block: &Block
-    ) -> Result<bool, TrackerError<S>> {
+    ) -> Result<StorageWriteResult, TrackerError> {
         #[cfg(feature = "tracing")]
         tracing::debug!(
-            curr_hash = block.current_hash().to_base64(),
-            prev_hash = block.previous_hash().to_base64(),
+            curr_hash = block.hash().to_base64(),
+            prev_hash = block.prev_hash().to_base64(),
             "trying to write block to the tracker"
         );
 
@@ -240,11 +276,11 @@ impl<S: Storage> Tracker<S> {
 
                 // If the block is the next one to our tail block then we simply
                 // need to push it to the end of the history and that's it.
-                if block.previous_hash() == &tail_block {
+                if block.prev_hash() == &tail_block {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(
-                        curr_hash = block.current_hash().to_base64(),
-                        prev_hash = block.previous_hash().to_base64(),
+                        curr_hash = block.hash().to_base64(),
+                        prev_hash = block.prev_hash().to_base64(),
                         tail_block = tail_block.to_base64(),
                         "trying to write block to the end of the known blockchain history, no modifications needed"
                     );
@@ -253,57 +289,43 @@ impl<S: Storage> Tracker<S> {
                         Self::Full(storage) => storage.write_block(block)
                             .map_err(TrackerError::Storage),
 
-                        Self::HeadOnly { blocks, transactions, validators } => {
+                        Self::HeadOnly { messages, blocks, .. } => {
                             // Store this block in the history.
-                            blocks.push(*block.current_hash());
+                            blocks.push(*block.hash());
 
-                            // Check the block's content.
-                            match block.content() {
-                                BlockContent::Data(_) => (),
+                            // Update indexed messages table.
+                            let mut written = Vec::with_capacity(block.messages().len());
 
-                                // If it contains transactions - then index these.
-                                BlockContent::Transactions(content) => {
-                                    let mut written = Vec::with_capacity(content.len());
+                            for message in block.messages() {
+                                // If it happened that message was already
+                                // indexed then revert this change and reject
+                                // the block.
+                                if !messages.insert(*message.hash()) {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::warn!(
+                                        curr_hash = block.hash().to_base64(),
+                                        prev_hash = block.prev_hash().to_base64(),
+                                        message_hash = message.hash().to_base64(),
+                                        "received block contained already indexed messages, rejecting it"
+                                    );
 
-                                    for transaction in content {
-                                        let hash = *transaction.hash();
-
-                                        // If it happened that transaction was
-                                        // already indexed then revert this
-                                        // change and reject the block.
-                                        if !transactions.insert(hash) {
-                                            #[cfg(feature = "tracing")]
-                                            tracing::warn!(
-                                                curr_hash = block.current_hash().to_base64(),
-                                                prev_hash = block.previous_hash().to_base64(),
-                                                "received block contained already indexed transactions, rejecting it"
-                                            );
-
-                                            // Remove only written transactions
-                                            // because they're guaranteed to not
-                                            // to be indexed before by previous
-                                            // blocks, while future transactions
-                                            // are not checked yet.
-                                            for hash in written {
-                                                transactions.remove(&hash);
-                                            }
-
-                                            return Ok(false);
-                                        }
-
-                                        else {
-                                            written.push(hash);
-                                        }
+                                    // Remove only written messages because
+                                    // they're guaranteed to not to be indexed
+                                    // before by previous blocks, while future
+                                    // messages are not checked yet.
+                                    for hash in written {
+                                        messages.remove(&hash);
                                     }
+
+                                    return Ok(StorageWriteResult::BlockHasDuplicateHistoryMessages);
                                 }
 
-                                // If it contains validators - then use them.
-                                BlockContent::Validators(content) => {
-                                    *validators = content.to_vec();
+                                else {
+                                    written.push(*message.hash());
                                 }
                             }
 
-                            Ok(true)
+                            Ok(StorageWriteResult::Success)
                         }
                     }
                 }
@@ -313,8 +335,8 @@ impl<S: Storage> Tracker<S> {
                 else {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(
-                        curr_hash = block.current_hash().to_base64(),
-                        prev_hash = block.previous_hash().to_base64(),
+                        curr_hash = block.hash().to_base64(),
+                        prev_hash = block.prev_hash().to_base64(),
                         tail_block = tail_block.to_base64(),
                         "trying to modify existing blockchain history"
                     );
@@ -329,77 +351,55 @@ impl<S: Storage> Tracker<S> {
             None if block.is_root() => {
                 #[cfg(feature = "tracing")]
                 tracing::debug!(
-                    curr_hash = block.current_hash().to_base64(),
-                    prev_hash = block.previous_hash().to_base64(),
+                    curr_hash = block.hash().to_base64(),
+                    prev_hash = block.prev_hash().to_base64(),
                     "no root block found but received block is of root type, writing it to the tracker"
                 );
+
+                // Obtain the block's signer key and check if the sign is valid.
+                let (is_valid, verifying_key) = block.verify()?;
+
+                if !is_valid {
+                    return Ok(StorageWriteResult::BlockInvalid);
+                }
 
                 match self {
                     Self::Full(storage) => storage.write_block(block)
                         .map_err(TrackerError::Storage),
 
-                    Self::HeadOnly { blocks, transactions, validators } => {
-                        // Derive the block's author.
-                        let (is_valid, author) = block.verify()?;
-
-                        // Reject the block if it happened to be invalid.
-                        if !is_valid {
-                            #[cfg(feature = "tracing")]
-                            tracing::warn!(
-                                curr_hash = block.current_hash().to_base64(),
-                                prev_hash = block.previous_hash().to_base64(),
-                                "received block is not valid, rejecting it"
-                            );
-
-                            return Ok(false);
-                        }
-
+                    Self::HeadOnly { messages, blocks, validator } => {
                         // Clear the containers just in case.
                         blocks.clear();
-                        transactions.clear();
-                        validators.clear();
+                        messages.clear();
 
                         // Store this block in the history.
-                        blocks.push(*block.current_hash());
+                        blocks.push(*block.hash());
 
                         // Store the block's author as the blockchain validator.
-                        validators.push(author);
+                        *validator = Some(verifying_key);
 
-                        // Check the block's content.
-                        match block.content() {
-                            BlockContent::Data(_) => (),
+                        for message in block.messages() {
+                            // If it happened that transaction was
+                            // already indexed then revert this change
+                            // and reject the block.
+                            if !messages.insert(*message.hash()) {
+                                #[cfg(feature = "tracing")]
+                                tracing::warn!(
+                                    curr_hash = block.hash().to_base64(),
+                                    prev_hash = block.prev_hash().to_base64(),
+                                    "received block contained already indexed messages, rejecting it"
+                                );
 
-                            // If it contains transactions - then index these.
-                            BlockContent::Transactions(content) => {
-                                for transaction in content {
-                                    // If it happened that transaction was
-                                    // already indexed then revert this change
-                                    // and reject the block.
-                                    if !transactions.insert(*transaction.hash()) {
-                                        #[cfg(feature = "tracing")]
-                                        tracing::warn!(
-                                            curr_hash = block.current_hash().to_base64(),
-                                            prev_hash = block.previous_hash().to_base64(),
-                                            "received block contained already indexed transactions, rejecting it"
-                                        );
+                                blocks.clear();
+                                messages.clear();
 
-                                        blocks.clear();
-                                        transactions.clear();
-                                        validators.clear();
+                                *validator = None;
 
-                                        return Ok(false);
-                                    }
-                                }
-                            }
-
-                            // If it contains validators - then use them instead
-                            // of the block's author.
-                            BlockContent::Validators(content) => {
-                                *validators = content.to_vec();
+                                return Ok(StorageWriteResult::BlockHasDuplicateMessages);
                             }
                         }
 
-                        Ok(true)
+                        Ok(StorageWriteResult::Success)
                     }
                 }
             }
@@ -409,12 +409,12 @@ impl<S: Storage> Tracker<S> {
             None => {
                 #[cfg(feature = "tracing")]
                 tracing::debug!(
-                    curr_hash = block.current_hash().to_base64(),
-                    prev_hash = block.previous_hash().to_base64(),
+                    curr_hash = block.hash().to_base64(),
+                    prev_hash = block.prev_hash().to_base64(),
                     "no root block found and received block is not of a root type"
                 );
 
-                Ok(false)
+                Ok(StorageWriteResult::NotRootBlock)
             }
         }
     }

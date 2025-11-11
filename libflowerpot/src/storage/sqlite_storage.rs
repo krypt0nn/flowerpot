@@ -25,11 +25,11 @@ use spin::{Mutex, MutexGuard};
 use time::UtcDateTime;
 
 use crate::crypto::hash::Hash;
-use crate::crypto::sign::Signature;
+use crate::crypto::sign::{VerifyingKey, Signature};
 use crate::message::Message;
 use crate::block::Block;
 
-use super::{Storage, StorageWriteResult};
+use super::{Storage, StorageWriteResult, StorageError};
 
 fn root_block(
     database: &MutexGuard<'_, Connection>
@@ -169,24 +169,25 @@ impl SqliteStorage {
 }
 
 impl Storage for SqliteStorage {
-    type Error = rusqlite::Error;
-
     #[inline]
-    fn root_block(&self) -> Result<Option<Hash>, Self::Error> {
+    fn root_block(&self) -> Result<Option<Hash>, StorageError> {
         root_block(&self.0.lock())
+            .map_err(|err| Box::new(err) as StorageError)
     }
 
     #[inline]
-    fn tail_block(&self) -> Result<Option<Hash>, Self::Error> {
+    fn tail_block(&self) -> Result<Option<Hash>, StorageError> {
         tail_block(&self.0.lock())
+            .map_err(|err| Box::new(err) as StorageError)
     }
 
     #[inline]
-    fn has_block(&self, hash: &Hash) -> Result<bool, Self::Error> {
+    fn has_block(&self, hash: &Hash) -> Result<bool, StorageError> {
         has_block(&self.0.lock(), hash)
+            .map_err(|err| Box::new(err) as StorageError)
     }
 
-    fn next_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error> {
+    fn next_block(&self, hash: &Hash) -> Result<Option<Hash>, StorageError> {
         let lock = self.0.lock();
 
         let mut query = lock.prepare_cached("
@@ -200,11 +201,11 @@ impl Storage for SqliteStorage {
         match hash {
             Ok(hash) => Ok(Some(Hash::from(hash))),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(err) => Err(err)
+            Err(err) => Err(Box::new(err) as StorageError)
         }
     }
 
-    fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error> {
+    fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, StorageError> {
         let lock = self.0.lock();
 
         let mut query = lock.prepare_cached("
@@ -218,11 +219,11 @@ impl Storage for SqliteStorage {
         match hash {
             Ok(hash) => Ok(Some(Hash::from(hash))),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(err) => Err(err)
+            Err(err) => Err(Box::new(err) as StorageError)
         }
     }
 
-    fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error> {
+    fn read_block(&self, hash: &Hash) -> Result<Option<Block>, StorageError> {
         let lock = self.0.lock();
 
         let mut query = lock.prepare_cached("
@@ -247,7 +248,7 @@ impl Storage for SqliteStorage {
         let (id, previous_hash, timestamp, sign) = match result {
             Ok(result) => result,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-            Err(err) => return Err(err)
+            Err(err) => return Err(Box::new(err) as StorageError)
         };
 
         let mut query = lock.prepare_cached("
@@ -294,7 +295,7 @@ impl Storage for SqliteStorage {
     fn write_block(
         &self,
         block: &Block
-    ) -> Result<StorageWriteResult, Self::Error> {
+    ) -> Result<StorageWriteResult, StorageError> {
         fn insert_block(
             database: &rusqlite::Transaction<'_>,
             block: &Block
@@ -389,7 +390,9 @@ impl Storage for SqliteStorage {
         let mut lock = self.0.lock();
 
         let (is_valid, _) = block.verify()
-            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            .map_err(|_| {
+                StorageError::from("failed to verify block signature")
+            })?;
 
         // Although it's not a part of convention for this method why would
         // we need an invalid block stored here?
@@ -478,22 +481,24 @@ impl Storage for SqliteStorage {
     }
 
     #[inline]
-    fn has_message(&self, hash: &Hash) -> Result<bool, Self::Error> {
+    fn has_message(&self, hash: &Hash) -> Result<bool, StorageError> {
         has_message(&self.0.lock(), hash)
+            .map_err(|err| Box::new(err) as StorageError)
     }
 
     #[inline]
     fn find_message(
         &self,
         hash: &Hash
-    ) -> Result<Option<Hash>, Self::Error> {
+    ) -> Result<Option<Hash>, StorageError> {
         find_message(&self.0.lock(), hash)
+            .map_err(|err| Box::new(err) as StorageError)
     }
 
     fn read_message(
         &self,
         hash: &Hash
-    ) -> Result<Option<Message>, Self::Error> {
+    ) -> Result<Option<Message>, StorageError> {
         let lock = self.0.lock();
 
         let mut query = lock.prepare_cached("
@@ -520,13 +525,28 @@ impl Storage for SqliteStorage {
             })),
 
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(err) => Err(err)
+            Err(err) => Err(Box::new(err) as StorageError)
         }
+    }
+
+    fn get_validator(&self) -> Result<Option<VerifyingKey>, StorageError> {
+        let verifying_key = self.root_block()?
+            .map(|hash| self.read_block(&hash))
+            .transpose()?
+            .flatten()
+            .map(|block| {
+                block.verify()
+                    .map(|(_, verifying_key)| verifying_key)
+            })
+            .transpose()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+
+        Ok(verifying_key)
     }
 }
 
 #[test]
-fn test() -> Result<(), rusqlite::Error> {
+fn test() -> Result<(), StorageError> {
     let path = std::env::temp_dir().join("libflowerpot-test.db");
 
     if path.exists() {

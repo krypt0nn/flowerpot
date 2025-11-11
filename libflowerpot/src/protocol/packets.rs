@@ -20,7 +20,6 @@ use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::varint;
 use crate::crypto::hash::Hash;
-use crate::crypto::sign::Signature;
 use crate::message::{Message, MessageDecodeError};
 use crate::block::{Block, BlockDecodeError};
 
@@ -48,18 +47,27 @@ pub enum PacketDecodeError {
     DecodeBlock(#[from] BlockDecodeError)
 }
 
+// TODO: add AskKnownChains and KnownChains packets so that nodes can exchange
+//       what chains they own and can be queried about
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Packet {
     /// Heartbeat (keep alive) packet.
-    Heartbeat,
+    Heartbeat {
+        /// Randomly chosen number which can be used to calculate ping between
+        /// two heartbeat packets.
+        id: u32
+    },
 
     /// Ask network nodes addresses.
     AskNodes {
+        /// Maximal amount of nodes to send.
         max_nodes: u64
     },
 
     /// Slice of network nodes addresses.
     Nodes {
+        /// List of other network nodes' addresses.
         nodes: Box<[SocketAddr]>
     },
 
@@ -75,7 +83,7 @@ pub enum Packet {
         max_length: u64
     },
 
-    /// Slice of a blockchain's history.
+    /// Slice of a blockchain history.
     History {
         /// Hash of the blockchain's root block.
         root_block: Hash,
@@ -87,10 +95,14 @@ pub enum Packet {
         history: Box<[Hash]>
     },
 
-    /// Ask list of blockchain's pending messages.
+    /// Ask list of pending messages.
     AskPendingMessages {
         /// Hash of the blockchain's root block.
-        root_block: Hash
+        root_block: Hash,
+
+        /// List of messages' hashes which are already stored in the pending
+        /// messages pool.
+        known_messages: Box<[Hash]>
     },
 
     /// List of pending messages of a blockchain.
@@ -102,22 +114,8 @@ pub enum Packet {
         pending_messages: Box<[Hash]>
     },
 
-    /// Ask list of blockchain's pending blocks.
-    AskPendingBlocks {
-        /// Hash of the blockchain's root block.
-        root_block: Hash
-    },
-
-    /// List of pending blocks of a blockchain.
-    PendingBlocks {
-        /// Hash of the blockchain's root block.
-        root_block: Hash,
-
-        /// List of pending blocks' hashes and their approval signatures.
-        pending_blocks: Box<[(Hash, Box<[Signature]>)]>
-    },
-
-    /// Ask for a message stored in a blockchain.
+    /// Ask for a message stored in a blockchain or in the pending messages
+    /// pool.
     AskMessage {
         /// Hash of the blockchain's root block.
         root_block: Hash,
@@ -131,7 +129,7 @@ pub enum Packet {
         /// Hash of the blockchain's root block.
         root_block: Hash,
 
-        /// Transaction of the blockchain.
+        /// Message stored in the blockchain or pending messages pool.
         message: Message
     },
 
@@ -162,17 +160,22 @@ impl Packet {
     pub const V1_HISTORY: u16              = 4;
     pub const V1_ASK_PENDING_MESSAGES: u16 = 5;
     pub const V1_PENDING_MESSAGES: u16     = 6;
-    pub const V1_ASK_PENDING_BLOCKS: u16   = 7;
-    pub const V1_PENDING_BLOCKS: u16       = 8;
-    pub const V1_ASK_MESSAGE: u16          = 9;
-    pub const V1_MESSAGE: u16              = 10;
-    pub const V1_ASK_BLOCK: u16            = 11;
-    pub const V1_BLOCK: u16                = 12;
+    pub const V1_ASK_MESSAGE: u16          = 7;
+    pub const V1_MESSAGE: u16              = 8;
+    pub const V1_ASK_BLOCK: u16            = 9;
+    pub const V1_BLOCK: u16                = 10;
 
     /// Encode packet into a binary representation.
     pub fn to_bytes(&self) -> Box<[u8]> {
         match self {
-            Self::Heartbeat => Box::new(Self::V1_HEARTBEAT.to_le_bytes()),
+            Self::Heartbeat { id } => {
+                let mut buf = [0; 6];
+
+                buf[..2].copy_from_slice(&Self::V1_HEARTBEAT.to_le_bytes());
+                buf[2..].copy_from_slice(&id.to_le_bytes());
+
+                Box::new(buf)
+            }
 
             Self::AskNodes { max_nodes } => {
                 let mut buf = Vec::new();
@@ -243,16 +246,20 @@ impl Packet {
                 buf.into_boxed_slice()
             }
 
-            Self::AskPendingMessages { root_block } => {
-                let mut buf = [0; 2 + Hash::SIZE];
-
-                buf[0..2].copy_from_slice(
-                    &Self::V1_ASK_PENDING_MESSAGES.to_le_bytes()
+            Self::AskPendingMessages { root_block, known_messages } => {
+                let mut buf = Vec::with_capacity(
+                    2 + Hash::SIZE * (1 + known_messages.len())
                 );
 
-                buf[2..].copy_from_slice(root_block.as_bytes());
+                buf.extend(Self::V1_ASK_PENDING_MESSAGES.to_le_bytes());
 
-                Box::new(buf)
+                buf.extend(root_block.as_bytes());
+
+                for message in known_messages {
+                    buf.extend(message.as_bytes());
+                }
+
+                buf.into_boxed_slice()
             }
 
             Self::PendingMessages { root_block, pending_messages } => {
@@ -264,38 +271,6 @@ impl Packet {
 
                 for hash in pending_messages {
                     buf.extend(hash.as_bytes());
-                }
-
-                buf.into_boxed_slice()
-            }
-
-            Self::AskPendingBlocks { root_block } => {
-                let mut buf = [0; 2 + Hash::SIZE];
-
-                buf[0..2].copy_from_slice(
-                    &Self::V1_ASK_PENDING_BLOCKS.to_le_bytes()
-                );
-
-                buf[2..].copy_from_slice(root_block.as_bytes());
-
-                Box::new(buf)
-            }
-
-            Self::PendingBlocks { root_block, pending_blocks } => {
-                let mut buf = Vec::new();
-
-                buf.extend(Self::V1_PENDING_BLOCKS.to_le_bytes());
-
-                buf.extend(root_block.as_bytes());
-
-                for (hash, approvals) in pending_blocks {
-                    buf.extend(hash.as_bytes());
-
-                    buf.extend(varint::write_u64(approvals.len() as u64));
-
-                    for approval in approvals {
-                        buf.extend(&approval.to_bytes());
-                    }
                 }
 
                 buf.into_boxed_slice()
@@ -365,7 +340,22 @@ impl Packet {
         }
 
         match u16::from_le_bytes([bytes[0], bytes[1]]) {
-            Self::V1_HEARTBEAT => Ok(Self::Heartbeat),
+            Self::V1_HEARTBEAT => {
+                if n < 6 {
+                    return Err(PacketDecodeError::TooShort {
+                        got: n,
+                        expected: 6
+                    });
+                }
+
+                let mut id = [0; 4];
+
+                id.copy_from_slice(&bytes[2..6]);
+
+                Ok(Self::Heartbeat {
+                    id: u32::from_le_bytes(id)
+                })
+            }
 
             Self::V1_ASK_NODES => {
                 if n < 3 {
@@ -523,8 +513,25 @@ impl Packet {
 
                 root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
 
+                let bytes = &bytes[2 + Hash::SIZE..];
+
+                let mut messages = Vec::new();
+                let mut hash = [0; Hash::SIZE];
+
+                let n = bytes.len();
+                let mut i = 0;
+
+                while i < n {
+                    hash.copy_from_slice(&bytes[i..i + Hash::SIZE]);
+
+                    messages.push(Hash::from(hash));
+
+                    i += Hash::SIZE;
+                }
+
                 Ok(Self::AskPendingMessages {
-                    root_block: Hash::from(root_block)
+                    root_block: Hash::from(root_block),
+                    known_messages: messages.into_boxed_slice()
                 })
             }
 
@@ -559,87 +566,6 @@ impl Packet {
                 Ok(Self::PendingMessages {
                     root_block: Hash::from(root_block),
                     pending_messages: messages.into_boxed_slice()
-                })
-            }
-
-            Self::V1_ASK_PENDING_BLOCKS => {
-                if n < 2 + Hash::SIZE {
-                    return Err(PacketDecodeError::TooShort {
-                        got: n,
-                        expected: 2 + Hash::SIZE
-                    });
-                }
-
-                let mut root_block = [0; Hash::SIZE];
-
-                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
-
-                Ok(Self::AskPendingBlocks {
-                    root_block: Hash::from(root_block)
-                })
-            },
-
-            Self::V1_PENDING_BLOCKS => {
-                if n < 2 + Hash::SIZE {
-                    return Err(PacketDecodeError::TooShort {
-                        got: n,
-                        expected: 2 + Hash::SIZE
-                    });
-                }
-
-                let mut root_block = [0; Hash::SIZE];
-
-                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
-
-                let mut bytes = &bytes[2 + Hash::SIZE..];
-
-                let mut hash = [0; Hash::SIZE];
-                let mut approval = [0; Signature::SIZE];
-
-                let mut blocks = Vec::new();
-
-                while bytes.len() > Hash::SIZE {
-                    hash.copy_from_slice(&bytes[..Hash::SIZE]);
-
-                    let (Some(approvals_num), new_bytes) = varint::read_u64(&bytes[Hash::SIZE..]) else {
-                        return Err(PacketDecodeError::InvalidParam {
-                            packet_type: "PandingBlocks",
-                            param: "blocks[].hash"
-                        });
-                    };
-
-                    let approvals_num = approvals_num as usize;
-
-                    bytes = new_bytes;
-
-                    let mut approvals = Vec::with_capacity(approvals_num);
-
-                    for _ in 0..approvals_num {
-                        approval.copy_from_slice(
-                            &bytes[..Signature::SIZE]
-                        );
-
-                        let Some(approval) = Signature::from_bytes(&approval) else {
-                            return Err(PacketDecodeError::InvalidParam {
-                                packet_type: "PandingBlocks",
-                                param: "blocks[].approvals[].approval"
-                            });
-                        };
-
-                        approvals.push(approval);
-
-                        bytes = &bytes[Signature::SIZE..];
-                    }
-
-                    blocks.push((
-                        Hash::from(hash),
-                        approvals.into_boxed_slice()
-                    ));
-                }
-
-                Ok(Self::PendingBlocks {
-                    root_block: Hash::from(root_block),
-                    pending_blocks: blocks.into_boxed_slice()
                 })
             }
 
@@ -755,7 +681,9 @@ fn test_serialize() -> Result<(), PacketDecodeError> {
     }
 
     test_packets!(
-        Packet::Heartbeat,
+        Packet::Heartbeat {
+            id: u32::MAX
+        },
 
         Packet::AskNodes {
             max_nodes: u64::MAX
@@ -788,7 +716,12 @@ fn test_serialize() -> Result<(), PacketDecodeError> {
         },
 
         Packet::AskPendingMessages {
-            root_block: Hash::calc(b"Hello, World!")
+            root_block: Hash::calc(b"Hello, World!"),
+            known_messages: Box::new([
+                Hash::calc(b"Test 1"),
+                Hash::calc(b"Test 2"),
+                Hash::calc(b"Test 3")
+            ])
         },
 
         Packet::PendingMessages {
@@ -797,25 +730,6 @@ fn test_serialize() -> Result<(), PacketDecodeError> {
                 Hash::calc(b"Test 1"),
                 Hash::calc(b"Test 2"),
                 Hash::calc(b"Test 3")
-            ])
-        },
-
-        Packet::AskPendingBlocks {
-            root_block: Hash::calc(b"Hello, World!")
-        },
-
-        Packet::PendingBlocks {
-            root_block: Hash::calc(b"Hello, World!"),
-            pending_blocks: Box::new([
-                (Hash::calc(b"Block 1"), Box::new([])),
-                (Hash::calc(b"Block 2"), Box::new([
-                    Signature::create(&signing_key, Hash::calc(b"test 1")).unwrap(),
-                    Signature::create(&signing_key, Hash::calc(b"test 2")).unwrap(),
-                    Signature::create(&signing_key, Hash::calc(b"test 3")).unwrap()
-                ])),
-                (Hash::calc(b"Block 3"), Box::new([
-                    Signature::create(&signing_key, Hash::calc(b"test 4")).unwrap()
-                ]))
             ])
         },
 

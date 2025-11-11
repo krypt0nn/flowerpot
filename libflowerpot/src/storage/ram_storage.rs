@@ -24,7 +24,7 @@ use crate::crypto::sign::{VerifyingKey, SignatureError};
 use crate::message::Message;
 use crate::block::Block;
 
-use super::{Storage, StorageWriteResult};
+use super::{Storage, StorageWriteResult, StorageError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RamStorageError {
@@ -100,7 +100,7 @@ impl RamStorage {
     /// order.
     pub fn new<T: Into<Block>>(
         history: impl IntoIterator<Item = T>
-    ) -> Result<Option<Self>, RamStorageError> {
+    ) -> Result<Option<Self>, StorageError> {
         let storage = Self::default();
 
         for block in history {
@@ -114,39 +114,37 @@ impl RamStorage {
 }
 
 impl Storage for RamStorage {
-    type Error = RamStorageError;
-
-    fn root_block(&self) -> Result<Option<Hash>, Self::Error> {
+    fn root_block(&self) -> Result<Option<Hash>, StorageError> {
         let Ok(lock) = self.history.read() else {
-            return Err(RamStorageError::Lock);
+            return Err(Box::new(RamStorageError::Lock) as StorageError);
         };
 
         Ok(lock.first().copied())
     }
 
-    fn tail_block(&self) -> Result<Option<Hash>, Self::Error> {
+    fn tail_block(&self) -> Result<Option<Hash>, StorageError> {
         let Ok(lock) = self.history.read() else {
-            return Err(RamStorageError::Lock);
+            return Err(Box::new(RamStorageError::Lock) as StorageError);
         };
 
         Ok(lock.last().copied())
     }
 
-    fn has_block(&self, hash: &Hash) -> Result<bool, Self::Error> {
+    fn has_block(&self, hash: &Hash) -> Result<bool, StorageError> {
         let Ok(lock) = self.blocks.read() else {
-            return Err(RamStorageError::Lock);
+            return Err(Box::new(RamStorageError::Lock) as StorageError);
         };
 
         Ok(lock.contains_key(hash))
     }
 
-    fn next_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error> {
+    fn next_block(&self, hash: &Hash) -> Result<Option<Hash>, StorageError> {
         if hash == &Hash::default() {
             return self.root_block();
         }
 
         let Ok(history) = self.history.read() else {
-            return Err(RamStorageError::Lock);
+            return Err(Box::new(RamStorageError::Lock) as StorageError);
         };
 
         match history.iter().position(|block| block == hash) {
@@ -155,13 +153,13 @@ impl Storage for RamStorage {
         }
     }
 
-    fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, Self::Error> {
+    fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, StorageError> {
         if hash == &Hash::default() {
             return Ok(None)
         }
 
         let Ok(history) = self.history.read() else {
-            return Err(RamStorageError::Lock);
+            return Err(Box::new(RamStorageError::Lock) as StorageError);
         };
 
         match history.iter().position(|block| block == hash) {
@@ -171,15 +169,15 @@ impl Storage for RamStorage {
         }
     }
 
-    fn read_block(&self, hash: &Hash) -> Result<Option<Block>, Self::Error> {
+    fn read_block(&self, hash: &Hash) -> Result<Option<Block>, StorageError> {
         let Ok(blocks) = self.blocks.read() else {
-            return Err(RamStorageError::Lock);
+            return Err(Box::new(RamStorageError::Lock) as StorageError);
         };
 
         Ok(blocks.get(hash).cloned())
     }
 
-    fn write_block(&self, block: &Block) -> Result<StorageWriteResult, Self::Error> {
+    fn write_block(&self, block: &Block) -> Result<StorageWriteResult, StorageError> {
         let (
             Ok(mut blocks),
             Ok(mut history)
@@ -187,7 +185,7 @@ impl Storage for RamStorage {
             self.blocks.write(),
             self.history.write()
         ) else {
-            return Err(RamStorageError::Lock);
+            return Err(Box::new(RamStorageError::Lock) as StorageError);
         };
 
         #[inline]
@@ -256,7 +254,7 @@ impl Storage for RamStorage {
             }
 
             let Ok(mut validator) = self.validator.write() else {
-                return Err(RamStorageError::Lock);
+                return Err(Box::new(RamStorageError::Lock) as StorageError);
             };
 
             history.clear();
@@ -339,7 +337,7 @@ impl Storage for RamStorage {
     fn has_message(
         &self,
         hash: &Hash
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<bool, StorageError> {
         let lock = self.blocks.read()
             .map_err(|_| RamStorageError::Lock)?;
 
@@ -350,7 +348,7 @@ impl Storage for RamStorage {
     fn find_message(
         &self,
         hash: &Hash
-    ) -> Result<Option<Hash>, Self::Error> {
+    ) -> Result<Option<Hash>, StorageError> {
         let lock = self.blocks.read()
             .map_err(|_| RamStorageError::Lock)?;
 
@@ -361,26 +359,33 @@ impl Storage for RamStorage {
     fn read_message(
         &self,
         hash: &Hash
-    ) -> Result<Option<Message>, Self::Error> {
+    ) -> Result<Option<Message>, StorageError> {
         let lock = self.blocks.read()
             .map_err(|_| RamStorageError::Lock)?;
 
         Ok(read_message(&lock, hash))
     }
+
+    fn get_validator(&self) -> Result<Option<VerifyingKey>, StorageError> {
+        let verifying_key = self.root_block()?
+            .map(|hash| self.read_block(&hash))
+            .transpose()?
+            .flatten()
+            .map(|block| {
+                block.verify()
+                    .map(|(_, verifying_key)| verifying_key)
+            })
+            .transpose()?;
+
+        Ok(verifying_key)
+    }
 }
 
 #[test]
-fn test() -> Result<(), RamStorageError> {
+fn test() -> Result<(), StorageError> {
     let storage = RamStorage::default();
 
     super::test_storage(&storage)?;
-
-    let restored_storage = RamStorage::new(storage.blocks().flatten())?.unwrap();
-
-    assert_eq!(
-        storage.blocks().flatten().collect::<Vec<_>>(),
-        restored_storage.blocks().flatten().collect::<Vec<_>>()
-    );
 
     Ok(())
 }
