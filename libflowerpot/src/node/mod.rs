@@ -176,14 +176,17 @@ pub struct Node {
 
     /// Table of pending messages which are meant to be added into a new block.
     ///
-    /// `[root_block] => [message]`
-    pending_messages: HashMap<Hash, Message>,
+    /// `[root_block] => ([hash] => [message])`
+    pending_messages: HashMap<Hash, HashMap<Hash, Message>>,
 
     /// Table of blockchain history trackers which are used to keep track of
     /// blocks history and, if possible, query messages and other data.
     ///
-    /// `[root_block] => [tracker]`
-    trackers: HashMap<Hash, Tracker>
+    /// It is expected that for each blockchain we already know its validator
+    /// verifying key and, if possible, its root block hash.
+    ///
+    /// `[root_block] => ([verifying_key], [tracker])`
+    trackers: HashMap<Hash, (VerifyingKey, Tracker)>
 }
 
 impl Node {
@@ -231,6 +234,12 @@ impl Node {
             _ => return self
         };
 
+        // TODO: validator verifying key
+        // we can't extract it from root block since everybody can send their
+        // randomly generated root block and if we don't know a real one then
+        // we can very easily be scammed. so, validator must be known
+        // in addition to the root block hash for each blockchain.
+
         match self.trackers.get(&root_block) {
             Some(curr_tracker) => {
                 if curr_tracker.storage().is_none() {
@@ -248,28 +257,6 @@ impl Node {
 
     /// Synchronize blockchain history with all the available connections and,
     /// if provided, local blockchain storage.
-    ///
-    /// Protocol agreements:
-    ///
-    /// 1. Block becomes approved once it gets 2/3 approvals of total validators
-    ///    number for this block, besides the block's author. This ensures that
-    ///    the block is following the standard shared by majority of the network
-    ///    controlling nodes.
-    /// 2. Once there's a new approved block which references the previous one -
-    ///    the previous block cannot be replaced even if replacing block gets
-    ///    more approvals or has higher validator priority. This block is then
-    ///    considered "fixated", and this is needed to prevent validators from
-    ///    doing massive history rewrites. **(NOT IMPLEMENTED)**
-    /// 3. Until current block is fixated a new block can replace it if the xor
-    ///    distance between the previous block (which is fixated) and the new
-    ///    block author's public key hash is lower than for the current block.
-    ///    Assuming block hashes are distributed uniformally this should allow
-    ///    all the validators to get about equal amount of blocks they can
-    ///    create and fixate on average.
-    /// 4. If validator didn't participate in approving of the last 32 blocks
-    ///    then it's forcely removed from the network. This is needed to prevent
-    ///    people from creating validators which don't participate in the
-    ///    network maintenance and break the 2/3 validators rule.
     pub fn sync(&mut self) -> Result<(), NodeError> {
         #[cfg(feature = "tracing")]
         tracing::info!("synchronizing node state");

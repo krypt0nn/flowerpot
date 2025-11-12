@@ -25,7 +25,7 @@ use spin::{Mutex, MutexGuard};
 use time::UtcDateTime;
 
 use crate::crypto::hash::Hash;
-use crate::crypto::sign::{VerifyingKey, Signature};
+use crate::crypto::sign::Signature;
 use crate::message::Message;
 use crate::block::Block;
 
@@ -527,21 +527,6 @@ impl Storage for SqliteStorage {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(err) => Err(Box::new(err) as StorageError)
         }
-    }
-
-    fn get_validator(&self) -> Result<Option<VerifyingKey>, StorageError> {
-        let verifying_key = self.root_block()?
-            .map(|hash| self.read_block(&hash))
-            .transpose()?
-            .flatten()
-            .map(|block| {
-                block.verify()
-                    .map(|(_, verifying_key)| verifying_key)
-            })
-            .transpose()
-            .map_err(|_| rusqlite::Error::InvalidQuery)?;
-
-        Ok(verifying_key)
     }
 }
 

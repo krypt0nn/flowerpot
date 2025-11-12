@@ -57,8 +57,7 @@ pub struct ValidBlock {
 ///
 /// The consensus is that:
 ///
-/// 1. The author of the root block is the sole authority of the blockchain,
-///    and all the following blocks must be signed by them.
+/// 1. All the blocks of the blockchain must be signed by a single validator.
 /// 2. Timestamp of the following block must be greater or equal to the previous
 ///    block's timestamp.
 /// 3. If multiple following block candidates available, then one with the
@@ -70,14 +69,14 @@ pub struct Viewer<'stream> {
     /// Root block of the blockchain.
     root_block: Hash,
 
-    /// Verifying key of the blockchain authority.
-    authority: VerifyingKey,
+    /// Verifying key of the blockchain validator.
+    verifying_key: VerifyingKey,
 
     /// List of blocks we need to fetch.
-    pending_blocks: (u64, VecDeque<Hash>),
+    pending_blocks: VecDeque<Hash>,
 
-    /// Hash of the previously fetched block.
-    prev_block: Hash
+    /// Hash of the previously fetched block and its creation timestamp.
+    prev_block: (Hash, time::UtcDateTime)
 }
 
 impl<'stream> Viewer<'stream> {
@@ -87,8 +86,12 @@ impl<'stream> Viewer<'stream> {
     /// packet stream connection.
     pub fn open(
         stream: &'stream mut PacketStream,
-        root_block: Hash
+        root_block: impl Into<Hash>,
+        verifying_key: impl Into<VerifyingKey>
     ) -> Result<Self, ViewerError> {
+        let root_block: Hash = root_block.into();
+        let verifying_key: VerifyingKey = verifying_key.into();
+
         // Ask for the root block of the blockchain.
         stream.send(&Packet::AskBlock {
             root_block,
@@ -100,8 +103,7 @@ impl<'stream> Viewer<'stream> {
                 root_block: received_root_block,
                 block
             } = packet {
-                return received_root_block == &root_block
-                    && block.is_root();
+                return received_root_block == &root_block && block.is_root();
             }
 
             false
@@ -112,18 +114,22 @@ impl<'stream> Viewer<'stream> {
         };
 
         // Verify the root block and obtain its author.
-        let (is_valid, verifying_key) = block.verify()?;
+        let (is_valid, block_verifying_key) = block.verify()?;
 
-        if !is_valid || !block.is_root() || block.hash() != &root_block {
+        if !is_valid
+            || !block.is_root()
+            || block.hash() != &root_block
+            || block_verifying_key != verifying_key
+        {
             return Err(ViewerError::InvalidBlock);
         }
 
         Ok(Self {
             stream,
             root_block,
-            authority: verifying_key,
-            pending_blocks: (0, VecDeque::from([*block.hash()])),
-            prev_block: *block.prev_hash()
+            verifying_key,
+            pending_blocks: VecDeque::from([*block.hash()]),
+            prev_block: (*block.prev_hash(), time::UtcDateTime::UNIX_EPOCH)
         })
     }
 
@@ -131,9 +137,12 @@ impl<'stream> Viewer<'stream> {
     /// that all the blocks in that storage are verified.
     ///
     /// Return `Ok(None)` if storage doesn't have any blocks.
-    pub fn open_from_storage<S: Storage>(
+    ///
+    /// **Security notice:** this method will assume that the root block's
+    /// signer is the validator of the blockchain.
+    pub fn open_from_storage(
         stream: &'stream mut PacketStream,
-        storage: &S
+        storage: &impl Storage
     )  -> Result<Option<Self>, ViewerError> {
         // Try to read root block from the storage.
         //
@@ -168,36 +177,33 @@ impl<'stream> Viewer<'stream> {
             return Ok(None);
         };
 
-        // Find the tail block's index.
-        let mut i = 0;
-        let mut prev_block = *root_block.prev_hash();
-
-        loop {
-            if prev_block == tail_block {
-                break;
-            }
-
-            let block = storage.next_block(&prev_block)
-                .map_err(|err| ViewerError::Storage(err))?;
-
-            match block {
-                Some(block) => prev_block = block,
-                None => break
-            }
-
-            i += 1;
+        // Create new viewer directly if there's only one block in the storage.
+        if root_block.hash() == &tail_block {
+            return Self::open(stream, root_block.hash(), verifying_key)
+                .map(Some);
         }
 
-        if prev_block != tail_block {
-            return Err(ViewerError::InvalidHistory);
-        }
+        // Read predecessor of the tail block.
+        let prev_block = storage.prev_block(&tail_block)
+            .map_err(|err| ViewerError::Storage(err))?;
+
+        let Some(prev_block) = prev_block else {
+            return Ok(None);
+        };
+
+        let prev_block = storage.read_block(&prev_block)
+            .map_err(|err| ViewerError::Storage(err))?;
+
+        let Some(prev_block) = prev_block else {
+            return Ok(None);
+        };
 
         Ok(Some(Self {
             stream,
             root_block: *root_block.hash(),
-            authority: verifying_key,
-            pending_blocks: (i, VecDeque::from([tail_block])),
-            prev_block
+            verifying_key,
+            pending_blocks: VecDeque::from([tail_block]),
+            prev_block: (*prev_block.hash(), *prev_block.timestamp())
         }))
     }
 
@@ -207,16 +213,10 @@ impl<'stream> Viewer<'stream> {
         &self.root_block
     }
 
-    /// Get verifying key of the viewer's blockchain authority.
+    /// Get verifying key of the viewer's blockchain validator.
     #[inline(always)]
     pub const fn verifying_key(&self) -> &VerifyingKey {
-        &self.authority
-    }
-
-    /// Current viewer block offset.
-    #[inline(always)]
-    pub const fn offset(&self) -> u64 {
-        self.pending_blocks.0
+        &self.verifying_key
     }
 
     /// Hash of the previously fetched block.
@@ -225,7 +225,7 @@ impl<'stream> Viewer<'stream> {
     /// last `forward` method call.
     #[inline(always)]
     pub const fn prev_block(&self) -> &Hash {
-        &self.prev_block
+        &self.prev_block.0
     }
 
     /// Request the next block of the blockchain history known to the underlying
@@ -233,7 +233,7 @@ impl<'stream> Viewer<'stream> {
     /// history then `None` is returned.
     pub fn forward(&mut self) -> Result<Option<ValidBlock>, ViewerError> {
         // Read the pending block hash.
-        let pending_block = match self.pending_blocks.1.front() {
+        let pending_block = match self.pending_blocks.front() {
             // Directly if we have pending blocks history.
             Some(block) => *block,
 
@@ -242,18 +242,18 @@ impl<'stream> Viewer<'stream> {
                 // Ask and peak the history packet.
                 self.stream.send(&Packet::AskHistory {
                     root_block: self.root_block,
-                    offset: self.pending_blocks.0,
+                    since_block: self.prev_block.0,
                     max_length: Self::MAX_HISTORY_LENGTH
                 }).map_err(ViewerError::PacketStream)?;
 
                 let history = self.stream.peek(|packet| {
                     if let Packet::History {
                         root_block: received_root_block,
-                        offset: received_offset,
+                        since_block: received_since_block,
                         ..
                     } = packet {
                         return received_root_block == &self.root_block
-                            && received_offset == &self.pending_blocks.0;
+                            && received_since_block == &self.prev_block.0;
                     }
 
                     false
@@ -272,7 +272,10 @@ impl<'stream> Viewer<'stream> {
                 // (a pending block).
                 let pending_block = history[0];
 
-                self.pending_blocks.1.extend(history);
+                // Extend on full history because the front hash will be removed
+                // lated in the code. This will also prevent missing this hash
+                // in case some of the following code breaks.
+                self.pending_blocks.extend(history);
 
                 pending_block
             }
@@ -287,9 +290,10 @@ impl<'stream> Viewer<'stream> {
         let packet = self.stream.peek(|packet| {
             if let Packet::Block {
                 root_block: received_root_block,
-                ..
+                block: received_block
             } = packet {
-                return received_root_block == &self.root_block;
+                return received_root_block == &self.root_block
+                    && received_block.hash() == &pending_block;
             }
 
             false
@@ -299,22 +303,24 @@ impl<'stream> Viewer<'stream> {
             return Err(ViewerError::InvalidBlock);
         };
 
-        // Decline the block if it doesn't match the previously stored block.
-        if block.prev_hash() != &self.prev_block {
+        // Decline the block if it doesn't match the previously stored block or
+        // if its creation time is lower than one for the previous block.
+        if block.prev_hash() != &self.prev_block.0
+            || block.timestamp() < &self.prev_block.1
+        {
             return Err(ViewerError::InvalidBlock);
         }
 
         // Verify the block and its author.
         let (is_valid, verifying_key) = block.verify()?;
 
-        if !is_valid || verifying_key != self.authority {
+        if !is_valid || verifying_key != self.verifying_key {
             return Err(ViewerError::InvalidBlock);
         }
 
         // Shift pending blocks history forward and return obtained block.
-        self.pending_blocks.0 += 1;
-        self.pending_blocks.1.pop_front();
-        self.prev_block = *block.hash();
+        self.pending_blocks.pop_front();
+        self.prev_block = (*block.hash(), *block.timestamp());
 
         Ok(Some(ValidBlock {
             block,
@@ -327,8 +333,16 @@ impl<'stream> Viewer<'stream> {
 /// iterating through the commonly known blockchain history, selecting the best
 /// fork according to the protocol agreements.
 pub struct BatchedViewer<'stream> {
+    /// List of batched network blockchain viewers.
     viewers: Vec<Viewer<'stream>>,
+
+    /// Root block of the blockchain.
     root_block: Hash,
+
+    /// Verifying key of the blockchain validator.
+    verifying_key: VerifyingKey,
+
+    /// Hash of the previously fetched block.
     prev_block: Hash
 }
 
@@ -337,18 +351,27 @@ impl<'stream> BatchedViewer<'stream> {
     /// nodes' packet streams
     pub fn open(
         streams: impl IntoIterator<Item = &'stream mut PacketStream>,
-        root_block: Hash
+        root_block: impl Into<Hash>,
+        verifying_key: impl Into<VerifyingKey>
     ) -> Result<Self, ViewerError> {
+        let root_block: Hash = root_block.into();
+        let verifying_key: VerifyingKey = verifying_key.into();
+
         let mut viewers = Vec::new();
 
         for stream in streams {
-            viewers.push(Viewer::open(stream, root_block)?);
+            viewers.push(Viewer::open(
+                stream,
+                root_block,
+                verifying_key.clone()
+            )?);
         }
 
         Ok(Self {
             viewers,
             root_block,
-            prev_block: Hash::default()
+            verifying_key,
+            prev_block: Hash::ZERO
         })
     }
 
@@ -358,13 +381,17 @@ impl<'stream> BatchedViewer<'stream> {
     ///
     /// Return `Ok(None)` if storage doesn't have any blocks or no remote node
     /// viewers available.
-    pub fn open_from_storage<S: Storage>(
+    ///
+    /// **Security notice:** this method will assume that the root block's
+    /// signer is the validator of the blockchain.
+    pub fn open_from_storage(
         streams: impl IntoIterator<Item = &'stream mut PacketStream>,
-        storage: &S
+        storage: &impl Storage
     )  -> Result<Option<Self>, ViewerError> {
         let mut viewers = Vec::new();
-        let mut prev_block = Hash::default();
+        let mut prev_block = Hash::ZERO;
 
+        // Read the root block from the storage.
         let root_block = storage.root_block()
             .map_err(|err| ViewerError::Storage(err))?;
 
@@ -372,8 +399,21 @@ impl<'stream> BatchedViewer<'stream> {
             return Ok(None);
         };
 
-        // TODO: prioritize streams with higher offset value instead of the
-        //       first stream in the list as it currently happens.
+        let root_block = storage.read_block(&root_block)
+            .map_err(|err| ViewerError::Storage(err))?;
+
+        let Some(root_block) = root_block else {
+            return Ok(None);
+        };
+
+        // Verify root block and obtain its verifying key.
+        let (is_valid, verifying_key) = root_block.verify()?;
+
+        if !is_valid || !root_block.is_root() {
+            return Ok(None);
+        }
+
+        // Build viewers for provided streams.
         for stream in streams {
             let Some(viewer) = Viewer::open_from_storage(stream, storage)? else {
                 return Ok(None);
@@ -400,19 +440,22 @@ impl<'stream> BatchedViewer<'stream> {
 
         Ok(Some(Self {
             viewers,
-            root_block,
+            root_block: *root_block.hash(),
+            verifying_key,
             prev_block
         }))
     }
 
     /// Get root block of the viewer's blockchain.
+    #[inline(always)]
     pub const fn root_block(&self) -> &Hash {
         &self.root_block
     }
 
-    /// Current viewer block offset.
-    pub fn offset(&self) -> u64 {
-        todo!("fetch from viewers")
+    /// Get verifying key of the viewer's blockchain validator.
+    #[inline(always)]
+    pub const fn verifying_key(&self) -> &VerifyingKey {
+        &self.verifying_key
     }
 
     /// Hash of the previously fetched block.
@@ -442,22 +485,15 @@ impl<'stream> BatchedViewer<'stream> {
                     continue;
                 }
 
+                // Update currently selected block variant to the one with
+                // lowest timestamp.
                 if let Some(curr_block) = &mut curr_block {
-                    let curr_distance = crate::block_validator_distance(
-                        self.prev_block,
-                        &curr_block.verifying_key
-                    );
-
-                    let new_distance = crate::block_validator_distance(
-                        self.prev_block,
-                        &block.verifying_key
-                    );
-
-                    if new_distance < curr_distance {
+                    if curr_block.block.timestamp() > block.block.timestamp() {
                         *curr_block = block;
                     }
                 }
 
+                // Select the first block if none is selected yet.
                 else {
                     curr_block = Some(block);
                 }
@@ -512,17 +548,8 @@ impl<'stream> BatchedViewer<'stream> {
 
         match (network_block, storage_block) {
             (Some(network_block), Some(storage_block)) => {
-                let network_distance = crate::block_validator_distance(
-                    self.prev_block,
-                    &network_block.verifying_key
-                );
-
-                let storage_distance = crate::block_validator_distance(
-                    self.prev_block,
-                    &storage_block.verifying_key
-                );
-
-                if network_distance < storage_distance {
+                // Select block variant with lowest timestamp.
+                if network_block.block.timestamp() < storage_block.block.timestamp() {
                     self.prev_block = *network_block.block.hash();
 
                     Ok(Some(network_block))

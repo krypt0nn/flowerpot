@@ -62,6 +62,9 @@ fn encode_messages(messages: &[Message]) -> Box<[u8]> {
     buf.into_boxed_slice()
 }
 
+// TODO: make excuse for root blocks that they don't have messages and instead
+//       store fixed size random slice of data for hash seeding
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub(crate) prev_hash: Hash,

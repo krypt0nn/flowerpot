@@ -47,9 +47,6 @@ pub enum PacketDecodeError {
     DecodeBlock(#[from] BlockDecodeError)
 }
 
-// TODO: add AskKnownChains and KnownChains packets so that nodes can exchange
-//       what chains they own and can be queried about
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Packet {
     /// Heartbeat (keep alive) packet.
@@ -71,13 +68,29 @@ pub enum Packet {
         nodes: Box<[SocketAddr]>
     },
 
+    // /// Ask network node to share what chains it hosts.
+    // AskKnownChains {
+    //     /// Maximal amount of chains to return.
+    //     max_chains: u64
+    // },
+
+    // /// List of known chains info.
+    // KnownChains {
+    //     /// List of `(root_block, verifying_key)` pairs of known chains.
+    //     chains: Box<[(Hash, VerifyingKey)]>
+    // },
+
     /// Ask history of a blockchain.
+    ///
+    /// For chain `A -> B -> C -> D -> E` and packet
+    /// `AskHistory { since_block: A, max_length: 2 }` the result packet is
+    /// expected to be `History { since_block: A, history: [ B, C ] }`.
     AskHistory {
         /// Hash of the blockchain's root block.
         root_block: Hash,
 
-        /// Index of the starting block.
-        offset: u64,
+        /// Hash of the block since which the history should be returned.
+        since_block: Hash,
 
         /// Maximal amount of blocks to return.
         max_length: u64
@@ -88,8 +101,8 @@ pub enum Packet {
         /// Hash of the blockchain's root block.
         root_block: Hash,
 
-        /// Index of the first block in the returned history slice.
-        offset: u64,
+        /// Hash of the block since which the history is returned.
+        since_block: Hash,
 
         /// Slice of the blockchain's history.
         history: Box<[Hash]>
@@ -213,15 +226,15 @@ impl Packet {
 
             Self::AskHistory {
                 root_block,
-                offset,
+                since_block,
                 max_length
             } => {
-                let mut buf = Vec::new();
+                let mut buf = Vec::with_capacity(2 + Hash::SIZE * 2 + 4);
 
                 buf.extend(Self::V1_ASK_HISTORY.to_le_bytes());
 
                 buf.extend(root_block.as_bytes());
-                buf.extend(varint::write_u64(*offset));
+                buf.extend(since_block.as_bytes());
                 buf.extend(varint::write_u64(*max_length));
 
                 buf.into_boxed_slice()
@@ -229,15 +242,17 @@ impl Packet {
 
             Self::History {
                 root_block,
-                offset,
+                since_block,
                 history
             } => {
-                let mut buf = Vec::new();
+                let mut buf = Vec::with_capacity(
+                    2 + Hash::SIZE * (2 + history.len())
+                );
 
                 buf.extend(Self::V1_HISTORY.to_le_bytes());
 
                 buf.extend(root_block.as_bytes());
-                buf.extend(varint::write_u64(*offset));
+                buf.extend(since_block.as_bytes());
 
                 for hash in history {
                     buf.extend(hash.as_bytes());
@@ -429,25 +444,20 @@ impl Packet {
             }
 
             Self::V1_ASK_HISTORY => {
-                if n < Hash::SIZE + 4 {
+                if n < 2 + Hash::SIZE * 2 + 1 {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
-                        expected: Hash::SIZE + 4
+                        expected: 2 + Hash::SIZE * 2 + 1
                     });
                 }
 
                 let mut root_block = [0; Hash::SIZE];
+                let mut since_block = [0; Hash::SIZE];
 
                 root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
+                since_block.copy_from_slice(&bytes[2 + Hash::SIZE..2 + Hash::SIZE * 2]);
 
-                let (Some(offset), bytes) = varint::read_u64(&bytes[2 + Hash::SIZE..]) else {
-                    return Err(PacketDecodeError::InvalidParam {
-                        packet_type: "AskHistory",
-                        param: "offset"
-                    });
-                };
-
-                let (Some(max_length), _) = varint::read_u64(bytes) else {
+                let (Some(max_length), _) = varint::read_u64(&bytes[2 + Hash::SIZE * 2..]) else {
                     return Err(PacketDecodeError::InvalidParam {
                         packet_type: "AskHistory",
                         param: "max_length"
@@ -456,7 +466,7 @@ impl Packet {
 
                 Ok(Self::AskHistory {
                     root_block: Hash::from(root_block),
-                    offset,
+                    since_block: Hash::from(since_block),
                     max_length
                 })
             }
@@ -470,15 +480,12 @@ impl Packet {
                 }
 
                 let mut root_block = [0; Hash::SIZE];
+                let mut since_block = [0; Hash::SIZE];
 
                 root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
+                since_block.copy_from_slice(&bytes[2 + Hash::SIZE..2 + Hash::SIZE * 2]);
 
-                let (Some(offset), bytes) = varint::read_u64(&bytes[2 + Hash::SIZE..]) else {
-                    return Err(PacketDecodeError::InvalidParam {
-                        packet_type: "History",
-                        param: "offset"
-                    });
-                };
+                let bytes = &bytes[2 + Hash::SIZE * 2..];
 
                 let mut history = Vec::new();
                 let mut hash = [0; Hash::SIZE];
@@ -496,7 +503,7 @@ impl Packet {
 
                 Ok(Self::History {
                     root_block: Hash::from(root_block),
-                    offset,
+                    since_block: Hash::from(since_block),
                     history: history.into_boxed_slice()
                 })
             }
@@ -701,13 +708,13 @@ fn test_serialize() -> Result<(), PacketDecodeError> {
 
         Packet::AskHistory {
             root_block: Hash::calc(b"Hello, World!"),
-            offset: u16::MAX as u64,
+            since_block: Hash::ZERO,
             max_length: u32::MAX as u64
         },
 
         Packet::History {
             root_block: Hash::calc(b"Hello, World!"),
-            offset: 376415,
+            since_block: Hash::ZERO,
             history: Box::new([
                 Hash::calc(b"Test 1"),
                 Hash::calc(b"Test 2"),

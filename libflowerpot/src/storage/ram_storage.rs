@@ -365,20 +365,6 @@ impl Storage for RamStorage {
 
         Ok(read_message(&lock, hash))
     }
-
-    fn get_validator(&self) -> Result<Option<VerifyingKey>, StorageError> {
-        let verifying_key = self.root_block()?
-            .map(|hash| self.read_block(&hash))
-            .transpose()?
-            .flatten()
-            .map(|block| {
-                block.verify()
-                    .map(|(_, verifying_key)| verifying_key)
-            })
-            .transpose()?;
-
-        Ok(verifying_key)
-    }
 }
 
 #[test]

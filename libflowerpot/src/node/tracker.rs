@@ -17,10 +17,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::collections::HashSet;
-use std::borrow::Cow;
 
 use crate::crypto::hash::Hash;
-use crate::crypto::sign::{VerifyingKey, SignatureError};
+use crate::crypto::sign::SignatureError;
 use crate::message::Message;
 use crate::block::Block;
 use crate::storage::{Storage, StorageError, StorageWriteResult};
@@ -42,16 +41,13 @@ pub enum Tracker {
 
     /// Metadata-only tracker.
     HeadOnly {
-        /// List of messages indexed in the blocks of the blockchain.
+        /// List of messages indexed in the blocks.
         ///
         /// This table is needed to prevent double-indexing of messages.
         messages: HashSet<Hash>,
 
-        /// List of blockchain blocks hashes.
-        blocks: Vec<Hash>,
-
-        /// Verifying key of the root block of the blockchain (validator key).
-        validator: Option<VerifyingKey>
+        /// List of blocks hashes in historic order.
+        blocks: Vec<Hash>
     }
 }
 
@@ -59,8 +55,7 @@ impl Default for Tracker {
     fn default() -> Self {
         Self::HeadOnly {
             messages: HashSet::new(),
-            blocks: Vec::new(),
-            validator: None
+            blocks: Vec::new()
         }
     }
 }
@@ -98,21 +93,6 @@ impl Tracker {
                 .map_err(TrackerError::Storage),
 
             Self::HeadOnly { blocks, .. } => Ok(blocks.last().copied())
-        }
-    }
-
-    /// Try to get verifying key of the blockchain validator.
-    pub fn get_validator(
-        &self
-    ) -> Result<Option<Cow<VerifyingKey>>, TrackerError> {
-        match self {
-            Self::Full(storage) => storage.get_validator()
-                .map_err(TrackerError::Storage)
-                .map(|value| value.map(Cow::Owned)),
-
-            Self::HeadOnly { validator, .. } => {
-                Ok(validator.as_ref().map(Cow::Borrowed))
-            }
         }
     }
 
@@ -356,27 +336,17 @@ impl Tracker {
                     "no root block found but received block is of root type, writing it to the tracker"
                 );
 
-                // Obtain the block's signer key and check if the sign is valid.
-                let (is_valid, verifying_key) = block.verify()?;
-
-                if !is_valid {
-                    return Ok(StorageWriteResult::BlockInvalid);
-                }
-
                 match self {
                     Self::Full(storage) => storage.write_block(block)
                         .map_err(TrackerError::Storage),
 
-                    Self::HeadOnly { messages, blocks, validator } => {
+                    Self::HeadOnly { messages, blocks } => {
                         // Clear the containers just in case.
                         blocks.clear();
                         messages.clear();
 
                         // Store this block in the history.
                         blocks.push(*block.hash());
-
-                        // Store the block's author as the blockchain validator.
-                        *validator = Some(verifying_key);
 
                         for message in block.messages() {
                             // If it happened that transaction was
@@ -392,8 +362,6 @@ impl Tracker {
 
                                 blocks.clear();
                                 messages.clear();
-
-                                *validator = None;
 
                                 return Ok(StorageWriteResult::BlockHasDuplicateMessages);
                             }

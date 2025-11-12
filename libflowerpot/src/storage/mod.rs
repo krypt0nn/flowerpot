@@ -17,7 +17,6 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::crypto::hash::Hash;
-use crate::crypto::sign::VerifyingKey;
 use crate::message::Message;
 use crate::block::Block;
 
@@ -184,27 +183,6 @@ pub trait Storage {
             .find(|tr| tr.hash() == hash)
             .cloned())
     }
-
-    /// Get verifying key of the root block signer. Return `Ok(None)` if root
-    /// block is not available.
-    fn get_validator(&self) -> Result<Option<VerifyingKey>, StorageError> {
-        let result = self.root_block()?
-            .map(|hash| self.read_block(&hash))
-            .transpose()?
-            .flatten()
-            .map(|block| {
-                block.verify()
-                    .map(|(_, verifying_key)| verifying_key)
-            });
-
-        // Not particularly true but that's what we get with pre-defined trait
-        // methods.
-        let Some(Ok(verifying_key)) = result else {
-            return Ok(None);
-        };
-
-        Ok(Some(verifying_key))
-    }
 }
 
 impl<T> Storage for Box<T> where T: Storage {
@@ -265,11 +243,6 @@ impl<T> Storage for Box<T> where T: Storage {
         hash: &Hash
     ) -> Result<Option<Message>, StorageError> {
         T::read_message(self, hash)
-    }
-
-    #[inline]
-    fn get_validator(&self) -> Result<Option<VerifyingKey>, StorageError> {
-        T::get_validator(self)
     }
 }
 
