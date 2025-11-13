@@ -17,35 +17,41 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::crypto::base64;
-use crate::transaction::Transaction;
-use crate::storage::Storage;
+use crate::crypto::hash::Hash;
+use crate::message::Message;
 use crate::protocol::packets::Packet;
 
 use super::NodeState;
 
-/// Handle `Transaction` packet.
+/// Handle `Message` packet.
 ///
 /// Return `false` if critical error occured and node connection must be
 /// terminated.
-pub fn handle<S: Storage>(
-    state: &mut NodeState<S>,
-    transaction: Transaction
+pub fn handle(
+    state: &mut NodeState,
+    root_block: Hash,
+    message: Message
 ) -> bool {
+    let message_size = message.data().len();
+
     #[cfg(feature = "tracing")]
     tracing::debug!(
         local_id = base64::encode(state.stream.local_id()),
         peer_id = base64::encode(state.stream.peer_id()),
-        root_block = state.handler.root_block.to_base64(),
-        "handle Transaction packet"
+        root_block = root_block.to_base64(),
+        message_hash = message.hash().to_base64(),
+        "handle Message packet"
     );
 
-    // Reject large transactions.
-    if transaction.data().len() > state.handler.options.max_transaction_size {
+    // Reject large messages.
+    if message.data().len() > state.handler.options.max_message_size {
         #[cfg(feature = "tracing")]
         tracing::warn!(
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            "received too large transaction"
+            root_block = root_block.to_base64(),
+            message_hash = message.hash().to_base64(),
+            "received message is too large"
         );
 
         return true;

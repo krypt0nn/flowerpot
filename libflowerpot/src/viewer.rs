@@ -142,7 +142,7 @@ impl<'stream> Viewer<'stream> {
     /// signer is the validator of the blockchain.
     pub fn open_from_storage(
         stream: &'stream mut PacketStream,
-        storage: &impl Storage
+        storage: &dyn Storage
     )  -> Result<Option<Self>, ViewerError> {
         // Try to read root block from the storage.
         //
@@ -386,7 +386,7 @@ impl<'stream> BatchedViewer<'stream> {
     /// signer is the validator of the blockchain.
     pub fn open_from_storage(
         streams: impl IntoIterator<Item = &'stream mut PacketStream>,
-        storage: &impl Storage
+        storage: &dyn Storage
     )  -> Result<Option<Self>, ViewerError> {
         let mut viewers = Vec::new();
         let mut prev_block = Hash::ZERO;
@@ -515,9 +515,9 @@ impl<'stream> BatchedViewer<'stream> {
     ///
     /// > Note that this method does not modify the provided storage if new
     /// > blocks are received from the network. Only read operations are used.
-    pub fn forward_with_storage<S: Storage>(
+    pub fn forward_with_storage(
         &mut self,
-        storage: &S
+        storage: &dyn Storage
     ) -> Result<Option<ValidBlock>, ViewerError> {
         let storage_block = storage.next_block(&self.prev_block)
             .map_err(|err| ViewerError::Storage(err))?

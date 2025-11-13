@@ -18,44 +18,50 @@
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
-use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 
 use super::NodeState;
 
-/// Handle `AskPendingTransactions` packet.
+/// Handle `AskPendingMessages` packet.
 ///
 /// Return `false` if critical error occured and node connection must be
 /// terminated.
-pub fn handle<S: Storage>(state: &mut NodeState<S>) -> bool {
+pub fn handle(
+    state: &mut NodeState,
+    root_block: Hash,
+    known_messages: Box<[Hash]>
+) -> bool {
     #[cfg(feature = "tracing")]
     tracing::debug!(
         local_id = base64::encode(state.stream.local_id()),
         peer_id = base64::encode(state.stream.peer_id()),
-        root_block = state.handler.root_block.to_base64(),
-        "handle AskPendingTransactions packet"
+        root_block = root_block.to_base64(),
+        "handle AskPendingMessages packet"
     );
 
-    // Then collect their hashes.
-    let pending_transactions = state.handler.pending_transactions.read()
-        .keys()
-        .copied()
-        .collect::<Box<[Hash]>>();
+    // Get list of pending messages.
+    let pending_messages = state.handler.map_pending_messages(
+        root_block,
+        |pending_messages| {
+            pending_messages.keys()
+                .filter(|hash| !known_messages.contains(hash))
+                .copied()
+                .collect::<Box<[Hash]>>()
+        }
+    );
 
-    // And try to send it back to the requester.
-    if let Err(err) = state.stream.send(Packet::PendingTransactions {
-        root_block: state.handler.root_block,
-        pending_transactions: pending_transactions.clone()
+    // Try to send it back to the requester.
+    if let Err(err) = state.stream.send(Packet::PendingMessages {
+        root_block,
+        pending_messages: pending_messages.unwrap_or_default()
     }) {
         #[cfg(feature = "tracing")]
         tracing::error!(
             ?err,
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            pending_transactions = ?pending_transactions.iter()
-                .map(|hash| hash.to_base64())
-                .collect::<Box<[String]>>(),
-            "failed to send PendingTransactions packet"
+            root_block = root_block.to_base64(),
+            "failed to send PendingMessages packet"
         );
 
         return false;

@@ -18,17 +18,17 @@
 
 use std::collections::HashMap;
 use std::time::Duration;
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
-use spin::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use spin::{Mutex, RwLock};
+use flume::Sender;
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
-use crate::crypto::sign::{Signature, SigningKey, VerifyingKey};
+use crate::crypto::sign::{SigningKey, VerifyingKey};
 use crate::message::Message;
 use crate::block::{Block, BlockDecodeError};
-use crate::storage::{Storage, StorageError};
+use crate::storage::StorageError;
 use crate::protocol::packets::Packet;
 use crate::protocol::network::{PacketStream, PacketStreamError};
 use crate::viewer::{BatchedViewer, ViewerError};
@@ -100,7 +100,7 @@ pub struct NodeOptions {
     /// Default is `true`.
     pub accept_blocks: bool,
 
-    /// Resolve missing messages and fetch them from the remote nodes.
+    /// Resolve missing messages and fetch them from remote nodes.
     ///
     /// Nodes exchange special `PendingMessages` and `PendingBlocks` packets
     /// to share lists of known pending messages' and blocks' hashes. If this
@@ -123,8 +123,11 @@ pub struct NodeOptions {
     /// applied to the blocks, so you'd need to specify the `blocks_filter` as
     /// well.
     ///
+    /// The function's inputs are
+    /// `(root_block_hash, message, message_verifying_key)`.
+    ///
     /// Default is `None` (every message is accepted).
-    pub messages_filter: Option<fn(&Message, &VerifyingKey) -> bool>,
+    pub messages_filter: Option<fn(&Hash, &Message, &VerifyingKey) -> bool>,
 
     /// Amount of time a validator thread will wait before starting to create
     /// new blocks. This time is needed so that the node can synchronize all the
@@ -218,133 +221,177 @@ impl Node {
     /// block stored. If both argument and `tracker` have root block hash, then
     /// they will be compared, and tracker will be rejected on mismatch.
     ///
+    /// Verifying key will be queried from the root block's signature if it's
+    /// available in provided `tracker` and compared against `verifying_key`
+    /// argument value if it's provided.
+    ///
     /// Trackers with attached storages are prioritized.
     pub fn add_tracker(
         &mut self,
         tracker: Tracker,
-        root_block: Option<&Hash>
+        mut root_block: Option<Hash>,
+        mut verifying_key: Option<VerifyingKey>
     ) -> &mut Self {
-        let root_block = match (tracker.get_root_block(), root_block) {
-            (Ok(Some(root_block_left)), Some(root_block_right))
-            if &root_block_left == root_block_right => root_block_left,
+        // Try to query root block from the provided tracker.
+        if let Ok(Some(tracker_root_block)) = tracker.get_root_block() {
+            // If both `root_block` and tracker have root block hash, then
+            // compare them and return from method if they dismatch.
+            if let Some(root_block) = root_block
+                && root_block != tracker_root_block
+            {
+                return self;
+            }
 
-            (Ok(Some(root_block)), None) => root_block,
-            (_, Some(root_block)) => *root_block,
+            // Store the tracker's root block hash.
+            root_block = Some(tracker_root_block);
+        }
 
-            _ => return self
+        // Reject current method if no root block hash found.
+        let Some(root_block) = root_block else {
+            return self;
         };
 
-        // TODO: validator verifying key
-        // we can't extract it from root block since everybody can send their
-        // randomly generated root block and if we don't know a real one then
-        // we can very easily be scammed. so, validator must be known
-        // in addition to the root block hash for each blockchain.
+        // Try to query root block from the provided tracker.
+        if let Ok(Some(root_block)) = tracker.read_block(&root_block) {
+            // Verify its signature.
+            let Ok((is_valid, tracker_verifying_key)) = root_block.verify() else {
+                return self;
+            };
 
+            // Return from method if stored root block is invalid.
+            if !is_valid {
+                return self;
+            }
+
+            // If both `verifying_key` is provided and tracker has root block,
+            // then compare its validator with provided verifying key and return
+            // from method if they dismatch.
+            if let Some(verifying_key) = verifying_key
+                && verifying_key != tracker_verifying_key
+            {
+                return self;
+            }
+
+            // Store the tracker's verifying key.
+            verifying_key = Some(tracker_verifying_key);
+        }
+
+        // Reject current method if no verifying key found.
+        let Some(verifying_key) = verifying_key else {
+            return self;
+        };
+
+        // Replace existing tracker if it doesn't have storage or insert a new
+        // one.
         match self.trackers.get(&root_block) {
             Some(curr_tracker) => {
-                if curr_tracker.storage().is_none() {
-                    self.trackers.insert(root_block, tracker);
+                if curr_tracker.1.storage().is_none() {
+                    self.trackers.insert(root_block, (verifying_key, tracker));
                 }
             }
 
             None => {
-                self.trackers.insert(root_block, tracker);
+                self.trackers.insert(root_block, (verifying_key, tracker));
             }
         }
 
         self
     }
 
-    /// Synchronize blockchain history with all the available connections and,
-    /// if provided, local blockchain storage.
+    /// Synchronize stored trackers with their blockchains using available
+    /// network connections.
     pub fn sync(&mut self) -> Result<(), NodeError> {
         #[cfg(feature = "tracing")]
-        tracing::info!("synchronizing node state");
+        tracing::info!("synchronizing node trackers");
 
-        let mut viewer = match self.tracker.storage() {
-            Some(storage) => {
-                let viewer = BatchedViewer::open_from_storage(
-                    self.streams.values_mut(),
-                    storage
-                ).map_err(NodeError::Viewer)?;
-
-                match viewer {
-                    Some(viewer) => viewer,
-
-                    // Fallback to network viewer if storage is empty.
-                    None => {
-                        BatchedViewer::open(
-                            self.streams.values_mut(),
-                            self.root_block
-                        ).map_err(NodeError::Viewer)?
-                    }
-                }
-            }
-
-            None => {
-                BatchedViewer::open(
-                    self.streams.values_mut(),
-                    self.root_block
-                ).map_err(NodeError::Viewer)?
-            }
-        };
-
-        loop {
-            let block = match self.tracker.storage() {
-                Some(storage) => viewer.forward_with_storage(storage)
-                    .map_err(NodeError::Viewer)?,
-
-                None => viewer.forward()
-                    .map_err(NodeError::Viewer)?
-            };
-
-            let Some(block) = block else {
-                break;
-            };
-
+        for (root_block, (verifying_key, tracker)) in self.trackers.iter_mut() {
             #[cfg(feature = "tracing")]
-            tracing::debug!(
-                curr_block_hash = block.block.current_hash().to_base64(),
-                prev_block_hash = block.block.previous_hash().to_base64(),
-                author = block.verifying_key.to_base64(),
-                "read block"
+            tracing::info!(
+                root_block = root_block.to_base64(),
+                verifying_key = verifying_key.to_base64(),
+                "synchronizing tracker"
             );
 
-            // Try to write received block to the tracker.
-            self.tracker.try_write_block(&block.block)
-                .map_err(NodeError::Tracker)?;
+            // Open batched viewer using available connections and known
+            // blockchain info.
+            let mut viewer = match tracker.storage() {
+                Some(storage) => {
+                    let viewer = BatchedViewer::open_from_storage(
+                        self.streams.values_mut(),
+                        storage.as_ref()
+                    ).map_err(NodeError::Viewer)?;
+
+                    match viewer {
+                        Some(viewer) => viewer,
+
+                        // Fallback to network viewer if storage is empty.
+                        None => {
+                            BatchedViewer::open(
+                                self.streams.values_mut(),
+                                root_block,
+                                verifying_key.clone()
+                            ).map_err(NodeError::Viewer)?
+                        }
+                    }
+                }
+
+                None => {
+                    BatchedViewer::open(
+                        self.streams.values_mut(),
+                        root_block,
+                        verifying_key.clone()
+                    ).map_err(NodeError::Viewer)?
+                }
+            };
+
+            loop {
+                let block = match tracker.storage() {
+                    Some(storage) => viewer.forward_with_storage(storage.as_ref())
+                        .map_err(NodeError::Viewer)?,
+
+                    None => viewer.forward()
+                        .map_err(NodeError::Viewer)?
+                };
+
+                let Some(block) = block else {
+                    break;
+                };
+
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    hash = block.block.hash().to_base64(),
+                    timestamp = block.block.timestamp().unix_timestamp(),
+                    "read block"
+                );
+
+                // Try to write received block to the tracker.
+                tracker.try_write_block(&block.block)
+                    .map_err(NodeError::Tracker)?;
+            }
         }
 
         Ok(())
     }
 
-    /// Start the node server.
+    /// Start the node.
     ///
-    /// This method will use the provided `spawner` callback to spawn background
-    /// async tasks which will be listening to the available packet streams and
-    /// process incoming packets. The method itself will be listening for new
-    /// connections and continue spawning the tasks.
+    /// This method will spawn background tasks to listen to incoming packets
+    /// and process them using provided options.
     ///
     /// All the non-critical errors will be silenced and displayed in tracing
     /// logs only.
     pub fn start(
         self,
         options: NodeOptions
-    ) -> Result<NodeHandler<S>, NodeError<S>>
-    where
-        S: Send + Sync + 'static,
-        S::Error: Send + 'static
-    {
+    ) -> Result<NodeHandler, NodeError> {
         #[cfg(feature = "tracing")]
         tracing::info!("starting the node");
 
         let handler = NodeHandler {
-            root_block: self.root_block,
             streams: Arc::new(RwLock::new(HashMap::with_capacity(self.streams.len()))),
-            options,
-            pending_transactions: Arc::new(RwLock::new(self.pending_transactions)),
-            pending_blocks: Arc::new(RwLock::new(self.pending_blocks)),
-            tracker: Arc::new(Mutex::new(self.tracker))
+            pending_messages: Arc::new(RwLock::new(self.pending_messages)),
+            trackers: Arc::new(Mutex::new(self.trackers)),
+            options: Arc::new(options)
         };
 
         // Add streams to the handler.
@@ -352,21 +399,21 @@ impl Node {
             #[cfg(feature = "tracing")]
             tracing::info!(
                 endpoint_id = base64::encode(endpoint_id),
-                "adding connection"
+                "add node connection"
             );
 
             handler.add_stream(stream);
         }
 
         // Start validator thread if any keys are provided.
-        if !self.owned_validators.is_empty() {
-            let handler = handler.clone();
-            let validators = self.owned_validators;
+        // if !self.owned_validators.is_empty() {
+        //     let handler = handler.clone();
+        //     let validators = self.owned_validators;
 
-            std::thread::spawn(move || {
-                validator::run(handler, validators);
-            });
-        }
+        //     std::thread::spawn(move || {
+        //         validator::run(handler, validators);
+        //     });
+        // }
 
         #[cfg(feature = "tracing")]
         tracing::info!("node started");
@@ -375,38 +422,37 @@ impl Node {
     }
 }
 
-/// A helper struct connected to the running node. It can be used to perform
-/// client-side operations like announcing transactions to the network.
-#[derive(Debug, Clone)]
-pub struct NodeHandler<S: Storage> {
-    /// Hash of the root block that the current node serves.
-    root_block: Hash,
-
-    /// Table of connections to other nodes, [remote_id] => [stream].
+/// A helper struct that can be used to perform client-side operations with the
+/// running node server.
+#[derive(Clone)]
+pub struct NodeHandler {
+    /// Table of connections to other nodes.
+    ///
+    /// `[remote_id] => [stream]`
     streams: Arc<RwLock<HashMap<[u8; 32], Sender<Packet>>>>,
 
+    /// Table of pending messages which are meant to be added into a new block.
+    ///
+    /// `[root_block] => ([hash] => [message])`
+    pending_messages: Arc<RwLock<HashMap<Hash, HashMap<Hash, Message>>>>,
+
+    /// Table of blockchain history trackers which are used to keep track of
+    /// blocks history and, if possible, query messages and other data.
+    ///
+    /// It is expected that for each blockchain we already know its validator
+    /// verifying key and, if possible, its root block hash.
+    ///
+    /// `[root_block] => ([verifying_key], [tracker])`
+    trackers: Arc<Mutex<HashMap<Hash, (VerifyingKey, Tracker)>>>,
+
     /// Node options used by the underlying packets handlers.
-    options: NodeOptions,
-
-    /// Table of pending transactions which are meant to be added into a new
-    /// block, [transaction_hash] => [transaction].
-    pending_transactions: Arc<RwLock<HashMap<Hash, Transaction>>>,
-
-    /// Table of pending blocks which are meant to be approved and added to the
-    /// blockchain history, [block_hash] => [block].
-    pending_blocks: Arc<RwLock<HashMap<Hash, Block>>>,
-
-    /// Blockchain history tracker.
-    tracker: Arc<Mutex<Tracker<S>>>
+    options: Arc<NodeOptions>
 }
 
-impl<S: Storage> NodeHandler<S> {
+impl NodeHandler {
     /// Add new packet stream to the node connections pool.
-    pub fn add_stream(&self, stream: PacketStream)
-    where
-        S: Send + 'static
-    {
-        let (sender, receiver) = std::sync::mpsc::channel();
+    pub fn add_stream(&self, stream: PacketStream) {
+        let (sender, receiver) = flume::unbounded();
 
         let peer_id = *stream.peer_id();
 
@@ -414,7 +460,7 @@ impl<S: Storage> NodeHandler<S> {
         tracing::debug!(
             local_id = base64::encode(stream.local_id()),
             peer_id = base64::encode(peer_id),
-            "adding connection"
+            "add node connection"
         );
 
         let state = handlers::NodeState {
@@ -430,58 +476,31 @@ impl<S: Storage> NodeHandler<S> {
         self.streams.write().insert(peer_id, sender);
     }
 
-    /// Get root block targeted by the current node.
-    #[inline(always)]
-    pub const fn root_block(&self) -> &Hash {
-        &self.root_block
+    /// Get table of pending messages stored for a blockchain with provided
+    /// root block hash and run provided callback with it.
+    pub fn map_pending_messages<T>(
+        &self,
+        root_block: impl AsRef<Hash>,
+        mut callback: impl FnMut(&HashMap<Hash, Message>) -> T
+    ) -> Option<T> {
+        self.pending_messages.read()
+            .get(root_block.as_ref())
+            .map(|pending_messages| callback(pending_messages))
     }
 
-    /// Get list of available streams' endpoint IDs.
-    pub fn streams(&self) -> Box<[[u8; 32]]> {
-        self.streams.read()
-            .keys()
-            .cloned()
-            .collect::<Box<[[u8; 32]]>>()
+    /// Get verifying key and a tracker reference for a blockchain with provided
+    /// root block hash and run provided callback with them.
+    pub fn map_tracker<T>(
+        &self,
+        root_block: impl AsRef<Hash>,
+        mut callback: impl FnMut(&VerifyingKey, &Tracker) -> T
+    ) -> Option<T> {
+        self.trackers.lock()
+            .get(root_block.as_ref())
+            .map(|(verifying_key, tracker)| callback(verifying_key, tracker))
     }
 
-    /// Get blockchain storage tracker.
-    #[inline]
-    pub fn tracker(&self) -> MutexGuard<'_, Tracker<S>> {
-        self.tracker.lock()
-    }
-
-    /// Get table of known pending transactions.
-    #[inline]
-    pub fn pending_transactions(
-        &self
-    ) -> RwLockReadGuard<'_, HashMap<Hash, Transaction>> {
-        self.pending_transactions.read()
-    }
-
-    /// Get mutable table of known pending transactions.
-    #[inline]
-    pub fn pending_transactions_mut(
-        &self
-    ) -> RwLockWriteGuard<'_, HashMap<Hash, Transaction>> {
-        self.pending_transactions.write()
-    }
-
-    /// Get table of known pending blocks.
-    #[inline]
-    pub fn pending_blocks(
-        &self
-    ) -> RwLockReadGuard<'_, HashMap<Hash, Block>> {
-        self.pending_blocks.read()
-    }
-
-    /// Get mutable table of known pending blocks.
-    #[inline]
-    pub fn pending_blocks_mut(
-        &self
-    ) -> RwLockWriteGuard<'_, HashMap<Hash, Block>> {
-        self.pending_blocks.write()
-    }
-
+    /// Send packet to all the available streams.
     fn send(&self, packet: Packet) {
         let mut disconnected = Vec::new();
 
@@ -495,57 +514,62 @@ impl<S: Storage> NodeHandler<S> {
 
         drop(lock);
 
-        for endpoint_id in disconnected {
-            self.streams.write().remove(&endpoint_id);
+        if !disconnected.is_empty() {
+            let mut lock = self.streams.write();
+
+            for endpoint_id in disconnected {
+                lock.remove(&endpoint_id);
+            }
         }
     }
 
-    /// Ask connected nodes to share their pending transactions.
-    pub fn ask_pending_transactions(&self) {
-        self.send(Packet::AskPendingTransactions {
-            root_block: self.root_block
+    /// Ask connected nodes to share their pending messages for a blockchain
+    /// with provided root block hash.
+    pub fn ask_pending_messages(&self, root_block: impl Into<Hash>) {
+        let root_block: Hash = root_block.into();
+
+        let known_messages = self.pending_messages.read()
+            .get(&root_block)
+            .map(|messages| {
+                messages.keys()
+                    .copied()
+                    .collect::<Box<[Hash]>>()
+            })
+            .unwrap_or_default();
+
+        self.send(Packet::AskPendingMessages {
+            root_block,
+            known_messages
         });
     }
 
-    /// Ask connected nodes to share their pending blocks.
-    pub fn ask_pending_blocks(&self) {
-        self.send(Packet::AskPendingBlocks {
-            root_block: self.root_block
-        });
-    }
-
-    /// Send transaction to all the connected nodes.
-    pub fn send_transaction(
+    /// Send message to all the connected nodes which host a blockchain with
+    /// provided root block hash.
+    pub fn send_message(
         &self,
-        transaction: impl Into<Transaction>
+        root_block: impl Into<Hash>,
+        message: Message
     ) {
-        self.send(Packet::Transaction {
-            root_block: self.root_block,
-            transaction: transaction.into()
+        let root_block: Hash = root_block.into();
+
+        self.send(Packet::Message {
+            root_block,
+            message
         });
     }
 
-    /// Send block to all the connected nodes.
+    /// Send block to all the connected nodes which host a blockchain with
+    /// provided root block hash.
     pub fn send_block(
         &self,
-        block: impl Into<Block>
+        root_block: impl Into<Hash>,
+        block: Block
     ) {
-        self.send(Packet::Block {
-            root_block: self.root_block,
-            block: block.into()
-        });
-    }
+        let root_block: Hash = root_block.into();
 
-    /// Send block approval to all the connected nodes.
-    pub fn send_block_approval(
-        &self,
-        block: impl Into<Hash>,
-        approval: impl Into<Signature>
-    ) {
-        self.send(Packet::ApproveBlock {
-            root_block: self.root_block,
-            target_block: block.into(),
-            approval: approval.into()
+        self.send(Packet::Block {
+            root_block,
+            block
         });
     }
 }

@@ -17,7 +17,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::crypto::base64;
-use crate::storage::Storage;
+use crate::crypto::hash::Hash;
 use crate::protocol::packets::Packet;
 
 use super::NodeState;
@@ -26,59 +26,78 @@ use super::NodeState;
 ///
 /// Return `false` if critical error occured and node connection must be
 /// terminated.
-pub fn handle<S: Storage>(
-    state: &mut NodeState<S>,
-    offset: u64,
+pub fn handle(
+    state: &mut NodeState,
+    root_block: Hash,
+    since_block: Hash,
     max_length: u64
 ) -> bool {
     #[cfg(feature = "tracing")]
     tracing::debug!(
         local_id = base64::encode(state.stream.local_id()),
         peer_id = base64::encode(state.stream.peer_id()),
-        root_block = state.handler.root_block.to_base64(),
-        ?offset,
+        root_block = root_block.to_base64(),
+        since_block = since_block.to_base64(),
         ?max_length,
         "handle AskHistory packet"
     );
 
-    // Then read max allowed amount of blocks' hashes.
-    let history = state.handler.tracker()
-        .get_history(
-            offset as usize,
-            state.handler.options.max_history_length.min(max_length as usize)
+    // Read known blockchain history.
+    let max_history_length = state.handler.options.max_history_length;
+
+    let history = state.handler.map_tracker(root_block, move |_, tracker| {
+        tracker.get_history(
+            since_block,
+            (max_length as usize).min(max_history_length)
+        )
+    });
+
+    let Some(history) = history else {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            local_id = base64::encode(state.stream.local_id()),
+            peer_id = base64::encode(state.stream.peer_id()),
+            root_block = root_block.to_base64(),
+            since_block = since_block.to_base64(),
+            ?max_length,
+            "history for this blockchain is not available"
         );
+
+        return true;
+    };
 
     let history = match history {
         Ok(history) => history,
         Err(err) => {
             #[cfg(feature = "tracing")]
             tracing::warn!(
-                err = err.to_string(),
+                ?err,
                 local_id = base64::encode(state.stream.local_id()),
                 peer_id = base64::encode(state.stream.peer_id()),
-                ?offset,
+                root_block = root_block.to_base64(),
+                since_block = since_block.to_base64(),
                 ?max_length,
-                "failed to get blockchain history from the tracker"
+                "failed to read blockchain history"
             );
 
             return true;
         }
     };
 
-    // And try to send them back to the requester.
+    // Try to send this history back to the requester.
     if let Err(err) = state.stream.send(Packet::History {
-        root_block: state.handler.root_block,
-        offset,
-        history: history.clone()
+        root_block,
+        since_block,
+        history
     }) {
         #[cfg(feature = "tracing")]
         tracing::error!(
             ?err,
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            ?offset,
+            root_block = root_block.to_base64(),
+            since_block = since_block.to_base64(),
             ?max_length,
-            ?history,
             "failed to send History packet"
         );
 

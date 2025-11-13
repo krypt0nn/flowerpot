@@ -16,33 +16,29 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::sync::mpsc::{Receiver, TryRecvError};
+use flume::{Receiver, TryRecvError};
 
 use crate::crypto::base64;
-use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 use crate::protocol::network::PacketStream;
 
 use super::NodeHandler;
 
 mod ask_history;
-mod ask_pending_transactions;
-mod pending_transactions;
-mod ask_pending_blocks;
-mod pending_blocks;
-mod ask_transaction;
-mod transaction;
+mod ask_pending_messages;
+mod pending_messages;
+mod ask_message;
+mod message;
 mod ask_block;
 mod block;
-mod approve_block;
 
-pub struct NodeState<S: Storage> {
-    pub handler: NodeHandler<S>,
+pub struct NodeState {
+    pub handler: NodeHandler,
     pub stream: PacketStream,
     pub receiver: Receiver<Packet>
 }
 
-impl<S: Storage> NodeState<S> {
+impl NodeState {
     /// Send packet to every connected node besides the current one.
     pub fn broadcast(&self, packet: Packet) {
         #[cfg(feature = "tracing")]
@@ -66,49 +62,34 @@ impl<S: Storage> NodeState<S> {
 
         drop(lock);
 
-        for endpoint_id in disconnected {
-            self.handler.streams.write().remove(&endpoint_id);
+        if !disconnected.is_empty() {
+            let mut lock = self.handler.streams.write();
+
+            for endpoint_id in disconnected {
+                lock.remove(&endpoint_id);
+            }
         }
     }
 }
 
 /// Handle connection.
-pub fn handle<S: Storage>(mut state: NodeState<S>) {
-    // Ask remote node to share pending transactions if we support
-    // their storing.
-    if state.handler.options.accept_transactions &&
-        let Err(err) = state.stream.send(Packet::AskPendingTransactions {
-            root_block: state.handler.root_block
-        })
-    {
-        #[cfg(feature = "tracing")]
-        tracing::error!(
-            ?err,
-            local_id = base64::encode(state.stream.local_id()),
-            peer_id = base64::encode(state.stream.peer_id()),
-            "failed to send packet to the packets stream"
-        );
+pub fn handle(mut state: NodeState) {
+    // Ask remote node to share pending messages if we support their storing.
+    // if state.handler.options.accept_messages &&
+    //     let Err(err) = state.stream.send(Packet::AskPendingMessages {
+    //         root_block: state.handler.root_block
+    //     })
+    // {
+    //     #[cfg(feature = "tracing")]
+    //     tracing::error!(
+    //         ?err,
+    //         local_id = base64::encode(state.stream.local_id()),
+    //         peer_id = base64::encode(state.stream.peer_id()),
+    //         "failed to send packet to the packets stream"
+    //     );
 
-        return;
-    }
-
-    // Ask remote node to share pending blocks if we support their
-    // storing.
-    if state.handler.options.accept_blocks &&
-        let Err(err) = state.stream.send(Packet::AskPendingBlocks {
-            root_block: state.handler.root_block
-        })
-    {
-        #[cfg(feature = "tracing")]
-        tracing::error!(
-            ?err,
-            local_id = base64::encode(state.stream.local_id()),
-            peer_id = base64::encode(state.stream.peer_id()),
-            "failed to send packet to the packets stream"
-        );
-
-        return;
-    }
+    //     return;
+    // }
 
     // Process incoming packets in a loop.
     loop {
@@ -161,115 +142,96 @@ pub fn handle<S: Storage>(mut state: NodeState<S>) {
                 match packet {
                     // If we were asked to share the blockchain history.
                     Packet::AskHistory {
-                        root_block: received_root_block,
-                        offset,
+                        root_block,
+                        since_block,
                         max_length
-                    } if received_root_block == state.handler.root_block => {
-                        if !ask_history::handle(&mut state, offset, max_length) {
-                            return;
-                        }
-                    }
-
-                    // If we were asked to send the pending transactions list.
-                    Packet::AskPendingTransactions {
-                        root_block: received_root_block
-                    } if received_root_block == state.handler.root_block => {
-                        if !ask_pending_transactions::handle(&mut state) {
-                            return;
-                        }
-                    }
-
-                    // If we received list of available pending transactions.
-                    Packet::PendingTransactions {
-                        root_block: received_root_block,
-                        pending_transactions
-                    } if received_root_block == state.handler.root_block
-                        && state.handler.options.fetch_pending_transactions
-                    => {
-                        if !pending_transactions::handle(
+                    } => {
+                        if !ask_history::handle(
                             &mut state,
-                            pending_transactions
+                            root_block,
+                            since_block,
+                            max_length
                         ) {
                             return;
                         }
                     }
 
-                    // If we were asked to send the pending blocks list.
-                    Packet::AskPendingBlocks {
-                        root_block: received_root_block
-                    } if received_root_block == state.handler.root_block => {
-                        if !ask_pending_blocks::handle(&mut state) {
+                    // If we were asked to send the pending messages list.
+                    Packet::AskPendingMessages {
+                        root_block,
+                        known_messages
+                    } => {
+                        if !ask_pending_messages::handle(
+                            &mut state,
+                            root_block,
+                            known_messages
+                        ) {
                             return;
                         }
                     }
 
-                    // If we received list of available pending blocks.
-                    Packet::PendingBlocks {
-                        root_block: received_root_block,
-                        pending_blocks
-                    } if received_root_block == state.handler.root_block
-                        && state.handler.options.fetch_pending_transactions
-                    => {
-                        if !pending_blocks::handle(&mut state, pending_blocks) {
+                    // If we received list of available pending messages.
+                    Packet::PendingMessages {
+                        root_block,
+                        pending_messages
+                    } if state.handler.options.fetch_pending_messages => {
+                        if !pending_messages::handle(
+                            &mut state,
+                            root_block,
+                            pending_messages
+                        ) {
                             return;
                         }
                     }
 
-                    // If we were asked to send transaction.
-                    Packet::AskTransaction {
-                        root_block: received_root_block,
-                        transaction
-                    } if received_root_block == state.handler.root_block => {
-                        if !ask_transaction::handle(&mut state, transaction) {
+                    // If we were asked to send message.
+                    Packet::AskMessage {
+                        root_block,
+                        message
+                    } => {
+                        if !ask_message::handle(
+                            &mut state,
+                            root_block,
+                            message
+                        ) {
                             return;
                         }
                     }
 
-                    // If we received some transaction.
-                    Packet::Transaction {
-                        root_block: received_root_block,
-                        transaction
-                    } if received_root_block == state.handler.root_block
-                        && state.handler.options.accept_transactions
-                    => {
-                        if !transaction::handle(&mut state, transaction) {
+                    // If we received some message.
+                    Packet::Message {
+                        root_block,
+                        message
+                    } if state.handler.options.accept_messages => {
+                        if !message::handle(
+                            &mut state,
+                            root_block,
+                            message
+                        ) {
                             return;
                         }
                     }
 
                     // If we were asked to send a block of the blockchain.
                     Packet::AskBlock {
-                        root_block: received_root_block,
+                        root_block,
                         target_block
-                    } if received_root_block == state.handler.root_block => {
-                        if !ask_block::handle(&mut state, target_block) {
+                    } => {
+                        if !ask_block::handle(
+                            &mut state,
+                            root_block,
+                            target_block
+                        ) {
                             return;
                         }
                     }
 
                     // If we received some block.
                     Packet::Block {
-                        root_block: received_root_block,
+                        root_block,
                         block
-                    } if received_root_block == state.handler.root_block
-                        && state.handler.options.accept_blocks
-                    => {
+                    } if state.handler.options.accept_blocks => {
                         if !block::handle(&mut state, block) {
-                            return;
-                        }
-                    }
-
-                    // If we received block approval.
-                    Packet::ApproveBlock {
-                        root_block: received_root_block,
-                        target_block,
-                        approval
-                    } if received_root_block == state.handler.root_block => {
-                        if !approve_block::handle(
-                            &mut state,
-                            target_block,
-                            approval
-                        ) {
                             return;
                         }
                     }

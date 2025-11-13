@@ -37,7 +37,7 @@ pub enum TrackerError {
 /// blockchain and synchronizes it with a storage if it's provided.
 pub enum Tracker {
     /// Data + metadata tracker.
-    Full(Box<dyn Storage>),
+    Full(Box<dyn Storage + Send>),
 
     /// Metadata-only tracker.
     HeadOnly {
@@ -63,13 +63,13 @@ impl Default for Tracker {
 impl Tracker {
     /// Create new tracker from provided blockchain storage.
     #[inline]
-    pub fn from_storage(storage: impl Storage + 'static) -> Self {
+    pub fn from_storage(storage: impl Storage + Send + 'static) -> Self {
         Self::Full(Box::new(storage))
     }
 
     /// Get reference to the blockchain storage if the tracker owns it.
     #[inline]
-    pub fn storage(&self) -> Option<&Box<dyn Storage>> {
+    pub fn storage(&self) -> Option<&Box<dyn Storage + Send>> {
         match self {
             Self::Full(storage) => Some(storage),
             Self::HeadOnly { .. } => None
@@ -152,63 +152,30 @@ impl Tracker {
         }
     }
 
-    /// Try to get a part of the known blockchain history.
-    ///
-    /// `offset = 0` is the root block of the blockchain.
+    /// Try to get a part of the known blockchain history. Returned slice will
+    /// *not* contain the `since_block` hash and be at most `max_length` values
+    /// long.
     pub fn get_history(
         &self,
-        offset: usize,
+        since_block: Hash,
         max_length: usize
     ) -> Result<Box<[Hash]>, TrackerError> {
         match self {
             Self::Full(storage) => {
-                // FIXME: highly suboptimal since by default requires to iterate
-                // over the whole storage to reach the offset position.
-
-                // Obtain hash of the root block.
-                let root_block = storage.root_block()
-                    .map_err(TrackerError::Storage)?;
-
-                let Some(root_block) = root_block else {
-                    return Ok(Box::new([]));
-                };
-
-                // Skip first `offset` blocks.
-                let mut prev_block = root_block;
-                let mut i = 0;
-
-                while i < offset {
-                    let block = storage.next_block(&prev_block)
-                        .map_err(TrackerError::Storage)?;
-
-                    match block {
-                        Some(block) => prev_block = block,
-                        None => break
-                    }
-
-                    i += 1;
-                }
-
-                // Check that we've reached the `offset`-th block.
-                if i != offset {
-                    return Ok(Box::new([]));
-                }
-
-                // Fill the history vector with up to `max_length` block hashes.
                 let mut history = Vec::with_capacity(max_length);
+                let mut curr_block = since_block;
 
-                while i < offset + max_length {
-                    history.push(prev_block);
-
-                    let block = storage.next_block(&prev_block)
+                while history.len() < max_length {
+                    let block = storage.next_block(&curr_block)
                         .map_err(TrackerError::Storage)?;
 
-                    match block {
-                        Some(block) => prev_block = block,
-                        None => break
-                    }
+                    let Some(block) = block else {
+                        break;
+                    };
 
-                    i += 1;
+                    curr_block = block;
+
+                    history.push(block);
                 }
 
                 Ok(history.into_boxed_slice())
@@ -216,7 +183,8 @@ impl Tracker {
 
             Self::HeadOnly { blocks, .. } => {
                 let history = blocks.iter()
-                    .skip(offset)
+                    .skip_while(|hash| hash != &&since_block)
+                    .skip(1)
                     .take(max_length)
                     .copied()
                     .collect();

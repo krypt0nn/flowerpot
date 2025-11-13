@@ -18,46 +18,52 @@
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
-use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 
 use super::NodeState;
 
-/// Handle `PendingTransactions` packet.
+// TODO: some option to reject messages for untracked blockchains.
+
+/// Handle `PendingMessages` packet.
 ///
 /// Return `false` if critical error occured and node connection must be
 /// terminated.
-pub fn handle<S: Storage>(
-    state: &mut NodeState<S>,
-    pending_transactions: Box<[Hash]>
+pub fn handle(
+    state: &mut NodeState,
+    root_block: Hash,
+    pending_messages: Box<[Hash]>
 ) -> bool {
     #[cfg(feature = "tracing")]
     tracing::debug!(
         local_id = base64::encode(state.stream.local_id()),
         peer_id = base64::encode(state.stream.peer_id()),
-        root_block = state.handler.root_block.to_base64(),
-        pending_transactions = ?pending_transactions.iter()
+        root_block = root_block.to_base64(),
+        pending_messages = ?pending_messages.iter()
             .map(|hash| hash.to_base64())
             .collect::<Box<[String]>>(),
-        "handle PendingTransactions packet"
+        "handle PendingMessages packet"
     );
 
-    let lock = state.handler.pending_transactions.read();
+    let lock = state.handler.pending_messages.read();
 
-    for transaction in pending_transactions {
-        #[allow(clippy::collapsible_if)]
-        if !lock.contains_key(&transaction) {
-            if let Err(err) = state.stream.send(Packet::AskTransaction {
-                root_block: state.handler.root_block,
-                transaction
+    for message in pending_messages {
+        let is_available = match lock.get(&root_block) {
+            Some(values) => values.contains_key(&message),
+            None => false
+        };
+
+        if !is_available {
+            if let Err(err) = state.stream.send(Packet::AskMessage {
+                root_block,
+                message
             }) {
                 #[cfg(feature = "tracing")]
                 tracing::error!(
                     ?err,
                     local_id = base64::encode(state.stream.local_id()),
                     peer_id = base64::encode(state.stream.peer_id()),
-                    transaction = transaction.to_base64(),
-                    "failed to send AskTransaction packet"
+                    root_block = root_block.to_base64(),
+                    "failed to send AskMessage packet"
                 );
 
                 return false;

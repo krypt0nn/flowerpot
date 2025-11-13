@@ -20,12 +20,11 @@ use std::collections::HashSet;
 
 use crate::crypto::sign::{Signature, SigningKey};
 use crate::block::Block;
-use crate::storage::Storage;
 
 use super::NodeHandler;
 
-pub fn run<S: Storage>(
-    handler: NodeHandler<S>,
+pub fn run(
+    handler: NodeHandler,
     signing_key: SigningKey
 ) {
     #[cfg(feature = "tracing")]
