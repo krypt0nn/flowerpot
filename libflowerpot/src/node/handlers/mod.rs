@@ -231,7 +231,11 @@ pub fn handle(mut state: NodeState) {
                         root_block,
                         block
                     } if state.handler.options.accept_blocks => {
-                        if !block::handle(&mut state, block) {
+                        if !block::handle(
+                            &mut state,
+                            root_block,
+                            block
+                        ) {
                             return;
                         }
                     }

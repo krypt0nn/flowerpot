@@ -18,7 +18,6 @@
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
-use crate::storage::Storage;
 use crate::protocol::packets::Packet;
 
 use super::NodeState;
@@ -27,76 +26,60 @@ use super::NodeState;
 ///
 /// Return `false` if critical error occured and node connection must be
 /// terminated.
-pub fn handle<S: Storage>(
-    state: &mut NodeState<S>,
+pub fn handle(
+    state: &mut NodeState,
+    root_block: Hash,
     target_block: Hash
 ) -> bool {
     #[cfg(feature = "tracing")]
     tracing::debug!(
         local_id = base64::encode(state.stream.local_id()),
         peer_id = base64::encode(state.stream.peer_id()),
-        root_block = state.handler.root_block.to_base64(),
+        root_block = root_block.to_base64(),
         target_block = target_block.to_base64(),
         "handle AskBlock packet"
     );
 
-    // If this block is pending.
-    if let Some(block) = state.handler.pending_blocks().get(&target_block) {
-        // Then try to send it back.
-        if let Err(err) = state.stream.send(Packet::Block {
-            root_block: state.handler.root_block,
-            block: block.clone()
-        }) {
-            #[cfg(feature = "tracing")]
-            tracing::error!(
-                ?err,
-                local_id = base64::encode(state.stream.local_id()),
-                peer_id = base64::encode(state.stream.peer_id()),
-                "failed to send Block packet"
-            );
+    // Try to read block from tracker.
+    let result = state.handler.map_tracker(root_block, |_, tracker| {
+        tracker.read_block(&target_block).transpose()
+    }).flatten().transpose();
 
-            return false;
-        }
-    }
-
-    // Otherwise check if it's already stored.
-    else {
-        // Then try to read block from that storage.
-        match state.handler.tracker().read_block(&target_block) {
-            // If we've found the block.
-            Ok(Some(block)) => {
-                // Then try to send it back.
-                if let Err(err) = state.stream.send(Packet::Block {
-                    root_block: state.handler.root_block,
-                    block
-                }) {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!(
-                        ?err,
-                        local_id = base64::encode(state.stream.local_id()),
-                        peer_id = base64::encode(state.stream.peer_id()),
-                        "failed to send Block packet"
-                    );
-
-                    return false;
-                }
-            }
-
-            // If block doesn't exist - then do nothing.
-            Ok(None) => (),
-
-            // And if we failed - log it.
-            Err(err) => {
+    match result {
+        // Send it back to the requester if message is found.
+        Ok(Some(block)) => {
+            if let Err(err) = state.stream.send(Packet::Block {
+                root_block,
+                block
+            }) {
                 #[cfg(feature = "tracing")]
                 tracing::error!(
-                    err = err.to_string(),
+                    ?err,
                     local_id = base64::encode(state.stream.local_id()),
                     peer_id = base64::encode(state.stream.peer_id()),
-                    "failed to read block from the storage"
+                    root_block = root_block.to_base64(),
+                    target_block = target_block.to_base64(),
+                    "failed to send Block packet"
                 );
 
                 return false;
             }
+        }
+
+        Ok(None) => (),
+
+        Err(err) => {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                ?err,
+                local_id = base64::encode(state.stream.local_id()),
+                peer_id = base64::encode(state.stream.peer_id()),
+                root_block = root_block.to_base64(),
+                target_block = target_block.to_base64(),
+                "failed to read block from tracker"
+            );
+
+            return true;
         }
     }
 

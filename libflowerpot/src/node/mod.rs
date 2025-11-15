@@ -481,10 +481,22 @@ impl NodeHandler {
     pub fn map_pending_messages<T>(
         &self,
         root_block: impl AsRef<Hash>,
-        mut callback: impl FnMut(&HashMap<Hash, Message>) -> T
+        callback: impl FnOnce(&HashMap<Hash, Message>) -> T
     ) -> Option<T> {
         self.pending_messages.read()
             .get(root_block.as_ref())
+            .map(|pending_messages| callback(pending_messages))
+    }
+
+    /// Get mutable table of pending messages stored for a blockchain with
+    /// provided root block hash and run provided callback with it.
+    pub fn map_pending_messages_mut<T>(
+        &self,
+        root_block: impl AsRef<Hash>,
+        callback: impl FnOnce(&mut HashMap<Hash, Message>) -> T
+    ) -> Option<T> {
+        self.pending_messages.write()
+            .get_mut(root_block.as_ref())
             .map(|pending_messages| callback(pending_messages))
     }
 
@@ -493,10 +505,10 @@ impl NodeHandler {
     pub fn map_tracker<T>(
         &self,
         root_block: impl AsRef<Hash>,
-        mut callback: impl FnMut(&VerifyingKey, &Tracker) -> T
+        callback: impl FnOnce(&VerifyingKey, &mut Tracker) -> T
     ) -> Option<T> {
         self.trackers.lock()
-            .get(root_block.as_ref())
+            .get_mut(root_block.as_ref())
             .map(|(verifying_key, tracker)| callback(verifying_key, tracker))
     }
 

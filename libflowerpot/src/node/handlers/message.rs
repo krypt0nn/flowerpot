@@ -40,25 +40,27 @@ pub fn handle(
         peer_id = base64::encode(state.stream.peer_id()),
         root_block = root_block.to_base64(),
         message_hash = message.hash().to_base64(),
+        ?message_size,
         "handle Message packet"
     );
 
     // Reject large messages.
-    if message.data().len() > state.handler.options.max_message_size {
+    if message_size > state.handler.options.max_message_size {
         #[cfg(feature = "tracing")]
         tracing::warn!(
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
             root_block = root_block.to_base64(),
             message_hash = message.hash().to_base64(),
+            ?message_size,
             "received message is too large"
         );
 
         return true;
     }
 
-    // Verify received transaction.
-    let (is_valid, verifying_key) = match transaction.verify() {
+    // Verify received message.
+    let (is_valid, verifying_key) = match message.verify() {
         Ok(result) => result,
         Err(err) => {
             #[cfg(feature = "tracing")]
@@ -66,53 +68,88 @@ pub fn handle(
                 ?err,
                 local_id = base64::encode(state.stream.local_id()),
                 peer_id = base64::encode(state.stream.peer_id()),
-                "failed to verify received transaction"
+                root_block = root_block.to_base64(),
+                message_hash = message.hash().to_base64(),
+                ?message_size,
+                "failed to verify received message"
             );
 
             return true;
         }
     };
 
-    // Skip transaction if it's invalid.
+    // Skip message if it's invalid.
     if !is_valid {
         #[cfg(feature = "tracing")]
         tracing::warn!(
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            hash = transaction.hash().to_base64(),
+            root_block = root_block.to_base64(),
             verifying_key = verifying_key.to_base64(),
-            "received invalid transaction"
+            message_hash = message.hash().to_base64(),
+            ?message_size,
+            "received invalid message"
         );
 
         return true;
     }
 
     // Skip pending transactions.
-    if state.handler.pending_transactions().contains_key(transaction.hash()) {
+    let is_pending = state.handler.map_pending_messages(
+        root_block,
+        |pending_messages| pending_messages.contains_key(message.hash())
+    );
+
+    if is_pending == Some(true) {
         #[cfg(feature = "tracing")]
         tracing::trace!(
             local_id = base64::encode(state.stream.local_id()),
             peer_id = base64::encode(state.stream.peer_id()),
-            hash = transaction.hash().to_base64(),
+            root_block = root_block.to_base64(),
             verifying_key = verifying_key.to_base64(),
-            "received pending transaction"
+            message_hash = message.hash().to_base64(),
+            ?message_size,
+            "received message is already stored in the pending messages pool"
         );
 
         return true;
     }
 
-    // Skip already stored transactions.
-    match state.handler.tracker().has_transaction(transaction.hash()) {
-        Ok(false) => (),
+    // Check this message using the provided filter.
+    if let Some(filter) = &state.handler.options.messages_filter
+        && !filter(&root_block, &message, &verifying_key)
+    {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            local_id = base64::encode(state.stream.local_id()),
+            peer_id = base64::encode(state.stream.peer_id()),
+            root_block = root_block.to_base64(),
+            verifying_key = verifying_key.to_base64(),
+            message_hash = message.hash().to_base64(),
+            ?message_size,
+            "received message which was filtered out"
+        );
 
-        Ok(true) => {
+        return true;
+    }
+
+    // Skip message if it's already stored in the tracker.
+    let is_stored = state.handler.map_tracker(
+        root_block,
+        |_, tracker| tracker.has_message(message.hash())
+    ).transpose();
+
+    match is_stored {
+        Ok(Some(true)) => {
             #[cfg(feature = "tracing")]
-            tracing::debug!(
+            tracing::trace!(
                 local_id = base64::encode(state.stream.local_id()),
                 peer_id = base64::encode(state.stream.peer_id()),
-                hash = transaction.hash().to_base64(),
+                root_block = root_block.to_base64(),
                 verifying_key = verifying_key.to_base64(),
-                "received already indexed transaction"
+                message_hash = message.hash().to_base64(),
+                ?message_size,
+                "received message is already stored in the tracker"
             );
 
             return true;
@@ -121,52 +158,45 @@ pub fn handle(
         Err(err) => {
             #[cfg(feature = "tracing")]
             tracing::warn!(
-                err = err.to_string(),
+                ?err,
                 local_id = base64::encode(state.stream.local_id()),
                 peer_id = base64::encode(state.stream.peer_id()),
-                hash = transaction.hash().to_base64(),
+                root_block = root_block.to_base64(),
                 verifying_key = verifying_key.to_base64(),
-                "failed to check if transaction is indexed by the tracker"
+                message_hash = message.hash().to_base64(),
+                ?message_size,
+                "failed to check if received message is already stored in the tracker"
             );
 
             return true;
         }
-    }
 
-    // Check this transaction using the provided filter.
-    if let Some(filter) = &state.handler.options.transactions_filter
-        && !filter(transaction.hash(), &verifying_key, &transaction)
-    {
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            local_id = base64::encode(state.stream.local_id()),
-            peer_id = base64::encode(state.stream.peer_id()),
-            hash = transaction.hash().to_base64(),
-            verifying_key = verifying_key.to_base64(),
-            "received transaction which was filtered out"
-        );
-
-        return true;
+        _ => ()
     }
 
     #[cfg(feature = "tracing")]
     tracing::info!(
         local_id = base64::encode(state.stream.local_id()),
         peer_id = base64::encode(state.stream.peer_id()),
-        hash = transaction.hash().to_base64(),
+        root_block = root_block.to_base64(),
         verifying_key = verifying_key.to_base64(),
-        "accepted new pending transaction"
+        message_hash = message.hash().to_base64(),
+        ?message_size,
+        "received new pending message"
     );
 
-    // Broadcast this transaction to other connected nodes.
-    state.broadcast(Packet::Transaction {
-        root_block: state.handler.root_block,
-        transaction: transaction.clone()
+    // Insert message to the pending messages pool.
+    let message_clone = message.clone();
+
+    state.handler.map_pending_messages_mut(root_block, move |pending_messages| {
+        pending_messages.insert(*message_clone.hash(), message_clone);
     });
 
-    // Insert it to the pending transactions pool.
-    state.handler.pending_transactions.write()
-        .insert(*transaction.hash(), transaction);
+    // Broadcast this message to other connected nodes.
+    state.broadcast(Packet::Message {
+        root_block,
+        message
+    });
 
     true
 }
