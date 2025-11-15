@@ -69,9 +69,9 @@ impl Tracker {
 
     /// Get reference to the blockchain storage if the tracker owns it.
     #[inline]
-    pub fn storage(&self) -> Option<&Box<dyn Storage + Send>> {
+    pub fn storage(&self) -> Option<&dyn Storage> {
         match self {
-            Self::Full(storage) => Some(storage),
+            Self::Full(storage) => Some(storage.as_ref()),
             Self::HeadOnly { .. } => None
         }
     }

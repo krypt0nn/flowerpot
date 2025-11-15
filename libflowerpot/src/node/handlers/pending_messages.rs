@@ -52,6 +52,7 @@ pub fn handle(
             None => false
         };
 
+        #[allow(clippy::collapsible_if)]
         if !is_available {
             if let Err(err) = state.stream.send(Packet::AskMessage {
                 root_block,

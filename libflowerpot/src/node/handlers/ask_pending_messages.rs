@@ -29,7 +29,7 @@ use super::NodeState;
 pub fn handle(
     state: &mut NodeState,
     root_block: Hash,
-    known_messages: Box<[Hash]>
+    known_messages: &[Hash]
 ) -> bool {
     #[cfg(feature = "tracing")]
     tracing::debug!(

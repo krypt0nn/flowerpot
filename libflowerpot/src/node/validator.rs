@@ -16,36 +16,52 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::collections::HashSet;
-
-use crate::crypto::sign::{Signature, SigningKey};
+use crate::crypto::hash::Hash;
+use crate::crypto::sign::SigningKey;
 use crate::block::Block;
 
 use super::NodeHandler;
 
+/// Run new blocks issuing usign provided node handler and signing key.
 pub fn run(
     handler: NodeHandler,
+    root_block: Hash,
     signing_key: SigningKey
 ) {
     #[cfg(feature = "tracing")]
-    tracing::info!("starting the validator thread");
-
-    let mut blocks_blacklist = HashSet::new();
+    tracing::info!(
+        root_block = root_block.to_base64(),
+        verifying_key = signing_key.verifying_key().to_base64(),
+        "starting blockchain validator thread"
+    );
 
     // Warmup the validator.
     std::thread::sleep(handler.options.validator_warmup_time);
 
     loop {
-        #[cfg(feature = "tracing")]
-        tracing::debug!("new validation round");
+        // Wait some time before running the code.
+        std::thread::sleep(handler.options.validator_wait_time);
 
         // Get tail block hash.
-        let tail_block = match handler.tracker().get_tail_block() {
-            Ok(tail_block) => tail_block.unwrap_or_default(),
+        let tail_block = handler.map_tracker(
+            root_block,
+            |_, tracker| tracker.get_tail_block()
+        ).transpose().map(|result| result.flatten());
+
+        let tail_block = match tail_block {
+            Ok(Some(tail_block)) => tail_block,
+
+            Ok(None) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!("tracker doesn't contain tail block hash");
+
+                break;
+            }
+
             Err(err) => {
                 #[cfg(feature = "tracing")]
                 tracing::error!(
-                    err = err.to_string(),
+                    ?err,
                     "failed to get tail block from the tracker"
                 );
 
@@ -53,255 +69,109 @@ pub fn run(
             }
         };
 
-        // Get validators list.
-        let validators = match handler.tracker().get_validators() {
-            Ok(validators) => validators,
+        // Try to take up to max allowed pending messages.
+        let min_num = handler.options.validator_min_messages_num;
+        let max_num = handler.options.validator_max_messages_num;
+
+        let messages = handler.map_pending_messages_mut(
+            root_block,
+            |pending_messages| {
+                if pending_messages.len() > min_num {
+                    Some(pending_messages.drain()
+                        .take(max_num)
+                        .collect::<Box<[_]>>())
+                } else {
+                    None
+                }
+            }
+        ).flatten();
+
+        // If enough messages found then proceed, otherwise run the loop again.
+        let Some(messages) = messages else {
+            continue;
+        };
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            root_block = root_block.to_base64(),
+            tail_block = tail_block.to_base64(),
+            verifying_key = signing_key.verifying_key().to_base64(),
+            messages = ?messages.iter()
+                .map(|(hash, _)| hash.to_base64())
+                .collect::<Vec<_>>(),
+            "create new block"
+        );
+
+        // Try to create new block.
+        let block = Block::create(
+            &signing_key,
+            tail_block,
+            messages.into_iter()
+                .map(|(_, message)| message)
+                .collect::<Box<[_]>>()
+        );
+
+        let block = match block {
+            Ok(block) => block,
+
             Err(err) => {
                 #[cfg(feature = "tracing")]
                 tracing::error!(
-                    err = err.to_string(),
-                    "failed to get validators list from the tracker"
+                    ?err,
+                    root_block = root_block.to_base64(),
+                    tail_block = tail_block.to_base64(),
+                    verifying_key = signing_key.verifying_key().to_base64(),
+                    "failed to create new block"
                 );
 
                 break;
             }
         };
 
-        // Take up to max allowed pending transactions.
-        let transactions = handler.pending_transactions()
-            .iter()
-            .take(handler.options.validator_max_transactions_num)
-            .map(|(hash, transaction)| (*hash, transaction.clone()))
-            .collect::<Box<[_]>>();
-
-        // If there's enough transactions to form a block - then make one and
-        // send it to the network.
-        if transactions.len()
-            > handler.options.validator_min_transactions_num.max(1)
-        {
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                tail_block = tail_block.to_base64(),
-                transactions = ?transactions.iter()
-                    .map(|(hash, _)| hash.to_base64())
-                    .collect::<Vec<_>>(),
-                validators = ?validators.iter()
-                    .map(|verifying_key| verifying_key.to_base64())
-                    .collect::<Vec<_>>(),
-                signing_key = ?signing_keys.iter()
-                    .map(|(_, verifying_key)| verifying_key.to_base64())
-                    .collect::<Vec<_>>(),
-                "create new block"
-            );
-
-            // Iterate over all the available validator keys.
-            for (signing_key, verifying_key) in &signing_keys {
-                // Create new block from selected transactions and sign it with
-                // the current validator key.
-                let transactions = transactions.iter()
-                    .cloned()
-                    .map(|(_, transaction)| transaction);
-
-                let block = Block::new(
-                    signing_key,
-                    tail_block,
-                    BlockContent::transactions(transactions)
-                );
-
-                let mut block = match block {
-                    Ok(block) => block,
-                    Err(err) => {
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!(
-                            ?err,
-                            verifying_key = verifying_key.to_base64(),
-                            "failed to create new block"
-                        );
-
-                        continue;
-                    }
-                };
-
-                // If more than one validator is available then also add their
-                // approvals to the created block.
-                for (_, validator) in &signing_keys {
-                    if validator != verifying_key
-                        && let Err(err) = block.approve_with(signing_key)
-                    {
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!(
-                            ?err,
-                            author = verifying_key.to_base64(),
-                            validator = validator.to_base64(),
-                            "failed to add approval to the created block"
-                        );
-                    }
-                }
-
-                #[cfg(feature = "tracing")]
-                tracing::debug!(
-                    curr_block_hash = ?block.current_hash().to_base64(),
-                    prev_block_hash = ?block.previous_hash().to_base64(),
-                    author = verifying_key.to_base64(),
-                    "share created block"
-                );
-
-                // Send this block to the network.
-                handler.send_block(block);
-            }
-        }
-
+        // Send this block to the network.
         #[cfg(feature = "tracing")]
         tracing::debug!(
-            time = handler.options.validator_blocks_await_time.as_secs(),
-            "wait for other blocks"
+            root_block = root_block.to_base64(),
+            tail_block = tail_block.to_base64(),
+            verifying_key = signing_key.verifying_key().to_base64(),
+            block_hash = block.hash().to_base64(),
+            "share created block"
         );
 
-        // Wait for new blocks to appear.
-        std::thread::sleep(handler.options.validator_blocks_await_time);
+        handler.send_block(root_block, block.clone());
 
-        // Select the best block from the available ones.
-        let mut best_block = None;
-
-        let pending_blocks = handler.pending_blocks();
-
-        for (hash, block) in pending_blocks.iter() {
-            // Skip blacklisted blocks.
-            if blocks_blacklist.contains(hash) {
-                continue;
-            }
-
-            let author = match block.sign().verify(hash) {
-                Ok((true, author)) => author,
-
-                Ok((false, _)) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(
-                        block_hash = hash.to_base64(),
-                        "invalid block is in the pending blocks list"
-                    );
-
-                    continue;
-                }
-
-                Err(err) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(
-                        ?err,
-                        block_hash = hash.to_base64(),
-                        sign = block.sign().to_base64(),
-                        "failed to derive block author from its signature"
-                    );
-
-                    continue;
-                }
-            };
-
-            // Skip self-signed blocks.
-            if signing_keys.iter()
-                .any(|(_, verifying_key)| verifying_key == &author)
-            {
-                continue;
-            }
-
-            // Calculate distance to this block from the previous one.
-            let distance = crate::block_validator_distance(
-                tail_block,
-                &author
-            );
-
-            // Compare it against the best stored variant.
-            match &mut best_block {
-                Some((
-                    best_block_hash,
-                    best_block_author,
-                    best_block_dist
-                )) => {
-                    // Update best block reference if we found closer block or
-                    // a block from the same author but with lower hash value.
-                    if (best_block_author == &author && *best_block_hash > *hash)
-                        || *best_block_dist > distance
-                    {
-                        *best_block_hash   = *hash;
-                        *best_block_author = author;
-                        *best_block_dist   = distance;
-                    }
-                }
-
-                None => best_block = Some((*hash, author, distance))
-            }
-        }
-
-        // If we've found the new best block.
-        if let Some((hash, author, distance)) = &best_block {
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                block_hash = hash.to_base64(),
-                author = author.to_base64(),
-                distance = distance.to_base64(),
-                "approving the best found block"
-            );
-
-            // Iterate over all the available validators.
-            for (signing_key, verifying_key) in &signing_keys {
-                // Create and share their approvals of this block.
-                match Signature::create(signing_key, hash) {
-                    Ok(approval) => {
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(
-                            block_hash = hash.to_base64(),
-                            author = author.to_base64(),
-                            distance = distance.to_base64(),
-                            approval = approval.to_base64(),
-                            "sending approval"
-                        );
-
-                        handler.send_block_approval(**hash, approval);
-                    }
-
-                    Err(err) => {
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!(
-                            ?err,
-                            block_hash = hash.to_base64(),
-                            validator = verifying_key.to_base64(),
-                            "failed to create block approval"
-                        );
-                    }
-                }
-            }
-        }
-
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            time = handler.options.validator_block_approvals_await_time.as_secs(),
-            "wait for other approvals"
+        // Write this block to the tracker.
+        let result = handler.map_tracker(
+            root_block,
+            |_, tracker| tracker.try_write_block(&block)
         );
 
-        // Wait for other validators to send their approvals.
-        std::thread::sleep(handler.options.validator_block_approvals_await_time);
-
-        // Get updated current last block hash.
-        let new_tail_block = match handler.tracker().get_tail_block() {
-            Ok(tail_block) => tail_block.unwrap_or_default(),
-            Err(err) => {
+        match result {
+            Some(Ok(result)) => {
                 #[cfg(feature = "tracing")]
-                tracing::error!(
-                    err = err.to_string(),
-                    "failed to get tail block from the tracker"
+                tracing::info!(
+                    ?result,
+                    root_block = root_block.to_base64(),
+                    tail_block = tail_block.to_base64(),
+                    verifying_key = signing_key.verifying_key().to_base64(),
+                    block_hash = block.hash().to_base64(),
+                    "try to write newly created block to the tracker"
                 );
-
-                break;
             }
-        };
 
-        // If none of blocks were approved and added to the blockchain then
-        // we blacklist the selected block and start a new approving round.
-        if tail_block == new_tail_block && let Some((hash, _, _)) = best_block {
-            #[cfg(feature = "tracing")]
-            tracing::debug!("no block approved, start new round");
+            Some(Err(err)) => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    ?err,
+                    root_block = root_block.to_base64(),
+                    tail_block = tail_block.to_base64(),
+                    verifying_key = signing_key.verifying_key().to_base64(),
+                    block_hash = block.hash().to_base64(),
+                    "failed to write newly created block to the tracker"
+                );
+            }
 
-            blocks_blacklist.insert(hash);
+            None => ()
         }
     }
 }

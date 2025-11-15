@@ -137,6 +137,14 @@ pub struct NodeOptions {
     /// Default is `1m`.
     pub validator_warmup_time: Duration,
 
+    /// Amount of time a validator thread will wait before trying to make a new
+    /// block. This timeout is needed because validator thread will lock node
+    /// handler and prevent other threads to access internal structures which
+    /// are needed for the node to function normally.
+    ///
+    /// Default is `10s`.
+    pub validator_wait_time: Duration,
+
     /// Minimal amount of messages needed to form a new block.
     ///
     /// Default is `1`.
@@ -158,6 +166,7 @@ impl Default for NodeOptions {
             fetch_pending_messages: true,
             messages_filter: None,
             validator_warmup_time: Duration::from_secs(60),
+            validator_wait_time: Duration::from_secs(10),
             validator_min_messages_num: 1,
             validator_max_messages_num: 128
         }
@@ -318,7 +327,7 @@ impl Node {
                 Some(storage) => {
                     let viewer = BatchedViewer::open_from_storage(
                         self.streams.values_mut(),
-                        storage.as_ref()
+                        storage
                     ).map_err(NodeError::Viewer)?;
 
                     match viewer {
@@ -346,7 +355,7 @@ impl Node {
 
             loop {
                 let block = match tracker.storage() {
-                    Some(storage) => viewer.forward_with_storage(storage.as_ref())
+                    Some(storage) => viewer.forward_with_storage(storage)
                         .map_err(NodeError::Viewer)?,
 
                     None => viewer.forward()
@@ -405,15 +414,14 @@ impl Node {
             handler.add_stream(stream);
         }
 
-        // Start validator thread if any keys are provided.
-        // if !self.owned_validators.is_empty() {
-        //     let handler = handler.clone();
-        //     let validators = self.owned_validators;
+        // Start validator threads.
+        for (root_block, signing_key) in self.validators {
+            let handler = handler.clone();
 
-        //     std::thread::spawn(move || {
-        //         validator::run(handler, validators);
-        //     });
-        // }
+            std::thread::spawn(move || {
+                validator::run(handler, root_block, signing_key);
+            });
+        }
 
         #[cfg(feature = "tracing")]
         tracing::info!("node started");
@@ -485,7 +493,7 @@ impl NodeHandler {
     ) -> Option<T> {
         self.pending_messages.read()
             .get(root_block.as_ref())
-            .map(|pending_messages| callback(pending_messages))
+            .map(callback)
     }
 
     /// Get mutable table of pending messages stored for a blockchain with
@@ -497,7 +505,7 @@ impl NodeHandler {
     ) -> Option<T> {
         self.pending_messages.write()
             .get_mut(root_block.as_ref())
-            .map(|pending_messages| callback(pending_messages))
+            .map(callback)
     }
 
     /// Get verifying key and a tracker reference for a blockchain with provided

@@ -164,7 +164,7 @@ pub fn handle(mut state: NodeState) {
                         if !ask_pending_messages::handle(
                             &mut state,
                             root_block,
-                            known_messages
+                            &known_messages
                         ) {
                             return;
                         }
