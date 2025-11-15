@@ -423,7 +423,7 @@ impl BlockchainCommands {
                     streams.push(stream);
                 }
 
-                let mut viewer = BatchedViewer::open(
+                let viewer = BatchedViewer::open(
                     streams.iter_mut(),
                     root_block,
                     verifying_key
@@ -431,6 +431,10 @@ impl BlockchainCommands {
                     anyhow::anyhow!(err.to_string())
                         .context("failed to open batched flowerpot blockchain viewer")
                 })?;
+
+                let Some(mut viewer) = viewer else {
+                    anyhow::bail!("couldn't build a blockchain viewer");
+                };
 
                 loop {
                     let block = match &storage {
@@ -447,12 +451,27 @@ impl BlockchainCommands {
                         break;
                     };
 
+                    let messages = block.block.messages()
+                        .iter()
+                        .map(|message| {
+                            format!(
+                                "{{ \"hash\": \"{}\", \"size\": {}, \"sign\": \"{}\", \"author\": \"{}\" }}",
+                                message.hash().to_base64(),
+                                message.data().len(),
+                                message.sign().to_base64(),
+                                message.verify()
+                                    .map(|(_, verifying_key)| verifying_key.to_base64())
+                                    .unwrap_or_else(|_| String::from("-"))
+                            )
+                        })
+                        .collect::<Box<[String]>>();
+
                     println!(
-                        "{{ \"hash\": \"{}\", \"timestamp\": {}, \"sign\": \"{}\", \"author\": \"{}\" }}",
+                        "{{ \"hash\": \"{}\", \"timestamp\": {}, \"sign\": \"{}\", \"messages\": [{}] }}",
                         block.block.hash().to_base64(),
                         block.block.timestamp().unix_timestamp(),
                         block.block.sign().to_base64(),
-                        block.verifying_key.to_base64()
+                        messages.join(", ")
                     );
                 }
             }
@@ -516,6 +535,8 @@ impl BlockchainCommands {
                 };
 
                 let mut node = Node::default();
+
+                node.add_validator(root_block, signing_key.clone());
 
                 let tracker = match storage {
                     Some(storage) => Tracker::from_storage(storage),
