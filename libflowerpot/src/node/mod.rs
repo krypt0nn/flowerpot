@@ -186,11 +186,6 @@ pub struct Node {
     /// `[root_block] => [signing_key]`
     validators: HashMap<Hash, SigningKey>,
 
-    /// Table of pending messages which are meant to be added into a new block.
-    ///
-    /// `[root_block] => ([hash] => [message])`
-    pending_messages: HashMap<Hash, HashMap<Hash, Message>>,
-
     /// Table of blockchain history trackers which are used to keep track of
     /// blocks history and, if possible, query messages and other data.
     ///
@@ -396,9 +391,17 @@ impl Node {
         #[cfg(feature = "tracing")]
         tracing::info!("starting the node");
 
+        // Prepare pending messages table.
+        let mut pending_messages = HashMap::with_capacity(self.trackers.len());
+
+        for root_block in self.trackers.keys().copied() {
+            pending_messages.insert(root_block, HashMap::new());
+        }
+
+        // Create the node handler.
         let handler = NodeHandler {
             streams: Arc::new(RwLock::new(HashMap::with_capacity(self.streams.len()))),
-            pending_messages: Arc::new(RwLock::new(self.pending_messages)),
+            pending_messages: Arc::new(RwLock::new(pending_messages)),
             trackers: Arc::new(Mutex::new(self.trackers)),
             options: Arc::new(options)
         };
