@@ -22,34 +22,30 @@ use std::net::{SocketAddr, Ipv6Addr, TcpStream, TcpListener};
 use anyhow::Context;
 use clap::Subcommand;
 
-use rand_chacha::ChaCha20Rng;
-use rand_chacha::rand_core::{RngCore, SeedableRng};
-
-use libflowerpot::crypto::base64;
-use libflowerpot::crypto::hash::Hash;
-use libflowerpot::crypto::sign::SigningKey;
-use libflowerpot::crypto::key_exchange::SecretKey;
-use libflowerpot::block::{Block, BlockContent};
-use libflowerpot::storage::Storage;
-use libflowerpot::storage::sqlite_storage::SqliteStorage;
-use libflowerpot::protocol::network::{
+use flowerpot::crypto::base64;
+use flowerpot::crypto::hash::Hash;
+use flowerpot::crypto::sign::{SigningKey, VerifyingKey};
+use flowerpot::crypto::key_exchange::SecretKey;
+use flowerpot::block::Block;
+use flowerpot::storage::Storage;
+use flowerpot::storage::sqlite_storage::SqliteStorage;
+use flowerpot::protocol::network::{
     PacketStream, PacketStreamOptions, PacketStreamEncryption
 };
-use libflowerpot::viewer::BatchedViewer;
-use libflowerpot::node::{Node, NodeOptions};
+use flowerpot::viewer::BatchedViewer;
+use flowerpot::node::{Node, NodeOptions};
+use flowerpot::node::tracker::Tracker;
 
 #[derive(Subcommand)]
 pub enum BlockchainCommands {
     /// Create new flowerpot blockchain.
     Create {
-        /// Seed for random numbers generator. If unset, then system-provided
-        /// entropy is used.
+        /// Seed for random numbers generator.
         #[arg(short = 'r', long, alias = "rand", alias = "random")]
         seed: Option<u64>,
 
-        /// Signing key used to create the blockchain.
-        ///
-        /// If not specified then randomly generated key is used.
+        /// Signing key used to create the chain. If not specified then randomly
+        /// generated key is used.
         #[arg(short = 'k', long, alias = "secret", alias = "key")]
         signing_key: Option<String>,
 
@@ -60,8 +56,7 @@ pub enum BlockchainCommands {
 
     /// Synchronize local flowerpot blockchain storage with remote nodes.
     Sync {
-        /// Seed for random numbers generator. If unset, then system-provided
-        /// entropy is used.
+        /// Seed for random numbers generator.
         #[arg(short = 'r', long, alias = "rand", alias = "random")]
         seed: Option<u64>,
 
@@ -69,6 +64,11 @@ pub enum BlockchainCommands {
         /// root block of the provided storage will be used.
         #[arg(short = 'b', long, alias = "root")]
         root_block: Option<String>,
+
+        /// Verifying key of the flowerpot blockchain. If unset, signing key
+        /// of the root block of the provided storage will be used.
+        #[arg(short = 'v', long, alias = "validator")]
+        verifying_key: Option<String>,
 
         /// Path to the sqlite storage database.
         #[arg(short = 's', long, alias = "path")]
@@ -85,8 +85,7 @@ pub enum BlockchainCommands {
 
     /// View blocks of the flowerpot blockchain.
     View {
-        /// Seed for random numbers generator. If unset, then system-provided
-        /// entropy is used.
+        /// Seed for random numbers generator.
         #[arg(short = 'r', long, alias = "rand", alias = "random")]
         seed: Option<u64>,
 
@@ -94,6 +93,11 @@ pub enum BlockchainCommands {
         /// root block of the provided storage will be used.
         #[arg(short = 'b', long, alias = "root")]
         root_block: Option<String>,
+
+        /// Verifying key of the flowerpot blockchain. If unset, signing key
+        /// of the root block of the provided storage will be used.
+        #[arg(short = 'v', long, alias = "validator")]
+        verifying_key: Option<String>,
 
         /// Path to the sqlite storage database.
         #[arg(short = 's', long, alias = "path")]
@@ -120,8 +124,7 @@ pub enum BlockchainCommands {
 
     /// Serve flowerpot blockchain.
     Serve {
-        /// Seed for random numbers generator. If unset, then system-provided
-        /// entropy is used.
+        /// Seed for random numbers generator.
         #[arg(short = 'r', long, alias = "rand", alias = "random")]
         seed: Option<u64>,
 
@@ -129,6 +132,10 @@ pub enum BlockchainCommands {
         /// root block of the provided storage will be used.
         #[arg(short = 'b', long, alias = "root")]
         root_block: Option<String>,
+
+        /// Signing key of a validator node.
+        #[arg(short = 'v', long = "signing-key", alias = "validator")]
+        signing_key: String,
 
         /// Path to the sqlite storage database. If unset, thin client
         /// is started.
@@ -138,13 +145,6 @@ pub enum BlockchainCommands {
         /// Address of remote node to connect to.
         #[arg(short = 'n', long = "node", alias = "connect")]
         nodes: Vec<String>,
-
-        /// Signing key of a validator node.
-        ///
-        /// If specified, the local node will run the blocks validator to create
-        /// new blocks and approve blocks made by other validators.
-        #[arg(short = 'v', long = "signing-key", alias = "validator")]
-        signing_keys: Vec<String>,
 
         /// Local address to listen to incoming TCP connections.
         #[arg(
@@ -180,11 +180,6 @@ impl BlockchainCommands {
                         .context("failed to create parent folder for the storage database")?;
                 }
 
-                let mut rng = match seed {
-                    Some(seed) => ChaCha20Rng::seed_from_u64(seed),
-                    None => ChaCha20Rng::from_entropy()
-                };
-
                 let signing_key = match signing_key {
                     Some(signing_key) => {
                         match SigningKey::from_base64(signing_key) {
@@ -193,32 +188,35 @@ impl BlockchainCommands {
                         }
                     }
 
-                    None => SigningKey::random(&mut rng)
+                    None => SigningKey::random(&mut super::safe_rng(seed))
                 };
 
                 let storage = SqliteStorage::open(storage)
                     .context("failed to create sqlite storage")?;
 
-                let mut root_block_seed = [0; 32];
-
-                rng.fill_bytes(&mut root_block_seed);
-
-                let block = Block::new(
-                    &signing_key,
-                    Hash::default(),
-                    BlockContent::data(root_block_seed)
-                ).context("failed to create new block")?;
+                let block = Block::create_root(&signing_key)
+                    .context("failed to create new block")?;
 
                 storage.write_block(&block)
-                    .context("failed to write new block to the database storage")?;
+                    .map_err(|err| {
+                        anyhow::anyhow!(err.to_string())
+                            .context("failed to write new block to the database storage")
+                    })?;
 
                 println!("New blockchain created!");
-                println!("     Root block: {}", block.current_hash().to_base64());
+                println!("     Root block: {}", block.hash().to_base64());
                 println!("    Signing key: {}", signing_key.to_base64());
                 println!("  Verifying key: {}", signing_key.verifying_key().to_base64());
             }
 
-            Self::Sync { seed, root_block, storage, nodes, no_encryption } => {
+            Self::Sync {
+                seed,
+                root_block,
+                verifying_key,
+                storage,
+                nodes,
+                no_encryption
+            } => {
                 let storage = SqliteStorage::open(storage)
                     .context("failed to open sqlite storage")?;
 
@@ -227,16 +225,37 @@ impl BlockchainCommands {
                         .ok_or_else(|| anyhow::anyhow!("invalid root block"))?,
 
                     None => storage.root_block()
-                        .context("failed to query root block of the blockchain from the sqlite storage")?
+                        .map_err(|err| {
+                            anyhow::anyhow!(err.to_string())
+                                .context("failed to query root block of the blockchain from the sqlite storage")
+                        })?
                         .ok_or_else(|| anyhow::anyhow!("root block is missing in the sqlite storage"))?
                 };
 
-                let mut rng = match seed {
-                    Some(seed) => ChaCha20Rng::seed_from_u64(seed),
-                    None => ChaCha20Rng::from_entropy()
+                let verifying_key = match verifying_key {
+                    Some(verifying_key) => VerifyingKey::from_base64(verifying_key)
+                        .ok_or_else(|| anyhow::anyhow!("invalid verifying key"))?,
+
+                    None => {
+                        let root_block = storage.read_block(&root_block)
+                            .map_err(|err| {
+                                anyhow::anyhow!(err.to_string())
+                                    .context("failed to query root block of the blockchain from the sqlite storage")
+                            })?
+                            .ok_or_else(|| anyhow::anyhow!("root block is missing in the sqlite storage"))?;
+
+                        let (is_valid, verifying_key) = root_block.verify()
+                            .context("failed to verify root block")?;
+
+                        if !is_valid {
+                            anyhow::bail!("root block stored in sqlite storage is invalid");
+                        }
+
+                        verifying_key
+                    }
                 };
 
-                let secret_key = SecretKey::random(&mut rng);
+                let secret_key = SecretKey::random(&mut super::safe_rng(seed));
 
                 let options = PacketStreamOptions {
                     encryption_algorithms: if no_encryption {
@@ -250,7 +269,11 @@ impl BlockchainCommands {
                     }
                 };
 
-                let mut node = Node::from_storage(root_block, storage.clone());
+                let mut node = Node::default();
+
+                let tracker = Tracker::from_storage(storage.clone());
+
+                node.add_tracker(tracker, Some(root_block), Some(verifying_key));
 
                 for address in nodes {
                     println!("connecting to {address}...");
@@ -272,28 +295,35 @@ impl BlockchainCommands {
 
                 println!("synchronizing blockchain data...");
 
-                node.sync().context("failed to synchronize blockchain data")?;
+                node.sync().map_err(|err| {
+                    anyhow::anyhow!(err.to_string())
+                        .context("failed to synchronize blockchain data")
+                })?;
 
                 let root_block = storage.root_block()
-                    .context("failed to get root block of the blockchain")?
+                    .map_err(|err| {
+                        anyhow::anyhow!(err.to_string())
+                            .context("failed to get root block of the blockchain")
+                    })?
                     .map(|block| block.to_base64());
 
                 let tail_block = storage.tail_block()
-                    .context("failed to get tail block of the blockchain")?
+                    .map_err(|err| {
+                        anyhow::anyhow!(err.to_string())
+                            .context("failed to get tail block of the blockchain")
+                    })?
                     .map(|block| block.to_base64());
-
-                let total_blocks = storage.blocks().count();
 
                 println!();
                 println!("Blockchain synchronized!");
                 println!("    Root block: {}", root_block.unwrap_or_else(|| String::from("-")));
                 println!("    Tail block: {}", tail_block.unwrap_or_else(|| String::from("-")));
-                println!("  Total blocks: {total_blocks}");
             }
 
             Self::View {
                 seed,
                 root_block,
+                verifying_key,
                 storage,
                 nodes,
                 no_encryption,
@@ -316,19 +346,46 @@ impl BlockchainCommands {
 
                     None => match &storage {
                         Some(storage) => storage.root_block()
-                            .context("failed to query root block of the blockchain from the sqlite storage")?
+                            .map_err(|err| {
+                                anyhow::anyhow!(err.to_string())
+                                    .context("failed to query root block of the blockchain from the sqlite storage")
+                            })?
                             .ok_or_else(|| anyhow::anyhow!("root block is missing in the sqlite storage"))?,
 
                         None => anyhow::bail!("either root block hash or storage path must be provided")
                     }
                 };
 
-                let mut rng = match seed {
-                    Some(seed) => ChaCha20Rng::seed_from_u64(seed),
-                    None => ChaCha20Rng::from_entropy()
+                let verifying_key = match verifying_key {
+                    Some(verifying_key) => VerifyingKey::from_base64(verifying_key)
+                        .ok_or_else(|| anyhow::anyhow!("invalid verifying key"))?,
+
+                    None => {
+                        match &storage {
+                            Some(storage) => {
+                                let root_block = storage.read_block(&root_block)
+                                    .map_err(|err| {
+                                        anyhow::anyhow!(err.to_string())
+                                            .context("failed to query root block of the blockchain from the sqlite storage")
+                                    })?
+                                    .ok_or_else(|| anyhow::anyhow!("root block is missing in the sqlite storage"))?;
+
+                                let (is_valid, verifying_key) = root_block.verify()
+                                    .context("failed to verify root block")?;
+
+                                if !is_valid {
+                                    anyhow::bail!("root block stored in sqlite storage is invalid");
+                                }
+
+                                verifying_key
+                            }
+
+                            None => anyhow::bail!("can't obtain verifying key without storage")
+                        }
+                    }
                 };
 
-                let secret_key = SecretKey::random(&mut rng);
+                let secret_key = SecretKey::random(&mut super::safe_rng(seed));
 
                 let options = PacketStreamOptions {
                     encryption_algorithms: if no_encryption {
@@ -366,8 +423,14 @@ impl BlockchainCommands {
                     streams.push(stream);
                 }
 
-                let mut viewer = BatchedViewer::open(streams.iter_mut(), root_block)
-                    .context("failed to open batched flowerpot blockchain viewer")?;
+                let mut viewer = BatchedViewer::open(
+                    streams.iter_mut(),
+                    root_block,
+                    verifying_key
+                ).map_err(|err| {
+                    anyhow::anyhow!(err.to_string())
+                        .context("failed to open batched flowerpot blockchain viewer")
+                })?;
 
                 loop {
                     let block = match &storage {
@@ -375,13 +438,18 @@ impl BlockchainCommands {
                         None => viewer.forward()
                     };
 
-                    let Some(block) = block.context("failed to query the next blockchain block")? else {
+                    let block = block.map_err(|err| {
+                        anyhow::anyhow!(err.to_string())
+                            .context("failed to query the next blockchain block")
+                    })?;
+
+                    let Some(block) = block else {
                         break;
                     };
 
                     println!(
                         "{{ \"hash\": \"{}\", \"timestamp\": {}, \"sign\": \"{}\", \"author\": \"{}\" }}",
-                        block.block.current_hash().to_base64(),
+                        block.block.hash().to_base64(),
                         block.block.timestamp().unix_timestamp(),
                         block.block.sign().to_base64(),
                         block.verifying_key.to_base64()
@@ -392,9 +460,9 @@ impl BlockchainCommands {
             Self::Serve {
                 seed,
                 root_block,
+                signing_key,
                 storage,
                 nodes,
-                signing_keys,
                 local_addr,
                 no_encryption,
                 no_sync
@@ -416,19 +484,21 @@ impl BlockchainCommands {
 
                     None => match &storage {
                         Some(storage) => storage.root_block()
-                            .context("failed to query root block of the blockchain from the sqlite storage")?
+                            .map_err(|err| {
+                                anyhow::anyhow!(err.to_string())
+                                    .context("failed to query root block of the blockchain from the sqlite storage")
+                            })?
                             .ok_or_else(|| anyhow::anyhow!("root block is missing in the sqlite storage"))?,
 
                         None => anyhow::bail!("either root block hash or storage path must be provided")
                     }
                 };
 
-                let mut rng = match seed {
-                    Some(seed) => ChaCha20Rng::seed_from_u64(seed),
-                    None => ChaCha20Rng::from_entropy()
+                let Some(signing_key) = SigningKey::from_base64(signing_key) else {
+                    anyhow::bail!("invalid validator signign key");
                 };
 
-                let secret_key = SecretKey::random(&mut rng);
+                let secret_key = SecretKey::random(&mut super::safe_rng(seed));
 
                 let listener = TcpListener::bind(local_addr)
                     .context("failed to bind TCP listener to the provided local address")?;
@@ -445,10 +515,18 @@ impl BlockchainCommands {
                     }
                 };
 
-                let mut node = match storage {
-                    Some(storage) => Node::from_storage(root_block, storage),
-                    None => Node::new(root_block)
+                let mut node = Node::default();
+
+                let tracker = match storage {
+                    Some(storage) => Tracker::from_storage(storage),
+                    None => Tracker::default()
                 };
+
+                node.add_tracker(
+                    tracker,
+                    Some(root_block),
+                    Some(signing_key.verifying_key())
+                );
 
                 for address in nodes {
                     println!("connecting to {address}...");
@@ -468,23 +546,22 @@ impl BlockchainCommands {
                     node.add_stream(stream);
                 }
 
-                for signing_key in signing_keys {
-                    let Some(signing_key) = SigningKey::from_base64(signing_key) else {
-                        anyhow::bail!("invalid validator signign key");
-                    };
-
-                    node.add_validator(signing_key);
-                }
-
                 if !no_sync {
                     println!("synchronizing blockchain data...");
 
-                    node.sync().context("failed to synchronize blockchain data")?;
+                    node.sync().map_err(|err| {
+                        anyhow::anyhow!(err.to_string())
+                            .context("failed to synchronize blockchain data")
+                    })?;
                 }
 
                 println!("starting the node...");
 
-                let handler = node.start(NodeOptions::default())?;
+                let handler = node.start(NodeOptions::default())
+                    .map_err(|err| {
+                        anyhow::anyhow!(err.to_string())
+                            .context("failed to start node")
+                    })?;
 
                 println!(
                     "node started at {local_addr} with root block {}",

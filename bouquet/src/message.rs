@@ -18,52 +18,45 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::{Instant, Duration};
 
 use anyhow::Context;
 use clap::Subcommand;
 
-use rand_chacha::ChaCha20Rng;
-use rand_chacha::rand_core::{SeedableRng};
-
-use libflowerpot::crypto::base64;
-use libflowerpot::crypto::hash::Hash;
-use libflowerpot::crypto::sign::SigningKey;
-use libflowerpot::crypto::key_exchange::SecretKey;
-use libflowerpot::transaction::Transaction;
-use libflowerpot::storage::sqlite_storage::SqliteStorage;
-use libflowerpot::protocol::network::{
+use flowerpot::crypto::base64;
+use flowerpot::crypto::hash::Hash;
+use flowerpot::crypto::sign::SigningKey;
+use flowerpot::crypto::key_exchange::SecretKey;
+use flowerpot::message::Message;
+use flowerpot::protocol::network::{
     PacketStream, PacketStreamOptions, PacketStreamEncryption
 };
-use libflowerpot::node::{Node, NodeOptions};
+use flowerpot::node::{Node, NodeOptions};
 
 #[derive(Subcommand)]
-pub enum TransactionCommands {
-    /// Create new flowerpot blockchain transaction.
+pub enum MessageCommands {
+    /// Create new flowerpot message.
     Create {
-        /// Seed for random numbers generator. If unset, then system-provided
-        /// entropy is used.
+        /// Seed for random numbers generator.
         #[arg(short = 'r', long, alias = "rand", alias = "random")]
         seed: Option<u64>,
 
-        /// Signing key of the transaction's author. If not specified then
-        /// randomly generated key is used.
+        /// Signing key of the message author. If not specified then randomly
+        /// generated key is used.
         #[arg(short = 'k', long, alias = "secret", alias = "key")]
         signing_key: Option<String>,
 
-        /// Content of the transaction. If not specified, then stdin is read.
+        /// Content of the message. If not specified, then stdin is read.
         #[arg(short = 'd', long, alias = "source", alias = "content")]
         data: Option<String>
     },
 
-    /// Send transaction to the flowerpot blockchain network.
+    /// Send message to the flowerpot network.
     Send {
-        /// Seed for random numbers generator. If unset, then system-provided
-        /// entropy is used.
+        /// Seed for random numbers generator.
         #[arg(short = 'r', long, alias = "rand", alias = "random")]
         seed: Option<u64>,
 
-        /// Hash of the root block of the flowerpot blockchain.
+        /// Hash of the root block of the flowerpot chain.
         #[arg(short = 'b', long, alias = "root")]
         root_block: String,
 
@@ -71,30 +64,20 @@ pub enum TransactionCommands {
         #[arg(short = 'n', long = "node", alias = "connect")]
         nodes: Vec<String>,
 
-        /// Flowerpot blockchain transaction. If unset, then stdin value will be
-        /// read.
+        /// Flowerpot message. If unset, then stdin value will be read.
         #[arg(short = 't', long)]
-        transaction: Option<String>,
+        message: Option<String>,
 
         /// Disable streams encryption.
         #[arg(long, alias = "disable-encryption")]
-        no_encryption: bool,
-
-        /// Amount of seconds to wait for transaction to appear in the network.
-        #[arg(long, alias = "wait", alias = "timeout", default_value_t = 10)]
-        wait_timeout: u64
+        no_encryption: bool
     }
 }
 
-impl TransactionCommands {
+impl MessageCommands {
     pub fn run(self) -> anyhow::Result<()> {
         match self {
             Self::Create { seed, signing_key, data } => {
-                let mut rng = match seed {
-                    Some(seed) => ChaCha20Rng::seed_from_u64(seed),
-                    None => ChaCha20Rng::from_entropy()
-                };
-
                 let signing_key = match signing_key {
                     Some(signing_key) => {
                         match SigningKey::from_base64(signing_key) {
@@ -103,7 +86,7 @@ impl TransactionCommands {
                         }
                     }
 
-                    None => SigningKey::random(&mut rng)
+                    None => SigningKey::random(&mut crate::safe_rng(seed))
                 };
 
                 let data = match data {
@@ -117,53 +100,47 @@ impl TransactionCommands {
                     }
                 };
 
-                let trasaction = Transaction::create(signing_key, data)
-                    .context("failed to create transaction")?;
+                let message = Message::create(signing_key, data)
+                    .context("failed to create message")?;
 
-                let transaction = base64::encode(trasaction.to_bytes());
+                let message = base64::encode(message.to_bytes());
 
-                std::io::stdout().write_all(transaction.as_bytes())?;
+                std::io::stdout().write_all(message.as_bytes())?;
             }
 
             Self::Send {
                 seed,
                 root_block,
                 nodes,
-                transaction,
-                no_encryption,
-                wait_timeout
+                message,
+                no_encryption
             } => {
                 let root_block = Hash::from_base64(root_block)
                     .ok_or_else(|| anyhow::anyhow!("invalid root block"))?;
 
-                let transaction = match transaction {
-                    Some(transaction) => {
-                        let transaction = base64::decode(transaction)
-                            .context("failed to decode transaction")?;
+                let message = match message {
+                    Some(message) => {
+                        let message = base64::decode(message)
+                            .context("failed to decode message")?;
 
-                        Transaction::from_bytes(&transaction)
-                            .context("invalid transaction")?
+                        Message::from_bytes(&message)
+                            .context("invalid message")?
                     }
 
                     None => {
-                        let mut transaction = Vec::new();
+                        let mut message = Vec::new();
 
-                        std::io::stdin().read_to_end(&mut transaction)?;
+                        std::io::stdin().read_to_end(&mut message)?;
 
-                        let transaction = base64::decode(transaction)
-                            .context("failed to decode transaction")?;
+                        let message = base64::decode(message)
+                            .context("failed to decode message")?;
 
-                        Transaction::from_bytes(&transaction)
-                            .context("invalid transaction")?
+                        Message::from_bytes(&message)
+                            .context("invalid message")?
                     }
                 };
 
-                let mut rng = match seed {
-                    Some(seed) => ChaCha20Rng::seed_from_u64(seed),
-                    None => ChaCha20Rng::from_entropy()
-                };
-
-                let secret_key = SecretKey::random(&mut rng);
+                let secret_key = SecretKey::random(&mut crate::safe_rng(seed));
 
                 let options = PacketStreamOptions {
                     encryption_algorithms: if no_encryption {
@@ -177,7 +154,7 @@ impl TransactionCommands {
                     }
                 };
 
-                let mut node = Node::<SqliteStorage>::new(root_block);
+                let mut node = Node::default();
 
                 for address in nodes {
                     println!("connecting to {address}...");
@@ -200,38 +177,17 @@ impl TransactionCommands {
                 println!("starting the node...");
 
                 let handler = node.start(NodeOptions {
-                    accept_transactions: true,
+                    accept_messages: true,
                     accept_blocks: false,
                     ..NodeOptions::default()
-                })?;
+                }).map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-                println!("sending transaction...");
+                println!("sending message...");
 
-                let hash = *transaction.hash();
+                handler.send_message(root_block, message);
 
-                handler.send_transaction(transaction);
-                handler.ask_pending_transactions();
-
-                let now = Instant::now();
-                let mut last_repeat = Instant::now();
-
-                while !handler.pending_transactions().contains_key(&hash)
-                    && now.elapsed().as_secs() < wait_timeout
-                {
-                    if last_repeat.elapsed().as_secs() >= 5 {
-                        handler.ask_pending_transactions();
-
-                        last_repeat = Instant::now();
-                    }
-
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-
-                if handler.pending_transactions().contains_key(&hash) {
-                    println!("transaction accepted by the network");
-                } else {
-                    println!("transaction was not accepted by the network");
-                }
+                // TODO: some sort of .wait() method on the handler.
+                std::thread::sleep(std::time::Duration::from_secs(3));
             }
         }
 

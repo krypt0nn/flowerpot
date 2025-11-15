@@ -20,24 +20,20 @@ use std::io::{Read, Write};
 
 use clap::Subcommand;
 
-use rand_chacha::ChaCha20Rng;
-use rand_chacha::rand_core::{SeedableRng};
-
-use libflowerpot::crypto::sign::SigningKey;
+use flowerpot::crypto::sign::SigningKey;
 
 #[derive(Subcommand)]
 pub enum KeypairCommands {
-    /// Create new flowerpot blockchain signing key.
+    /// Create new flowerpot signing key.
     Create {
-        /// Seed for random numbers generator. If unset, then system-provided
-        /// entropy is used.
+        /// Seed for random numbers generator.
         #[arg(short = 'r', long, alias = "rand", alias = "random")]
         seed: Option<u64>
     },
 
-    /// Export verifying key from the flowerpot's signing key.
+    /// Export verifying key from a flowerpot signing key.
     Export {
-        /// Signing key of the flowerpot blockchain.
+        /// Flowerpot signing key. If unset, stdin value is read.
         #[arg(short = 'k', long, alias = "secret", alias = "key")]
         signing_key: Option<String>
     }
@@ -47,12 +43,7 @@ impl KeypairCommands {
     pub fn run(self) -> anyhow::Result<()> {
         match self {
             Self::Create { seed } => {
-                let mut rng = match seed {
-                    Some(seed) => ChaCha20Rng::seed_from_u64(seed),
-                    None => ChaCha20Rng::from_entropy()
-                };
-
-                let signing_key = SigningKey::random(&mut rng);
+                let signing_key = SigningKey::random(&mut super::safe_rng(seed));
 
                 std::io::stdout().write_all(signing_key.to_base64().as_bytes())?;
             }
