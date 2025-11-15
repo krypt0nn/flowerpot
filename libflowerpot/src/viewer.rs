@@ -171,7 +171,7 @@ impl<'stream> Viewer<'stream> {
 
         // Try to read tail block from the storage.
         let tail_block = storage.tail_block()
-            .map_err(|err| ViewerError::Storage(err))?;
+            .map_err(ViewerError::Storage)?;
 
         let Some(tail_block) = tail_block else {
             return Ok(None);
@@ -185,14 +185,14 @@ impl<'stream> Viewer<'stream> {
 
         // Read predecessor of the tail block.
         let prev_block = storage.prev_block(&tail_block)
-            .map_err(|err| ViewerError::Storage(err))?;
+            .map_err(ViewerError::Storage)?;
 
         let Some(prev_block) = prev_block else {
             return Ok(None);
         };
 
         let prev_block = storage.read_block(&prev_block)
-            .map_err(|err| ViewerError::Storage(err))?;
+            .map_err(ViewerError::Storage)?;
 
         let Some(prev_block) = prev_block else {
             return Ok(None);
@@ -393,14 +393,14 @@ impl<'stream> BatchedViewer<'stream> {
 
         // Read the root block from the storage.
         let root_block = storage.root_block()
-            .map_err(|err| ViewerError::Storage(err))?;
+            .map_err(ViewerError::Storage)?;
 
         let Some(root_block) = root_block else {
             return Ok(None);
         };
 
         let root_block = storage.read_block(&root_block)
-            .map_err(|err| ViewerError::Storage(err))?;
+            .map_err(ViewerError::Storage)?;
 
         let Some(root_block) = root_block else {
             return Ok(None);
@@ -520,13 +520,13 @@ impl<'stream> BatchedViewer<'stream> {
         storage: &dyn Storage
     ) -> Result<Option<ValidBlock>, ViewerError> {
         let storage_block = storage.next_block(&self.prev_block)
-            .map_err(|err| ViewerError::Storage(err))?
+            .map_err(ViewerError::Storage)?
             .and_then(|block| {
                 storage.read_block(&block)
                     .transpose()
             })
             .transpose()
-            .map_err(|err| ViewerError::Storage(err))?
+            .map_err(ViewerError::Storage)?
             .map(|block| {
                 match block.verify() {
                     Ok((false, _)) => Ok(None),
