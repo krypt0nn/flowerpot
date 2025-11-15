@@ -55,7 +55,10 @@ pub enum NodeError {
     Storage(StorageError),
 
     #[error(transparent)]
-    Block(BlockDecodeError)
+    Block(BlockDecodeError),
+
+    #[error("couldn't make a blockchain viewer")]
+    NoViewer
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -318,26 +321,13 @@ impl Node {
 
             // Open batched viewer using available connections and known
             // blockchain info.
-            let mut viewer = match tracker.storage() {
+            let viewer = match tracker.storage() {
                 Some(storage) => {
-                    let viewer = BatchedViewer::open_from_storage(
+                    BatchedViewer::open_from_storage(
                         self.streams.values_mut(),
                         storage
-                    ).map_err(NodeError::Viewer)?;
-
-                    match viewer {
-                        Some(viewer) => viewer,
-
-                        // Fallback to network viewer if storage is empty.
-                        None => {
-                            BatchedViewer::open(
-                                self.streams.values_mut(),
-                                root_block,
-                                verifying_key.clone()
-                            ).map_err(NodeError::Viewer)?
-                        }
-                    }
-                }
+                    ).map_err(NodeError::Viewer)?
+                },
 
                 None => {
                     BatchedViewer::open(
@@ -346,6 +336,10 @@ impl Node {
                         verifying_key.clone()
                     ).map_err(NodeError::Viewer)?
                 }
+            };
+
+            let Some(mut viewer) = viewer else {
+                return Err(NodeError::NoViewer);
             };
 
             loop {

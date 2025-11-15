@@ -169,7 +169,7 @@ impl<'stream> Viewer<'stream> {
         // TODO: we need to compare the storage blocks AGAINST the network
         //       blocks to find potential differences!!!
 
-        // Try to read tail block from the storage.
+        // Try to read tail block hash from the storage.
         let tail_block = storage.tail_block()
             .map_err(ViewerError::Storage)?;
 
@@ -177,24 +177,10 @@ impl<'stream> Viewer<'stream> {
             return Ok(None);
         };
 
-        // Create new viewer directly if there's only one block in the storage.
-        if root_block.hash() == &tail_block {
-            return Self::open(stream, root_block.hash(), verifying_key)
-                .map(Some);
-        }
-
-        // Read predecessor of the tail block.
-        let prev_block = storage.prev_block(&tail_block)
+        let tail_block = storage.read_block(&tail_block)
             .map_err(ViewerError::Storage)?;
 
-        let Some(prev_block) = prev_block else {
-            return Ok(None);
-        };
-
-        let prev_block = storage.read_block(&prev_block)
-            .map_err(ViewerError::Storage)?;
-
-        let Some(prev_block) = prev_block else {
+        let Some(tail_block) = tail_block else {
             return Ok(None);
         };
 
@@ -202,8 +188,8 @@ impl<'stream> Viewer<'stream> {
             stream,
             root_block: *root_block.hash(),
             verifying_key,
-            pending_blocks: VecDeque::from([tail_block]),
-            prev_block: (*prev_block.hash(), *prev_block.timestamp())
+            pending_blocks: VecDeque::from([]),
+            prev_block: (*tail_block.hash(), *tail_block.timestamp())
         }))
     }
 
@@ -349,11 +335,13 @@ pub struct BatchedViewer<'stream> {
 impl<'stream> BatchedViewer<'stream> {
     /// Open batched viewer of the blockchain history known to the provided
     /// nodes' packet streams
+    ///
+    /// Return `Ok(None)` if no remote node viewers available.
     pub fn open(
         streams: impl IntoIterator<Item = &'stream mut PacketStream>,
         root_block: impl Into<Hash>,
         verifying_key: impl Into<VerifyingKey>
-    ) -> Result<Self, ViewerError> {
+    ) -> Result<Option<Self>, ViewerError> {
         let root_block: Hash = root_block.into();
         let verifying_key: VerifyingKey = verifying_key.into();
 
@@ -367,20 +355,25 @@ impl<'stream> BatchedViewer<'stream> {
             )?);
         }
 
-        Ok(Self {
+        if viewers.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(Self {
             viewers,
             root_block,
             verifying_key,
             prev_block: Hash::ZERO
-        })
+        }))
     }
 
     /// Open batched viewer using blocks stored in the provided storage. We will
     /// assume that all the blocks in that storage are validates and that the
     /// provided streams' endpoints have the same history.
     ///
-    /// Return `Ok(None)` if storage doesn't have any blocks or no remote node
-    /// viewers available.
+    /// Return `Ok(None)` if storage doesn't have any blocks. Viewer will be
+    /// returned even if no streams are available (in that case only `storage`
+    /// blocks will be returned).
     ///
     /// **Security notice:** this method will assume that the root block's
     /// signer is the validator of the blockchain.
@@ -422,7 +415,7 @@ impl<'stream> BatchedViewer<'stream> {
             let viewer_prev_block = viewer.prev_block();
 
             // Update the locally stored prev block.
-            if prev_block == Hash::default() {
+            if prev_block == Hash::ZERO {
                 prev_block = *viewer_prev_block;
             }
 
@@ -434,8 +427,17 @@ impl<'stream> BatchedViewer<'stream> {
             viewers.push(viewer);
         }
 
+        // Update prev_block hash to be the tail block of the storage if we
+        // couldn't make any network viewer.
         if viewers.is_empty() {
-            return Ok(None);
+            let tail_block = storage.tail_block()
+                .map_err(ViewerError::Storage)?;
+
+            let Some(tail_block) = tail_block else {
+                return Ok(None);
+            };
+
+            prev_block = tail_block;
         }
 
         Ok(Some(Self {

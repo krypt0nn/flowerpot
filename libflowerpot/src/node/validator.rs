@@ -76,7 +76,7 @@ pub fn run(
         let messages = handler.map_pending_messages_mut(
             root_block,
             |pending_messages| {
-                if pending_messages.len() > min_num {
+                if pending_messages.len() >= min_num {
                     Some(pending_messages.drain()
                         .take(max_num)
                         .collect::<Box<[_]>>())

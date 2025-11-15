@@ -65,7 +65,7 @@ pub enum MessageCommands {
         nodes: Vec<String>,
 
         /// Flowerpot message. If unset, then stdin value will be read.
-        #[arg(short = 't', long)]
+        #[arg(short = 'm', long)]
         message: Option<String>,
 
         /// Disable streams encryption.
