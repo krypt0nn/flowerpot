@@ -118,15 +118,15 @@ network (even with content mirroring if some effort is done).
         - [x] Create new blockchains
         - [x] Connect to a blockchain and monitor its activity
         - [x] Show blockchain status
-- [ ] Get rid of validators system
-    - [ ] Rename transactions into messages
-    - [ ] Remove multiple block types and keep only one with list of messages
-    - [ ] Remove `approvals` field and keep only the block signature
-    - [ ] Update `Storage` trait to know the current history authority instead
+- [x] Get rid of validators system
+    - [x] Rename transactions into messages
+    - [x] Remove multiple block types and keep only one with list of messages
+    - [x] Remove `approvals` field and keep only the block signature
+    - [x] Update `Storage` trait to know the current history authority instead
           of knowing validators at any point in time
-    - [ ] Rework the validation mechanism to just check that the block is issued
+    - [x] Rework the validation mechanism to just check that the block is issued
           by the authority
-    - [ ] Rework the fork choosing mechanism to prefer the *first* issued block
+    - [x] Rework the fork choosing mechanism to prefer the *last* issued block
           by both looking at its creation time and receiving time recorded by
           the local node (double check) to prevent history modifications
 - [ ] Implement gas system
