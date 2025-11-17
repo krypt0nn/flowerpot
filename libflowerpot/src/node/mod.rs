@@ -55,10 +55,7 @@ pub enum NodeError {
     Storage(StorageError),
 
     #[error(transparent)]
-    Block(BlockDecodeError),
-
-    #[error("couldn't make a blockchain viewer")]
-    NoViewer
+    Block(BlockDecodeError)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -339,7 +336,7 @@ impl Node {
             };
 
             let Some(mut viewer) = viewer else {
-                return Err(NodeError::NoViewer);
+                return Ok(());
             };
 
             loop {
