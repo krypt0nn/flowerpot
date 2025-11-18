@@ -132,9 +132,12 @@ pub fn handle(mut state: NodeState) {
             }
         }
 
-        // Read packet from the remote endpoint.
-        // TODO: timeout support
-        let packet = state.stream.recv();
+        // Try to read packet from the remote endpoint.
+        let Some(packet) = state.stream.try_recv().transpose() else {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+
+            continue;
+        };
 
         // Process received packet.
         match packet {

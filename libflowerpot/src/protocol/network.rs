@@ -19,7 +19,7 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::net::TcpStream;
-use std::io::{Read, Write};
+use std::io::{Read, Write, ErrorKind};
 
 #[cfg(feature = "encryption-chacha20")]
 use chacha20::cipher::{KeyIvInit, StreamCipher};
@@ -240,6 +240,7 @@ pub struct PacketStream {
     shared_secret: [u8; 32],
     read_encryptor: Option<PacketStreamEncryptor>,
     write_encryptor: Option<PacketStreamEncryptor>,
+    buf: Vec<u8>,
     peek_queue: VecDeque<Packet>
 }
 
@@ -486,6 +487,12 @@ impl PacketStream {
         }
 
         #[cfg(feature = "tracing")]
+        tracing::trace!("enable non-blocking stream mode");
+
+        stream.set_nonblocking(true)
+            .map_err(PacketStreamError::Stream)?;
+
+        #[cfg(feature = "tracing")]
         tracing::info!(
             ?encryption_algorithm,
             "packet stream connection initialized"
@@ -498,6 +505,7 @@ impl PacketStream {
             shared_secret,
             read_encryptor,
             write_encryptor,
+            buf: Vec::new(),
             peek_queue: VecDeque::new()
         })
     }
@@ -538,7 +546,10 @@ impl PacketStream {
         &self.shared_secret
     }
 
-    /// Send packet.
+    /// Try to send a packet.
+    ///
+    /// This is a blocking method which will return only when the whole packet
+    /// buffer is sent to the remote peer.
     pub fn send(
         &mut self,
         packet: impl AsRef<Packet>
@@ -562,52 +573,109 @@ impl PacketStream {
             encryptor.apply(&mut packet);
         }
 
-        self.stream.write_all(&length)
-            .map_err(PacketStreamError::Stream)?;
+        let mut i = 0;
 
-        self.stream.write_all(&packet)
-            .map_err(PacketStreamError::Stream)?;
+        while i < 4 {
+            match self.stream.write(&length[i..]) {
+                Ok(n) => i += n,
+
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+
+                Err(err) => return Err(PacketStreamError::Stream(err))
+            }
+        }
+
+        i = 0;
+
+        while i < packet.len() {
+            match self.stream.write(&packet[i..]) {
+                Ok(n) => i += n,
+
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+
+                Err(err) => return Err(PacketStreamError::Stream(err))
+            }
+        }
 
         Ok(())
     }
 
-    /// Receive packet.
-    pub fn recv(&mut self) -> Result<Packet, PacketStreamError> {
+    /// Try to receive a packet.
+    ///
+    /// This method will check if remote peer tries to send us a packet, and if
+    /// so, then it will block current thread until the whole packet is read.
+    /// Otherwise, if there's no data to read, the method will return
+    /// immediately with `Ok(None)` and won't block the thread.
+    pub fn try_recv(&mut self) -> Result<Option<Packet>, PacketStreamError> {
+        // Try to peek a packet from the queue.
         if let Some(packet) = self.peek_queue.pop_front() {
-            return Ok(packet);
+            return Ok(Some(packet));
         }
 
-        let mut length = [0; 4];
+        // Try to read a new packet in chunks of 4096 bytes.
+        let mut buf = [0; 4096];
 
-        self.stream.read_exact(&mut length)
-            .map_err(PacketStreamError::Stream)?;
+        loop {
+            let n = self.buf.len();
 
-        if let Some(encryptor) = &mut self.read_encryptor {
-            encryptor.apply(&mut length);
+            // Check if we know size of the upcoming packet.
+            if n > 4 {
+                // Read its size.
+                let length = u32::from_le_bytes([
+                    self.buf[0], self.buf[1], self.buf[2], self.buf[3]
+                ]) as usize;
+
+                // If we already have the whole packet.
+                if n >= length + 4 {
+                    #[cfg(feature = "tracing")]
+                    tracing::trace!(?length, "read packet");
+
+                    // Try to decode it.
+                    let packet = Packet::from_bytes(&self.buf[4..length + 4]);
+
+                    // Remove the packet bytes even if the packet is invalid.
+                    self.buf.drain(..length + 4);
+
+                    // And return it.
+                    return Ok(Some(packet.map_err(PacketStreamError::Packet)?));
+                }
+            }
+
+            // Otherwise if we don't have the whole packet yet we need to read
+            // it from the stream.
+            match self.stream.read(&mut buf) {
+                // If we've read some part of the packet.
+                Ok(n) => {
+                    // Decrypt it if needed.
+                    if let Some(encryptor) = &mut self.read_encryptor {
+                        encryptor.apply(&mut buf[..n]);
+                    }
+
+                    // And write it to the buffer.
+                    self.buf.extend(&buf[..n]);
+                },
+
+                // Otherwise, if stream doesn't contain any more data - then
+                // return from method saying that there's no packet to read yet.
+                Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(None),
+
+                // Propagate the error.
+                Err(err) => return Err(PacketStreamError::Stream(err))
+            }
         }
-
-        let mut packet = vec![0; u32::from_le_bytes(length) as usize];
-
-        #[cfg(feature = "tracing")]
-        tracing::trace!(length = packet.len(), "recv packet");
-
-        self.stream.read_exact(&mut packet)
-            .map_err(PacketStreamError::Stream)?;
-
-        if let Some(encryptor) = &mut self.read_encryptor {
-            encryptor.apply(&mut packet);
-        }
-
-        let packet = Packet::from_bytes(packet)
-            .map_err(PacketStreamError::Packet)?;
-
-        Ok(packet)
     }
 
     /// Receive packets and send them to the provided callback until it returns
     /// `true`. Packet which got `true` from the callback will be returned by
-    /// this method. Other packets will be put into a queue of the `recv`
-    /// method.
+    /// this method. Other packets will be put into a queue of the `try_recv`
+    /// method so they won't be missed.
+    ///
+    /// This is a blocking method. It will try to receive packets from remote
+    /// peer until appropriate one is received.
     ///
     /// This method can be used to search for a requested packet.
     pub fn peek(
@@ -617,7 +685,11 @@ impl PacketStream {
         let mut peek_queue = Vec::new();
 
         loop {
-            let packet = self.recv()?;
+            let Some(packet) = self.try_recv()? else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+
+                continue;
+            };
 
             if callback(&packet) {
                 self.peek_queue.extend(peek_queue);
