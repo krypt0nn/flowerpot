@@ -43,6 +43,9 @@ pub enum PacketStreamError {
     #[error("invalid ecdh public key")]
     InvalidPublicKey,
 
+    #[error("remote party doesn't support any of requested encryption algorithms")]
+    NoSupportedEncryption,
+
     #[error("failed to build data stream encryptor")]
     EncryptorBuildFailed,
 
@@ -192,7 +195,20 @@ pub struct PacketStreamOptions {
     /// > **Note**: encryption is not needed for blockchain applications since
     /// > blockchain by its nature is open for everybody. This option is mainly
     /// > needed to hide your traffic.
-    pub encryption_algorithms: Vec<PacketStreamEncryption>
+    ///
+    /// Default: `[chacha20, chacha12, chacha8]` if chacha20 encryption feature
+    /// is enabled, otherwise `[]` (nothing).
+    pub encryption_algorithms: Vec<PacketStreamEncryption>,
+
+    /// Do not allow stream to be initialized if remote party doesn't support
+    /// any of provided `encryption_algorithms`. If disabled, then connection
+    /// will be established even if there's no encryption both nodes support,
+    /// and connection will not be encrypted.
+    ///
+    /// This option has no effect if `encryption_algorithms` list is empty.
+    ///
+    /// Default: `true`.
+    pub force_encryption: bool
 }
 
 impl Default for PacketStreamOptions {
@@ -207,7 +223,9 @@ impl Default for PacketStreamOptions {
 
                 #[cfg(feature = "encryption-chacha20")]
                 PacketStreamEncryption::ChaCha8
-            ]
+            ],
+
+            force_encryption: true
         }
     }
 }
@@ -387,6 +405,15 @@ impl PacketStream {
 
                 break;
             }
+        }
+
+        // Reject stream building if remote party doesn't support our requested
+        // encryption algorithms and `force_encryption` option is enabled.
+        if encryption_algorithm.is_none()
+            && !options.encryption_algorithms.is_empty()
+            && options.force_encryption
+        {
+            return Err(PacketStreamError::NoSupportedEncryption);
         }
 
         // Prepare read and write encryptors.
