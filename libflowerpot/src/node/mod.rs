@@ -478,6 +478,14 @@ impl NodeHandler {
         self.streams.write().insert(peer_id, sender);
     }
 
+    /// Get list of peer IDs of available packet streams.
+    pub fn streams(&self) -> Box<[[u8; 32]]> {
+        self.streams.read()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     /// Get table of pending messages stored for a blockchain with provided
     /// root block hash and run provided callback with it.
     pub fn map_pending_messages<T>(
