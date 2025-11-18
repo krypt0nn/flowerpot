@@ -266,7 +266,9 @@ impl BlockchainCommands {
                             PacketStreamEncryption::ChaCha12,
                             PacketStreamEncryption::ChaCha8
                         ]
-                    }
+                    },
+
+                    ..PacketStreamOptions::default()
                 };
 
                 let mut node = Node::default();
@@ -396,7 +398,9 @@ impl BlockchainCommands {
                             PacketStreamEncryption::ChaCha12,
                             PacketStreamEncryption::ChaCha8
                         ]
-                    }
+                    },
+
+                    ..PacketStreamOptions::default()
                 };
 
                 let mut streams = Vec::with_capacity(nodes.len());
@@ -531,7 +535,9 @@ impl BlockchainCommands {
                             PacketStreamEncryption::ChaCha12,
                             PacketStreamEncryption::ChaCha8
                         ]
-                    }
+                    },
+
+                    ..PacketStreamOptions::default()
                 };
 
                 let mut node = Node::default();

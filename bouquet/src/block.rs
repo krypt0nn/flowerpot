@@ -180,7 +180,9 @@ impl BlockCommands {
                             PacketStreamEncryption::ChaCha12,
                             PacketStreamEncryption::ChaCha8
                         ]
-                    }
+                    },
+
+                    ..PacketStreamOptions::default()
                 };
 
                 let mut node = Node::default();
