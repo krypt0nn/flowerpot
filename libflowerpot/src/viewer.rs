@@ -18,9 +18,11 @@
 
 use std::collections::VecDeque;
 
+use crate::crypto::base64;
 use crate::crypto::hash::Hash;
-use crate::crypto::sign::{VerifyingKey, SignatureError};
+use crate::crypto::sign::SignatureError;
 use crate::block::Block;
+use crate::address::Address;
 use crate::storage::{Storage, StorageError};
 use crate::protocol::packets::Packet;
 use crate::protocol::network::{PacketStream, PacketStreamError};
@@ -39,279 +41,214 @@ pub enum ViewerError {
     #[error("stream returned invalid block")]
     InvalidBlock,
 
+    #[error("stream returned block belonging to a different blockchain")]
+    WrongAddress,
+
     #[error("stream returned invalid history")]
-    InvalidHistory,
-
-    #[error("viewers within the batched viewer are out of sync")]
-    BatchedViewerOutOfSync
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidBlock {
-    pub block: Block,
-    pub verifying_key: VerifyingKey
+    InvalidHistory
 }
 
 /// Viewer is a helper struct that uses the underlying packet stream connection
 /// to traverse blockchain history known to the remote node.
-///
-/// The consensus is that:
-///
-/// 1. All the blocks of the blockchain must be signed by a single validator.
-/// 2. Timestamp of the following block must be greater or equal to the previous
-///    block's timestamp.
-/// 3. If multiple following block candidates available, then one with the
-///    least timestamp value is chosen, with respect to (2). This is needed to
-///    prevent massive history rewrites.
 pub struct Viewer<'stream> {
     stream: &'stream mut PacketStream,
 
-    /// Root block of the blockchain.
-    root_block: Hash,
+    /// Blockchain address.
+    address: Address,
 
-    /// Verifying key of the blockchain validator.
-    verifying_key: VerifyingKey,
+    /// Hash of the previously fetched block.
+    last_fetched_block: Hash,
 
-    /// List of blocks we need to fetch.
-    pending_blocks: VecDeque<Hash>,
+    /// Prefetched blockchain history.
+    prefetch_history: VecDeque<Block>,
 
-    /// Hash of the previously fetched block and its creation timestamp.
-    prev_block: (Hash, time::UtcDateTime)
+    /// Maximal amount of history blocks to prefetch. Prefetched blocks will be
+    /// stored in RAM until used, and blocks can potentially contain large
+    /// inline blobs, so it's not recommended to set this value really high.
+    max_prefetch_length: u64
 }
 
 impl<'stream> Viewer<'stream> {
-    const MAX_HISTORY_LENGTH: u64 = 1024;
-
-    /// Open viewer of the blockchain history known to the node with provided
-    /// packet stream connection.
-    pub fn open(
+    /// Create new viewer of the blockchain history known to the node with
+    /// provided packet stream connection.
+    pub fn new(
         stream: &'stream mut PacketStream,
-        root_block: impl Into<Hash>,
-        verifying_key: impl Into<VerifyingKey>
-    ) -> Result<Self, ViewerError> {
-        let root_block: Hash = root_block.into();
-        let verifying_key: VerifyingKey = verifying_key.into();
-
-        // Ask for the root block of the blockchain.
-        stream.send(&Packet::AskBlock {
-            root_block,
-            target_block: root_block
-        }).map_err(ViewerError::PacketStream)?;
-
-        let root_block_packet = stream.peek(|packet| {
-            if let Packet::Block {
-                root_block: received_root_block,
-                block
-            } = packet {
-                return received_root_block == &root_block && block.is_root();
-            }
-
-            false
-        }).map_err(ViewerError::PacketStream)?;
-
-        let Packet::Block { block, .. } = root_block_packet else {
-            return Err(ViewerError::InvalidBlock);
-        };
-
-        // Verify the root block and obtain its author.
-        let (is_valid, block_verifying_key) = block.verify()?;
-
-        if !is_valid
-            || !block.is_root()
-            || block.hash() != &root_block
-            || block_verifying_key != verifying_key
-        {
-            return Err(ViewerError::InvalidBlock);
-        }
-
-        Ok(Self {
+        address: Address
+    ) -> Self {
+        Self {
             stream,
-            root_block,
-            verifying_key,
-            pending_blocks: VecDeque::from([*block.hash()]),
-            prev_block: (*block.prev_hash(), time::UtcDateTime::UNIX_EPOCH)
-        })
-    }
-
-    /// Open viewer using blocks stored in the provided storage. We will assume
-    /// that all the blocks in that storage are verified.
-    ///
-    /// Return `Ok(None)` if storage doesn't have any blocks.
-    ///
-    /// **Security notice:** this method will assume that the root block's
-    /// signer is the validator of the blockchain.
-    pub fn open_from_storage(
-        stream: &'stream mut PacketStream,
-        storage: &dyn Storage
-    )  -> Result<Option<Self>, ViewerError> {
-        // Try to read root block from the storage.
-        //
-        // TODO: can be flattened into iter syntax somehow...
-        let root_block = match storage.root_block() {
-            Ok(Some(root_block)) => match storage.read_block(&root_block) {
-                Ok(Some(root_block)) => root_block,
-
-                Ok(None) => return Ok(None),
-                Err(err) => return Err(ViewerError::Storage(err))
-            }
-
-            Ok(None) => return Ok(None),
-            Err(err) => return Err(ViewerError::Storage(err))
-        };
-
-        // Verify this block.
-        let (is_valid, verifying_key) = root_block.verify()?;
-
-        if !is_valid || !root_block.is_root() {
-            return Ok(None);
+            address,
+            last_fetched_block: Hash::ZERO,
+            prefetch_history: VecDeque::new(),
+            max_prefetch_length: 8
         }
-
-        // TODO: we need to compare the storage blocks AGAINST the network
-        //       blocks to find potential differences!!!
-
-        // Try to read tail block hash from the storage.
-        let tail_block = storage.tail_block()
-            .map_err(ViewerError::Storage)?;
-
-        let Some(tail_block) = tail_block else {
-            return Ok(None);
-        };
-
-        let tail_block = storage.read_block(&tail_block)
-            .map_err(ViewerError::Storage)?;
-
-        let Some(tail_block) = tail_block else {
-            return Ok(None);
-        };
-
-        Ok(Some(Self {
-            stream,
-            root_block: *root_block.hash(),
-            verifying_key,
-            pending_blocks: VecDeque::from([]),
-            prev_block: (*tail_block.hash(), *tail_block.timestamp())
-        }))
     }
 
-    /// Get root block of the viewer's blockchain.
-    #[inline(always)]
-    pub const fn root_block(&self) -> &Hash {
-        &self.root_block
+    /// Set maximal amount of history blocks to fetch from remote node.
+    #[inline]
+    pub fn with_max_prefetch_length(
+        mut self,
+        max_prefetch_length: u64
+    ) -> Self {
+        self.max_prefetch_length = max_prefetch_length;
+
+        self
     }
 
-    /// Get verifying key of the viewer's blockchain validator.
-    #[inline(always)]
-    pub const fn verifying_key(&self) -> &VerifyingKey {
-        &self.verifying_key
+    /// Get blockchain address.
+    #[inline]
+    pub const fn address(&self) -> &Address {
+        &self.address
     }
 
     /// Hash of the previously fetched block.
     ///
     /// This method will return a hash of the block which was fetched by the
     /// last `forward` method call.
-    #[inline(always)]
-    pub const fn prev_block(&self) -> &Hash {
-        &self.prev_block.0
+    #[inline]
+    pub const fn last_fetched_block(&self) -> &Hash {
+        &self.last_fetched_block
     }
 
     /// Request the next block of the blockchain history known to the underlying
     /// node, verify and return it. If we've reached the end of the known
     /// history then `None` is returned.
-    pub fn forward(&mut self) -> Result<Option<ValidBlock>, ViewerError> {
-        // Read the pending block hash.
-        let pending_block = match self.pending_blocks.front() {
-            // Directly if we have pending blocks history.
-            Some(block) => *block,
+    pub fn forward(&mut self) -> Result<Option<Block>, ViewerError> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            address = self.address.to_base64(),
+            last_fetched_block = self.last_fetched_block.to_base64(),
+            "fetch next blockchain block"
+        );
 
-            // Or by asking the network node.
-            None => {
-                // Ask and peak the history packet.
-                self.stream.send(&Packet::AskHistory {
-                    root_block: self.root_block,
-                    since_block: self.prev_block.0,
-                    max_length: Self::MAX_HISTORY_LENGTH
-                }).map_err(ViewerError::PacketStream)?;
+        // If prefetch buffer is empty then try to fill it.
+        if self.prefetch_history.is_empty() {
+            #[cfg(feature = "tracing")]
+            tracing::trace!(
+                address = self.address.to_base64(),
+                last_fetched_block = self.last_fetched_block.to_base64(),
+                local_id = base64::encode(self.stream.local_id()),
+                peer_id = base64::encode(self.stream.peer_id()),
+                "ask remote node to share blockchain history"
+            );
 
-                let history = self.stream.peek(|packet| {
-                    if let Packet::History {
-                        root_block: received_root_block,
-                        since_block: received_since_block,
-                        ..
-                    } = packet {
-                        return received_root_block == &self.root_block
-                            && received_since_block == &self.prev_block.0;
-                    }
+            // Ask remote node to share blockchain history.
+            self.stream.send(&Packet::AskHistory {
+                address: self.address.clone(),
+                since_block: self.last_fetched_block,
+                max_length: self.max_prefetch_length
+            }).map_err(ViewerError::PacketStream)?;
 
-                    false
-                }).map_err(ViewerError::PacketStream)?;
+            #[cfg(feature = "tracing")]
+            tracing::trace!(
+                address = self.address.to_base64(),
+                last_fetched_block = self.last_fetched_block.to_base64(),
+                local_id = base64::encode(self.stream.local_id()),
+                peer_id = base64::encode(self.stream.peer_id()),
+                "waiting for blockchain history packet"
+            );
 
-                let Packet::History { history, .. } = history else {
-                    return Err(ViewerError::InvalidHistory);
-                };
-
-                // We've reached the end of the known history.
-                if history.is_empty() {
-                    return Ok(None);
+            // Wait for the history packet.
+            let history = self.stream.peek(|packet| {
+                if let Packet::History {
+                    address: received_address,
+                    since_block: received_since_block,
+                    ..
+                } = packet {
+                    return received_address == &self.address
+                        && received_since_block == &self.last_fetched_block;
                 }
 
-                // Extend the local history pool and return the first entry
-                // (a pending block).
-                let pending_block = history[0];
+                false
+            }).map_err(ViewerError::PacketStream)?;
 
-                // Extend on full history because the front hash will be removed
-                // lated in the code. This will also prevent missing this hash
-                // in case some of the following code breaks.
-                self.pending_blocks.extend(history);
+            let Packet::History { history, .. } = history else {
+                return Err(ViewerError::InvalidHistory);
+            };
 
-                pending_block
-            }
-        };
+            // Store the prefetch history.
+            self.prefetch_history = history.into_iter()
+                .take(self.max_prefetch_length as usize)
+                .collect();
 
-        // Request and peek the pending block.
-        self.stream.send(Packet::AskBlock {
-            root_block: self.root_block,
-            target_block: pending_block
-        }).map_err(ViewerError::PacketStream)?;
-
-        let packet = self.stream.peek(|packet| {
-            if let Packet::Block {
-                root_block: received_root_block,
-                block: received_block
-            } = packet {
-                return received_root_block == &self.root_block
-                    && received_block.hash() == &pending_block;
-            }
-
-            false
-        }).map_err(ViewerError::PacketStream)?;
-
-        let Packet::Block { block, .. } = packet else {
-            return Err(ViewerError::InvalidBlock);
-        };
-
-        // Decline the block if it doesn't match the previously stored block or
-        // if its creation time is lower than one for the previous block.
-        if block.prev_hash() != &self.prev_block.0
-            || block.timestamp() < &self.prev_block.1
-        {
-            return Err(ViewerError::InvalidBlock);
+            #[cfg(feature = "tracing")]
+            tracing::trace!(
+                address = self.address.to_base64(),
+                last_fetched_block = self.last_fetched_block.to_base64(),
+                prefetch_history = ?self.prefetch_history.iter()
+                    .map(|block| block.hash().to_base64())
+                    .collect::<Vec<String>>(),
+                "updated prefetched history buffer"
+            );
         }
 
-        // Verify the block and its author.
-        let (is_valid, verifying_key) = block.verify()?;
+        // Process the block from prefetched history if it's available.
+        if let Some(block) = self.prefetch_history.pop_front() {
+            #[cfg(feature = "tracing")]
+            tracing::trace!(
+                address = self.address.to_base64(),
+                last_fetched_block = self.last_fetched_block.to_base64(),
+                block_hash = block.hash().to_base64(),
+                "take prefetched block"
+            );
 
-        if !is_valid || verifying_key != self.verifying_key {
-            return Err(ViewerError::InvalidBlock);
+            // Reject block if it doesn't reference previously fetched block.
+            if block.prev_hash() != &self.last_fetched_block {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    address = self.address.to_base64(),
+                    last_fetched_block = self.last_fetched_block.to_base64(),
+                    block_hash = block.hash().to_base64(),
+                    prev_block_hash = block.prev_hash().to_base64(),
+                    "prefetched block has wrong previous block hash"
+                );
+
+                self.prefetch_history.clear();
+
+                return Err(ViewerError::InvalidBlock);
+            }
+
+            // Verify the block signature and derive its blockchain address.
+            let (is_valid, address) = block.verify()?;
+
+            // Reject block if it's invalid.
+            if !is_valid {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    address = self.address.to_base64(),
+                    last_fetched_block = self.last_fetched_block.to_base64(),
+                    block_hash = block.hash().to_base64(),
+                    "prefetched block is invalid"
+                );
+
+                self.prefetch_history.clear();
+
+                return Err(ViewerError::InvalidBlock);
+            }
+
+            // Reject block if it belongs to a different blockchain
+            // (malicious remote client).
+            if address != self.address {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    address = self.address.to_base64(),
+                    last_fetched_block = self.last_fetched_block.to_base64(),
+                    block_hash = block.hash().to_base64(),
+                    "prefetched block belongs to a different blockchain"
+                );
+
+                self.prefetch_history.clear();
+
+                return Err(ViewerError::WrongAddress);
+            }
+
+            // Return valid block.
+            self.last_fetched_block = *block.hash();
+
+            return Ok(Some(block));
         }
 
-        // Shift pending blocks history forward and return obtained block.
-        self.pending_blocks.pop_front();
-        self.prev_block = (*block.hash(), *block.timestamp());
-
-        Ok(Some(ValidBlock {
-            block,
-            verifying_key
-        }))
+        Ok(None)
     }
 }
 
@@ -322,151 +259,46 @@ pub struct BatchedViewer<'stream> {
     /// List of batched network blockchain viewers.
     viewers: Vec<Viewer<'stream>>,
 
-    /// Root block of the blockchain.
-    root_block: Hash,
-
-    /// Verifying key of the blockchain validator.
-    verifying_key: VerifyingKey,
+    /// Blockchain address.
+    address: Address,
 
     /// Hash of the previously fetched block.
-    prev_block: Hash
+    last_fetched_block: Hash
 }
 
 impl<'stream> BatchedViewer<'stream> {
-    /// Open batched viewer of the blockchain history known to the provided
-    /// nodes' packet streams
-    ///
-    /// Return `Ok(None)` if no remote node viewers available.
-    pub fn open(
+    /// Create new batched viewer of the blockchain history known to the
+    /// provided nodes' packet streams.
+    pub fn new(
         streams: impl IntoIterator<Item = &'stream mut PacketStream>,
-        root_block: impl Into<Hash>,
-        verifying_key: impl Into<VerifyingKey>
-    ) -> Result<Option<Self>, ViewerError> {
-        let root_block: Hash = root_block.into();
-        let verifying_key: VerifyingKey = verifying_key.into();
-
+        address: Address
+    ) -> Self {
         let mut viewers = Vec::new();
 
         for stream in streams {
-            viewers.push(Viewer::open(
-                stream,
-                root_block,
-                verifying_key.clone()
-            )?);
+            viewers.push(Viewer::new(stream, address.clone()));
         }
 
-        if viewers.is_empty() {
-            return Ok(None);
-        }
-
-        Ok(Some(Self {
+        Self {
             viewers,
-            root_block,
-            verifying_key,
-            prev_block: Hash::ZERO
-        }))
+            address,
+            last_fetched_block: Hash::ZERO
+        }
     }
 
-    /// Open batched viewer using blocks stored in the provided storage. We will
-    /// assume that all the blocks in that storage are validates and that the
-    /// provided streams' endpoints have the same history.
-    ///
-    /// Return `Ok(None)` if storage doesn't have any blocks. Viewer will be
-    /// returned even if no streams are available (in that case only `storage`
-    /// blocks will be returned).
-    ///
-    /// **Security notice:** this method will assume that the root block's
-    /// signer is the validator of the blockchain.
-    pub fn open_from_storage(
-        streams: impl IntoIterator<Item = &'stream mut PacketStream>,
-        storage: &dyn Storage
-    )  -> Result<Option<Self>, ViewerError> {
-        let mut viewers = Vec::new();
-        let mut prev_block = Hash::ZERO;
-
-        // Read the root block from the storage.
-        let root_block = storage.root_block()
-            .map_err(ViewerError::Storage)?;
-
-        let Some(root_block) = root_block else {
-            return Ok(None);
-        };
-
-        let root_block = storage.read_block(&root_block)
-            .map_err(ViewerError::Storage)?;
-
-        let Some(root_block) = root_block else {
-            return Ok(None);
-        };
-
-        // Verify root block and obtain its verifying key.
-        let (is_valid, verifying_key) = root_block.verify()?;
-
-        if !is_valid || !root_block.is_root() {
-            return Ok(None);
-        }
-
-        // Build viewers for provided streams.
-        for stream in streams {
-            let Some(viewer) = Viewer::open_from_storage(stream, storage)? else {
-                return Ok(None);
-            };
-
-            let viewer_prev_block = viewer.prev_block();
-
-            // Update the locally stored prev block.
-            if prev_block == Hash::ZERO {
-                prev_block = *viewer_prev_block;
-            }
-
-            // Ignore remote node with different history overview.
-            else if &prev_block != viewer_prev_block {
-                continue;
-            }
-
-            viewers.push(viewer);
-        }
-
-        // Update prev_block hash to be the tail block of the storage if we
-        // couldn't make any network viewer.
-        if viewers.is_empty() {
-            let tail_block = storage.tail_block()
-                .map_err(ViewerError::Storage)?;
-
-            let Some(tail_block) = tail_block else {
-                return Ok(None);
-            };
-
-            prev_block = tail_block;
-        }
-
-        Ok(Some(Self {
-            viewers,
-            root_block: *root_block.hash(),
-            verifying_key,
-            prev_block
-        }))
-    }
-
-    /// Get root block of the viewer's blockchain.
-    #[inline(always)]
-    pub const fn root_block(&self) -> &Hash {
-        &self.root_block
-    }
-
-    /// Get verifying key of the viewer's blockchain validator.
-    #[inline(always)]
-    pub const fn verifying_key(&self) -> &VerifyingKey {
-        &self.verifying_key
+    /// Get blockchain address.
+    #[inline]
+    pub const fn address(&self) -> &Address {
+        &self.address
     }
 
     /// Hash of the previously fetched block.
     ///
     /// This method will return a hash of the block which was fetched by the
     /// last `forward` method call.
-    #[inline(always)]
-    pub const fn prev_block(&self) -> &Hash {
-        &self.prev_block
+    #[inline]
+    pub const fn last_fetched_block(&self) -> &Hash {
+        &self.last_fetched_block
     }
 
     /// Request the next block of the blockchain history known to the underlying
@@ -474,41 +306,29 @@ impl<'stream> BatchedViewer<'stream> {
     /// history then `Ok(None)` is returned.
     pub fn forward(
         &mut self
-    ) -> Result<Option<ValidBlock>, ViewerError> {
-        let mut curr_block: Option<ValidBlock> = None;
+    ) -> Result<Option<Block>, ViewerError> {
+        let mut next_block: Option<Block> = None;
 
         for viewer in &mut self.viewers {
-            let block = viewer.forward()?;
-
-            if let Some(block) = block {
-                if block.block.prev_hash() != &self.prev_block {
-                    // TODO: remove the viewer (has different history than us)
-
+            if let Some(block) = viewer.forward()? {
+                if block.prev_hash() != &self.last_fetched_block {
                     continue;
                 }
 
-                // Update currently selected block variant to the one with
-                // lowest timestamp.
-                if let Some(curr_block) = &mut curr_block {
-                    if curr_block.block.timestamp() > block.block.timestamp() {
-                        *curr_block = block;
-                    }
-                }
-
-                // Select the first block if none is selected yet.
-                else {
-                    curr_block = Some(block);
-                }
+                next_block = match next_block {
+                    Some(next_block) if next_block.timestamp() >= block.timestamp() => Some(next_block),
+                    _ => Some(block)
+                };
             }
         }
 
-        let Some(block) = curr_block else {
+        let Some(next_block) = next_block else {
             return Ok(None);
         };
 
-        self.prev_block = *block.block.hash();
+        self.last_fetched_block = *next_block.hash();
 
-        Ok(Some(block))
+        Ok(Some(next_block))
     }
 
     /// Request the next block of the blockchain history known to the underlying
@@ -520,8 +340,8 @@ impl<'stream> BatchedViewer<'stream> {
     pub fn forward_with_storage(
         &mut self,
         storage: &dyn Storage
-    ) -> Result<Option<ValidBlock>, ViewerError> {
-        let storage_block = storage.next_block(&self.prev_block)
+    ) -> Result<Option<Block>, ViewerError> {
+        let storage_block = storage.next_block(&self.last_fetched_block)
             .map_err(ViewerError::Storage)?
             .and_then(|block| {
                 storage.read_block(&block)
@@ -530,17 +350,15 @@ impl<'stream> BatchedViewer<'stream> {
             .transpose()
             .map_err(ViewerError::Storage)?
             .map(|block| {
-                match block.verify() {
-                    Ok((false, _)) => Ok(None),
+                let (is_valid, address) = block.verify()
+                    .map_err(ViewerError::Signature)?;
 
-                    Ok((true, verifying_key)) => {
-                        Ok(Some(ValidBlock {
-                            block,
-                            verifying_key
-                        }))
-                    }
-
-                    Err(err) => Err(err)
+                // Just silence the error, storage can potentially be updated
+                // after we fetch a normal block from the network.
+                if !is_valid || address != self.address {
+                    Ok::<_, ViewerError>(None)
+                } else {
+                    Ok(Some(block))
                 }
             })
             .transpose()?
@@ -550,23 +368,23 @@ impl<'stream> BatchedViewer<'stream> {
 
         match (network_block, storage_block) {
             (Some(network_block), Some(storage_block)) => {
-                // Select block variant with lowest timestamp.
-                if network_block.block.timestamp() < storage_block.block.timestamp() {
-                    self.prev_block = *network_block.block.hash();
+                // Select block variant with greater timestamp.
+                if storage_block.timestamp() >= network_block.timestamp() {
+                    self.last_fetched_block = *storage_block.hash();
 
-                    Ok(Some(network_block))
+                    Ok(Some(storage_block))
                 }
 
                 else {
-                    self.prev_block = *storage_block.block.hash();
+                    self.last_fetched_block = *network_block.hash();
 
-                    Ok(Some(storage_block))
+                    Ok(Some(network_block))
                 }
             }
 
             (Some(block), None) |
             (None, Some(block)) => {
-                self.prev_block = *block.block.hash();
+                self.last_fetched_block = *block.hash();
 
                 Ok(Some(block))
             }
