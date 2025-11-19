@@ -71,14 +71,26 @@ pub struct Viewer<'stream> {
 impl<'stream> Viewer<'stream> {
     /// Create new viewer of the blockchain history known to the node with
     /// provided packet stream connection.
+    #[inline]
     pub fn new(
         stream: &'stream mut PacketStream,
         address: Address
     ) -> Self {
+        Self::new_after(stream, address, Hash::ZERO)
+    }
+
+    /// Create new viewer which will return a blockchain history after a block
+    /// with provided hash (so skip validation of all the previous blocks).
+    #[inline]
+    pub fn new_after(
+        stream: &'stream mut PacketStream,
+        address: Address,
+        block_hash: impl Into<Hash>
+    ) -> Self {
         Self {
             stream,
             address,
-            last_fetched_block: Hash::ZERO,
+            last_fetched_block: block_hash.into(),
             prefetch_history: VecDeque::new(),
             max_prefetch_length: 8
         }
@@ -269,20 +281,38 @@ pub struct BatchedViewer<'stream> {
 impl<'stream> BatchedViewer<'stream> {
     /// Create new batched viewer of the blockchain history known to the
     /// provided nodes' packet streams.
+    #[inline]
     pub fn new(
         streams: impl IntoIterator<Item = &'stream mut PacketStream>,
         address: Address
     ) -> Self {
+        Self::new_after(streams, address, Hash::ZERO)
+    }
+
+    /// Create new batched viewer which will return a blockchain history after
+    /// a block with provided hash (so skip validation of all the previous
+    /// blocks).
+    pub fn new_after(
+        streams: impl IntoIterator<Item = &'stream mut PacketStream>,
+        address: Address,
+        block_hash: impl Into<Hash>
+    ) -> Self {
+        let block_hash: Hash = block_hash.into();
+
         let mut viewers = Vec::new();
 
         for stream in streams {
-            viewers.push(Viewer::new(stream, address.clone()));
+            viewers.push(Viewer::new_after(
+                stream,
+                address.clone(),
+                block_hash
+            ));
         }
 
         Self {
             viewers,
             address,
-            last_fetched_block: Hash::ZERO
+            last_fetched_block: block_hash
         }
     }
 
