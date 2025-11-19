@@ -20,15 +20,16 @@ use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::varint;
 use crate::crypto::hash::Hash;
-use crate::blob::{Message, MessageDecodeError};
+use crate::blob::{Blob, BlobDecodeError};
 use crate::block::{Block, BlockDecodeError};
+use crate::address::Address;
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum PacketDecodeError {
     #[error("unsupported packet type: {0}")]
     UnsupportedType(u16),
 
-    #[error("provided packet bytes slice is too short: {got} bytes got, at least {expected} bytes expected")]
+    #[error("provided packet bytes slice is too short: got {got} bytes, at least {expected} bytes expected")]
     TooShort {
         got: usize,
         expected: usize
@@ -40,8 +41,11 @@ pub enum PacketDecodeError {
         param: &'static str
     },
 
-    #[error("failed to decode message: {0}")]
-    DecodeMessage(#[from] MessageDecodeError),
+    #[error("invalid blockchain address value")]
+    InvalidAddress,
+
+    #[error("failed to decode blob: {0}")]
+    DecodeBlob(#[from] BlobDecodeError),
 
     #[error("failed to decode block: {0}")]
     DecodeBlock(#[from] BlockDecodeError)
@@ -68,28 +72,21 @@ pub enum Packet {
         nodes: Box<[SocketAddr]>
     },
 
-    // /// Ask network node to share what chains it hosts.
-    // AskKnownChains {
-    //     /// Maximal amount of chains to return.
-    //     max_chains: u64
-    // },
+    // TODO: DHT-like packets to share which nodes know which not-inline blobs.
 
-    // /// List of known chains info.
-    // KnownChains {
-    //     /// List of `(root_block, verifying_key)` pairs of known chains.
-    //     chains: Box<[(Hash, VerifyingKey)]>
-    // },
-
-    /// Ask history of a blockchain.
+    /// Ask blockchain history.
     ///
     /// For chain `A -> B -> C -> D -> E` and packet
     /// `AskHistory { since_block: A, max_length: 2 }` the result packet is
     /// expected to be `History { since_block: A, history: [ B, C ] }`.
     AskHistory {
-        /// Hash of the blockchain's root block.
-        root_block: Hash,
+        /// Blockchain address.
+        address: Address,
 
         /// Hash of the block since which the history should be returned.
+        ///
+        /// For `since_block = 0` the head history is expected to be returned
+        /// (the first block is the root block of the blockchain).
         since_block: Hash,
 
         /// Maximal amount of blocks to return.
@@ -98,87 +95,85 @@ pub enum Packet {
 
     /// Slice of a blockchain history.
     History {
-        /// Hash of the blockchain's root block.
-        root_block: Hash,
+        /// Blockchain address.
+        address: Address,
 
         /// Hash of the block since which the history is returned.
         since_block: Hash,
 
-        /// Slice of the blockchain's history.
-        history: Box<[Hash]>
+        /// Slice of the blockchain history.
+        history: Box<[Block]>
     },
 
-    /// Ask list of pending messages.
-    AskPendingMessages {
-        /// Hash of the blockchain's root block.
-        root_block: Hash,
+    /// Ask list of pending blobs.
+    AskPendingBlobs {
+        /// Blockchain address.
+        address: Address,
 
-        /// List of messages' hashes which are already stored in the pending
-        /// messages pool.
-        known_messages: Box<[Hash]>
+        /// List of blobs' hashes which should not be returned.
+        except: Box<[Hash]>
     },
 
-    /// List of pending messages of a blockchain.
-    PendingMessages {
-        /// Hash of the blockchain's root block.
-        root_block: Hash,
+    /// List of pending blobs of a blockchain.
+    PendingBlobs {
+        /// Blockchain address.
+        address: Address,
 
-        /// List of pending messages' hashes.
-        pending_messages: Box<[Hash]>
+        /// List of pending blobs' hashes.
+        blobs: Box<[Hash]>
     },
 
-    /// Ask for a message stored in a blockchain or in the pending messages
-    /// pool.
-    AskMessage {
-        /// Hash of the blockchain's root block.
-        root_block: Hash,
+    /// Ask for a blob stored in a blockchain or in the pending blobs pool.
+    AskBlob {
+        /// Blockchain address.
+        address: Address,
 
-        /// Hash of the message you want to receive.
-        message: Hash
+        /// Hash of requested blob.
+        hash: Hash
     },
 
-    /// Message stored in a blockchain.
-    Message {
-        /// Hash of the blockchain's root block.
-        root_block: Hash,
+    /// Blockchain blob.
+    Blob {
+        /// Blockchain address.
+        address: Address,
 
-        /// Message stored in the blockchain or pending messages pool.
-        message: Message
+        /// Blockchain blob.
+        blob: Blob
     },
 
-    /// Ask block of a blockchain.
+    /// Ask for a blockchain block.
     AskBlock {
-        /// Hash of the blockchain's root block.
-        root_block: Hash,
+        /// Blockchain address.
+        address: Address,
 
-        /// Hash of the block you want to receive.
-        target_block: Hash
+        /// Hash of requested block.
+        hash: Hash
     },
 
-    /// Block of a blockchain.
+    /// Blockchain block.
     Block {
-        /// Hash of the blockchain's root block.
-        root_block: Hash,
+        /// Blockchain address.
+        address: Address,
 
-        /// Block of the blockchain.
+        /// Blockchain block.
         block: Block
     }
 }
 
 impl Packet {
-    pub const V1_HEARTBEAT: u16            = 0;
-    pub const V1_ASK_NODES: u16            = 1;
-    pub const V1_NODES: u16                = 2;
-    pub const V1_ASK_HISTORY: u16          = 3;
-    pub const V1_HISTORY: u16              = 4;
-    pub const V1_ASK_PENDING_MESSAGES: u16 = 5;
-    pub const V1_PENDING_MESSAGES: u16     = 6;
-    pub const V1_ASK_MESSAGE: u16          = 7;
-    pub const V1_MESSAGE: u16              = 8;
-    pub const V1_ASK_BLOCK: u16            = 9;
-    pub const V1_BLOCK: u16                = 10;
+    pub const V1_HEARTBEAT: u16         = 0;
+    pub const V1_ASK_NODES: u16         = 1;
+    pub const V1_NODES: u16             = 2;
+    pub const V1_ASK_HISTORY: u16       = 3;
+    pub const V1_HISTORY: u16           = 4;
+    pub const V1_ASK_PENDING_BLOBS: u16 = 5;
+    pub const V1_PENDING_BLOBS: u16     = 6;
+    pub const V1_ASK_BLOB: u16          = 7;
+    pub const V1_BLOB: u16              = 8;
+    pub const V1_ASK_BLOCK: u16         = 9;
+    pub const V1_BLOCK: u16             = 10;
 
-    /// Encode packet into a binary representation.
+    /// Encode current packet into a binary representation.
     pub fn to_bytes(&self) -> Box<[u8]> {
         match self {
             Self::Heartbeat { id } => {
@@ -225,15 +220,15 @@ impl Packet {
             }
 
             Self::AskHistory {
-                root_block,
+                address,
                 since_block,
                 max_length
             } => {
-                let mut buf = Vec::with_capacity(2 + Hash::SIZE * 2 + 4);
+                let mut buf = Vec::new();
 
                 buf.extend(Self::V1_ASK_HISTORY.to_le_bytes());
 
-                buf.extend(root_block.as_bytes());
+                buf.extend(address.to_bytes());
                 buf.extend(since_block.as_bytes());
                 buf.extend(varint::write_u64(*max_length));
 
@@ -241,99 +236,98 @@ impl Packet {
             }
 
             Self::History {
-                root_block,
+                address,
                 since_block,
                 history
             } => {
-                let mut buf = Vec::with_capacity(
-                    2 + Hash::SIZE * (2 + history.len())
-                );
+                let mut buf = Vec::new();
 
                 buf.extend(Self::V1_HISTORY.to_le_bytes());
 
-                buf.extend(root_block.as_bytes());
+                buf.extend(address.to_bytes());
                 buf.extend(since_block.as_bytes());
 
-                for hash in history {
-                    buf.extend(hash.as_bytes());
+                for block in history {
+                    let block = block.to_bytes();
+
+                    buf.extend(varint::write_u64(block.len() as u64));
+                    buf.extend(block);
                 }
 
                 buf.into_boxed_slice()
             }
 
-            Self::AskPendingMessages { root_block, known_messages } => {
+            Self::AskPendingBlobs { address, except } => {
                 let mut buf = Vec::with_capacity(
-                    2 + Hash::SIZE * (1 + known_messages.len())
+                    2 + Address::SIZE * (1 + except.len())
                 );
 
-                buf.extend(Self::V1_ASK_PENDING_MESSAGES.to_le_bytes());
+                buf.extend(Self::V1_ASK_PENDING_BLOBS.to_le_bytes());
 
-                buf.extend(root_block.as_bytes());
+                buf.extend(address.to_bytes());
 
-                for message in known_messages {
-                    buf.extend(message.as_bytes());
-                }
-
-                buf.into_boxed_slice()
-            }
-
-            Self::PendingMessages { root_block, pending_messages } => {
-                let mut buf = Vec::new();
-
-                buf.extend(Self::V1_PENDING_MESSAGES.to_le_bytes());
-
-                buf.extend(root_block.as_bytes());
-
-                for hash in pending_messages {
+                for hash in except {
                     buf.extend(hash.as_bytes());
                 }
 
                 buf.into_boxed_slice()
             }
 
-            Self::AskMessage { root_block, message } => {
-                let mut buf = [0; 2 + Hash::SIZE * 2];
-
-                buf[0..2].copy_from_slice(
-                    &Self::V1_ASK_MESSAGE.to_le_bytes()
+            Self::PendingBlobs { address, blobs } => {
+                let mut buf = Vec::with_capacity(
+                    2 + Address::SIZE + Hash::SIZE * blobs.len()
                 );
 
-                buf[2..2 + Hash::SIZE].copy_from_slice(root_block.as_bytes());
-                buf[2 + Hash::SIZE..].copy_from_slice(message.as_bytes());
+                buf.extend(Self::V1_PENDING_BLOBS.to_le_bytes());
 
-                Box::new(buf)
-            }
+                buf.extend(address.to_bytes());
 
-            Self::Message { root_block, message } => {
-                let mut buf = Vec::new();
-
-                buf.extend(Self::V1_MESSAGE.to_le_bytes());
-
-                buf.extend(root_block.as_bytes());
-                buf.extend(message.to_bytes());
+                for hash in blobs {
+                    buf.extend(hash.as_bytes());
+                }
 
                 buf.into_boxed_slice()
             }
 
-            Self::AskBlock { root_block, target_block } => {
-                let mut buf = [0; 2 + Hash::SIZE * 2];
+            Self::AskBlob { address, hash } => {
+                let mut buf = [0; 2 + Address::SIZE + Hash::SIZE];
 
-                buf[0..2].copy_from_slice(
-                    &Self::V1_ASK_BLOCK.to_le_bytes()
-                );
+                buf[0..2].copy_from_slice(&Self::V1_ASK_BLOB.to_le_bytes());
 
-                buf[2..2 + Hash::SIZE].copy_from_slice(root_block.as_bytes());
-                buf[2 + Hash::SIZE..66].copy_from_slice(target_block.as_bytes());
+                buf[2..2 + Address::SIZE].copy_from_slice(&address.to_bytes());
+                buf[2 + Address::SIZE..].copy_from_slice(hash.as_bytes());
 
                 Box::new(buf)
             }
 
-            Self::Block { root_block, block } => {
+            Self::Blob { address, blob } => {
+                let mut buf = Vec::new();
+
+                buf.extend(Self::V1_BLOB.to_le_bytes());
+
+                buf.extend(address.to_bytes());
+                buf.extend(blob.to_bytes());
+
+                buf.into_boxed_slice()
+            }
+
+            Self::AskBlock { address, hash } => {
+                let mut buf = [0; 2 + Address::SIZE + Hash::SIZE];
+
+                buf[0..2].copy_from_slice(&Self::V1_ASK_BLOCK.to_le_bytes());
+
+                buf[2..2 + Address::SIZE].copy_from_slice(&address.to_bytes());
+                buf[2 + Address::SIZE..].copy_from_slice(hash.as_bytes());
+
+                Box::new(buf)
+            }
+
+            Self::Block { address, block } => {
                 let mut buf = Vec::new();
 
                 buf.extend(Self::V1_BLOCK.to_le_bytes());
 
-                buf.extend(root_block.as_bytes());
+                buf.extend(address.to_bytes());
                 buf.extend(block.to_bytes());
 
                 buf.into_boxed_slice()
@@ -341,11 +335,11 @@ impl Packet {
         }
     }
 
-    /// Decode packet from a binary representation.
-    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, PacketDecodeError> {
-        let bytes = bytes.as_ref();
+    /// Try to decode a packet from a binary representation.
+    pub fn from_bytes(packet: impl AsRef<[u8]>) -> Result<Self, PacketDecodeError> {
+        let packet = packet.as_ref();
 
-        let n = bytes.len();
+        let n = packet.len();
 
         if n < 2 {
             return Err(PacketDecodeError::TooShort {
@@ -354,7 +348,7 @@ impl Packet {
             });
         }
 
-        match u16::from_le_bytes([bytes[0], bytes[1]]) {
+        match u16::from_le_bytes([packet[0], packet[1]]) {
             Self::V1_HEARTBEAT => {
                 if n < 6 {
                     return Err(PacketDecodeError::TooShort {
@@ -365,7 +359,7 @@ impl Packet {
 
                 let mut id = [0; 4];
 
-                id.copy_from_slice(&bytes[2..6]);
+                id.copy_from_slice(&packet[2..6]);
 
                 Ok(Self::Heartbeat {
                     id: u32::from_le_bytes(id)
@@ -380,9 +374,9 @@ impl Packet {
                     });
                 }
 
-                let (Some(max_nodes), _) = varint::read_u64(&bytes[2..]) else {
+                let (Some(max_nodes), _) = varint::read_u64(&packet[2..]) else {
                     return Err(PacketDecodeError::InvalidParam {
-                        packet_type: "AskNodes",
+                        packet_type: "V1_ASK_NODES",
                         param: "max_nodes"
                     });
                 };
@@ -394,21 +388,19 @@ impl Packet {
 
             Self::V1_NODES => {
                 let mut i = 2;
-                let n = bytes.len();
-
                 let mut nodes = Vec::new();
 
                 while i < n {
                     let port = u16::from_le_bytes([
-                        bytes[i + 1],
-                        bytes[i + 2]
+                        packet[i + 1],
+                        packet[i + 2]
                     ]);
 
-                    match bytes[i] {
+                    match packet[i] {
                         0 => {
                             let mut ip = [0; 4];
 
-                            ip.copy_from_slice(&bytes[i + 3..i + 7]);
+                            ip.copy_from_slice(&packet[i + 3..i + 7]);
 
                             nodes.push(SocketAddr::new(
                                 IpAddr::from(Ipv4Addr::from(ip)),
@@ -421,7 +413,7 @@ impl Packet {
                         1 => {
                             let mut ip = [0; 16];
 
-                            ip.copy_from_slice(&bytes[i + 3..i + 19]);
+                            ip.copy_from_slice(&packet[i + 3..i + 19]);
 
                             nodes.push(SocketAddr::new(
                                 IpAddr::from(Ipv6Addr::from(ip)),
@@ -432,7 +424,7 @@ impl Packet {
                         }
 
                         _ => return Err(PacketDecodeError::InvalidParam {
-                            packet_type: "Nodes",
+                            packet_type: "V1_NODES",
                             param: "format"
                         })
                     }
@@ -444,173 +436,197 @@ impl Packet {
             }
 
             Self::V1_ASK_HISTORY => {
-                if n < 2 + Hash::SIZE * 2 + 1 {
+                if n < 2 + Address::SIZE + Hash::SIZE + 1 {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
-                        expected: 2 + Hash::SIZE * 2 + 1
+                        expected: 2 + Address::SIZE + Hash::SIZE + 1
                     });
                 }
 
-                let mut root_block = [0; Hash::SIZE];
+                let mut address = [0; Address::SIZE];
                 let mut since_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
-                since_block.copy_from_slice(&bytes[2 + Hash::SIZE..2 + Hash::SIZE * 2]);
+                address.copy_from_slice(&packet[2..2 + Address::SIZE]);
+                since_block.copy_from_slice(&packet[2 + Address::SIZE..2 + Address::SIZE + Hash::SIZE]);
 
-                let (Some(max_length), _) = varint::read_u64(&bytes[2 + Hash::SIZE * 2..]) else {
+                let address = Address::from_bytes(&address)
+                    .ok_or(PacketDecodeError::InvalidAddress)?;
+
+                let (Some(max_length), _) = varint::read_u64(&packet[2 + Address::SIZE + Hash::SIZE..]) else {
                     return Err(PacketDecodeError::InvalidParam {
-                        packet_type: "AskHistory",
+                        packet_type: "V1_ASK_HISTORY",
                         param: "max_length"
                     });
                 };
 
                 Ok(Self::AskHistory {
-                    root_block: Hash::from(root_block),
+                    address,
                     since_block: Hash::from(since_block),
                     max_length
                 })
             }
 
             Self::V1_HISTORY => {
-                if n < 2 + Hash::SIZE {
+                if n < 2 + Address::SIZE + Hash::SIZE {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
-                        expected: 2 + Hash::SIZE
+                        expected: 2 + Address::SIZE + Hash::SIZE
                     });
                 }
 
-                let mut root_block = [0; Hash::SIZE];
+                let mut address = [0; Address::SIZE];
                 let mut since_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
-                since_block.copy_from_slice(&bytes[2 + Hash::SIZE..2 + Hash::SIZE * 2]);
+                address.copy_from_slice(&packet[2..2 + Address::SIZE]);
+                since_block.copy_from_slice(&packet[2 + Address::SIZE..2 + Address::SIZE + Hash::SIZE]);
 
-                let bytes = &bytes[2 + Hash::SIZE * 2..];
+                let address = Address::from_bytes(&address)
+                    .ok_or(PacketDecodeError::InvalidAddress)?;
 
+                let mut packet = &packet[2 + Address::SIZE + Hash::SIZE..];
                 let mut history = Vec::new();
-                let mut hash = [0; Hash::SIZE];
 
-                let n = bytes.len();
-                let mut i = 0;
+                loop {
+                    let (Some(block_len), shifted_packet) = varint::read_u64(packet) else {
+                        return Err(PacketDecodeError::InvalidParam {
+                            packet_type: "V1_HISTORY",
+                            param: "max_length"
+                        });
+                    };
 
-                while i < n {
-                    hash.copy_from_slice(&bytes[i..i + Hash::SIZE]);
+                    let block = Block::from_bytes(
+                        &shifted_packet[..block_len as usize]
+                    )?;
 
-                    history.push(Hash::from(hash));
+                    history.push(block);
 
-                    i += Hash::SIZE;
+                    if shifted_packet.len() <= block_len as usize {
+                        break;
+                    }
+
+                    packet = &shifted_packet[block_len as usize..];
                 }
 
                 Ok(Self::History {
-                    root_block: Hash::from(root_block),
+                    address,
                     since_block: Hash::from(since_block),
                     history: history.into_boxed_slice()
                 })
             }
 
-            Self::V1_ASK_PENDING_MESSAGES => {
-                if n < 2 + Hash::SIZE {
+            Self::V1_ASK_PENDING_BLOBS => {
+                if n < 2 + Address::SIZE {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
-                        expected: 2 + Hash::SIZE
+                        expected: 2 + Address::SIZE
                     });
                 }
 
-                let mut root_block = [0; Hash::SIZE];
+                let mut address = [0; Address::SIZE];
 
-                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
+                address.copy_from_slice(&packet[2..2 + Address::SIZE]);
 
-                let bytes = &bytes[2 + Hash::SIZE..];
+                let address = Address::from_bytes(&address)
+                    .ok_or(PacketDecodeError::InvalidAddress)?;
 
-                let mut messages = Vec::new();
+                let packet = &packet[2 + Address::SIZE..];
+
+                let mut blobs = Vec::with_capacity(packet.len() / Hash::SIZE);
                 let mut hash = [0; Hash::SIZE];
 
-                let n = bytes.len();
+                let n = packet.len();
                 let mut i = 0;
 
                 while i < n {
-                    hash.copy_from_slice(&bytes[i..i + Hash::SIZE]);
+                    hash.copy_from_slice(&packet[i..i + Hash::SIZE]);
 
-                    messages.push(Hash::from(hash));
+                    blobs.push(Hash::from(hash));
 
                     i += Hash::SIZE;
                 }
 
-                Ok(Self::AskPendingMessages {
-                    root_block: Hash::from(root_block),
-                    known_messages: messages.into_boxed_slice()
+                Ok(Self::AskPendingBlobs {
+                    address,
+                    except: blobs.into_boxed_slice()
                 })
             }
 
-            Self::V1_PENDING_MESSAGES => {
+            Self::V1_PENDING_BLOBS => {
                 if n < 2 + Hash::SIZE {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
-                        expected: 2 + Hash::SIZE
+                        expected: 2 + Address::SIZE
                     });
                 }
 
-                let mut root_block = [0; Hash::SIZE];
+                let mut address = [0; Address::SIZE];
 
-                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
+                address.copy_from_slice(&packet[2..2 + Address::SIZE]);
 
-                let bytes = &bytes[2 + Hash::SIZE..];
+                let address = Address::from_bytes(&address)
+                    .ok_or(PacketDecodeError::InvalidAddress)?;
 
-                let mut messages = Vec::new();
+                let packet = &packet[2 + Address::SIZE..];
+
+                let mut blobs = Vec::new();
                 let mut hash = [0; Hash::SIZE];
 
-                let n = bytes.len();
+                let n = packet.len();
                 let mut i = 0;
 
                 while i < n {
-                    hash.copy_from_slice(&bytes[i..i + Hash::SIZE]);
+                    hash.copy_from_slice(&packet[i..i + Hash::SIZE]);
 
-                    messages.push(Hash::from(hash));
+                    blobs.push(Hash::from(hash));
 
                     i += Hash::SIZE;
                 }
 
-                Ok(Self::PendingMessages {
-                    root_block: Hash::from(root_block),
-                    pending_messages: messages.into_boxed_slice()
+                Ok(Self::PendingBlobs {
+                    address,
+                    blobs: blobs.into_boxed_slice()
                 })
             }
 
-            Self::V1_ASK_MESSAGE => {
-                if n < 2 + Hash::SIZE * 2 {
+            Self::V1_ASK_BLOB => {
+                if n < 2 + Address::SIZE + Hash::SIZE {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
-                        expected: 2 + Hash::SIZE * 2
+                        expected: 2 + Address::SIZE + Hash::SIZE
                     });
                 }
 
-                let mut root_block = [0; Hash::SIZE];
-                let mut message = [0; Hash::SIZE];
+                let mut address = [0; Address::SIZE];
+                let mut hash = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
-                message.copy_from_slice(&bytes[2 + Hash::SIZE..]);
+                address.copy_from_slice(&packet[2..2 + Address::SIZE]);
+                hash.copy_from_slice(&packet[2 + Address::SIZE..]);
 
-                Ok(Self::AskMessage {
-                    root_block: Hash::from(root_block),
-                    message: Hash::from(message)
+                Ok(Self::AskBlob {
+                    address: Address::from_bytes(&address)
+                        .ok_or(PacketDecodeError::InvalidAddress)?,
+
+                    hash: Hash::from(hash)
                 })
             }
 
-            Self::V1_MESSAGE => {
-                if n < 2 + Hash::SIZE {
+            Self::V1_BLOB => {
+                if n < 2 + Hash::SIZE + 1 {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
-                        expected: 2 + Hash::SIZE
+                        expected: 2 + Address::SIZE + 1
                     });
                 }
 
-                let mut root_block = [0; Hash::SIZE];
+                let mut address = [0; Address::SIZE];
 
-                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
+                address.copy_from_slice(&packet[2..2 + Address::SIZE]);
 
-                Ok(Self::Message {
-                    root_block: Hash::from(root_block),
-                    message: Message::from_bytes(&bytes[2 + Hash::SIZE..])?
+                Ok(Self::Blob {
+                    address: Address::from_bytes(&address)
+                        .ok_or(PacketDecodeError::InvalidAddress)?,
+
+                    blob: Blob::from_bytes(&packet[2 + Address::SIZE..])?
                 })
             }
 
@@ -618,37 +634,41 @@ impl Packet {
                 if n < 2 + Hash::SIZE * 2 {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
-                        expected: 2 + Hash::SIZE * 2
+                        expected: 2 + Address::SIZE + Hash::SIZE
                     });
                 }
 
-                let mut root_block = [0; Hash::SIZE];
+                let mut address = [0; Address::SIZE];
                 let mut target_block = [0; Hash::SIZE];
 
-                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
-                target_block.copy_from_slice(&bytes[2 + Hash::SIZE..]);
+                address.copy_from_slice(&packet[2..2 + Address::SIZE]);
+                target_block.copy_from_slice(&packet[2 + Address::SIZE..]);
 
                 Ok(Self::AskBlock {
-                    root_block: Hash::from(root_block),
-                    target_block: Hash::from(target_block)
+                    address: Address::from_bytes(&address)
+                        .ok_or(PacketDecodeError::InvalidAddress)?,
+
+                    hash: Hash::from(target_block)
                 })
             }
 
             Self::V1_BLOCK => {
-                if n < 2 + Hash::SIZE {
+                if n < 2 + Address::SIZE + 1 {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
-                        expected: 2 + Hash::SIZE
+                        expected: 2 + Address::SIZE + 1
                     });
                 }
 
-                let mut root_block = [0; Hash::SIZE];
+                let mut address = [0; Address::SIZE];
 
-                root_block.copy_from_slice(&bytes[2..2 + Hash::SIZE]);
+                address.copy_from_slice(&packet[2..2 + Address::SIZE]);
 
                 Ok(Self::Block {
-                    root_block: Hash::from(root_block),
-                    block: Block::from_bytes(&bytes[2 + Hash::SIZE..])?
+                    address: Address::from_bytes(&address)
+                        .ok_or(PacketDecodeError::InvalidAddress)?,
+
+                    block: Block::from_bytes(&packet[2 + Address::SIZE..])?
                 })
             }
 
@@ -665,7 +685,7 @@ impl AsRef<Packet> for Packet {
 }
 
 #[test]
-fn test_serialize() -> Result<(), PacketDecodeError> {
+fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
     use rand_chacha::ChaCha8Rng;
     use rand_chacha::rand_core::SeedableRng;
 
@@ -707,64 +727,81 @@ fn test_serialize() -> Result<(), PacketDecodeError> {
         },
 
         Packet::AskHistory {
-            root_block: Hash::calc(b"Hello, World!"),
+            address: Address::new(signing_key.verifying_key(), 123),
             since_block: Hash::ZERO,
             max_length: u32::MAX as u64
         },
 
         Packet::History {
-            root_block: Hash::calc(b"Hello, World!"),
+            address: Address::new(signing_key.verifying_key(), 123),
             since_block: Hash::ZERO,
             history: Box::new([
+                Block::builder()
+                    .sign(&signing_key)?,
+
+                Block::builder()
+                    .with_inline_blobs([
+                        Blob::create(&signing_key, b"Blob 1".as_slice())?,
+                        Blob::create(&signing_key, b"Blob 2".as_slice())?,
+                        Blob::create(&signing_key, b"Blob 3".as_slice())?
+                    ])
+                    .sign(&signing_key)?,
+
+                Block::builder()
+                    .with_blobs([
+                        Hash::calc(b"Test 1"),
+                        Hash::calc(b"Test 2"),
+                        Hash::calc(b"Test 3")
+                    ])
+                    .sign(&signing_key)?
+            ])
+        },
+
+        Packet::AskPendingBlobs {
+            address: Address::new(signing_key.verifying_key(), 123),
+            except: Box::new([
                 Hash::calc(b"Test 1"),
                 Hash::calc(b"Test 2"),
                 Hash::calc(b"Test 3")
             ])
         },
 
-        Packet::AskPendingMessages {
-            root_block: Hash::calc(b"Hello, World!"),
-            known_messages: Box::new([
+        Packet::PendingBlobs {
+            address: Address::new(signing_key.verifying_key(), 123),
+            blobs: Box::new([
                 Hash::calc(b"Test 1"),
                 Hash::calc(b"Test 2"),
                 Hash::calc(b"Test 3")
             ])
         },
 
-        Packet::PendingMessages {
-            root_block: Hash::calc(b"Hello, World!"),
-            pending_messages: Box::new([
-                Hash::calc(b"Test 1"),
-                Hash::calc(b"Test 2"),
-                Hash::calc(b"Test 3")
-            ])
+        Packet::AskBlob {
+            address: Address::new(signing_key.verifying_key(), 123),
+            hash: Hash::calc(b"Test")
         },
 
-        Packet::AskMessage {
-            root_block: Hash::calc(b"Hello, World!"),
-            message: Hash::calc(b"Test")
-        },
-
-        Packet::Message {
-            root_block: Hash::calc(b"Hello, World!"),
-            message: Message::create(
+        Packet::Blob {
+            address: Address::new(signing_key.verifying_key(), 123),
+            blob: Blob::create(
                 &signing_key,
                 [1, 2, 3]
-            ).unwrap()
+            )?
         },
 
         Packet::AskBlock {
-            root_block: Hash::calc(b"Hello, World!"),
-            target_block: Hash::calc(b"Test")
+            address: Address::new(signing_key.verifying_key(), 123),
+            hash: Hash::calc(b"Test")
         },
 
         Packet::Block {
-            root_block: Hash::calc(b"Hello, World!"),
-            block: Block::create(&signing_key, Hash::ZERO, [
-                Message::create(&signing_key, b"Message 1".as_slice()).unwrap(),
-                Message::create(&signing_key, b"Message 2".as_slice()).unwrap(),
-                Message::create(&signing_key, b"Message 3".as_slice()).unwrap()
-            ]).unwrap()
+            address: Address::new(signing_key.verifying_key(), 123),
+            block: Block::builder()
+                .with_inline_blobs([
+                    Blob::create(&signing_key, b"Blob 1".as_slice())?,
+                    Blob::create(&signing_key, b"Blob 2".as_slice())?,
+                    Blob::create(&signing_key, b"Blob 3".as_slice())?
+                ])
+                .sign(&signing_key)?
         }
     );
 
