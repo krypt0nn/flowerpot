@@ -17,7 +17,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::crypto::hash::Hash;
-use crate::blob::Message;
+use crate::blob::Blob;
 use crate::block::Block;
 
 #[cfg(feature = "ram_storage")]
@@ -38,12 +38,11 @@ pub enum StorageWriteResult {
     /// Provided block is already stored.
     BlockAlreadyStored,
 
-    /// Provided block has messages with the same hash value.
-    BlockHasDuplicateMessages,
+    /// Provided block has blobs with the same hash value.
+    BlockHasDuplicateBlobs,
 
-    /// Provided block has messages which are already stored in previous
-    /// blocks.
-    BlockHasDuplicateHistoryMessages,
+    /// Provided block has blobs which are already stored in previous blocks.
+    BlockHasDuplicateHistoryBlobs,
 
     /// Storage has no blocks and provided block is not a root block.
     NotRootBlock,
@@ -57,12 +56,14 @@ pub type StorageError = Box<dyn std::error::Error>;
 
 pub trait Storage {
     /// Get hash of the root block if it's available.
+    ///
+    /// The result must be equal to the `Storage::next_block(Hash::ZERO)`.
     fn root_block(&self) -> Result<Option<Hash>, StorageError>;
 
     /// Get hash of the tail block if it's available.
     fn tail_block(&self) -> Result<Option<Hash>, StorageError>;
 
-    /// Check if blockchain has block with given hash.
+    /// Check if storage has a block with given hash.
     fn has_block(&self, hash: &Hash) -> Result<bool, StorageError> {
         Ok(self.read_block(hash)?.is_some())
     }
@@ -70,8 +71,8 @@ pub trait Storage {
     /// Get hash of a block next to the one with provided hash. Return
     /// `Ok(None)` if there's no block next to the requested one.
     ///
-    /// Next block from the default hash (zeros) must return the root block
-    /// of the blockchain if it's available.
+    /// Next block from the default hash (`Hash::ZERO`) must return the root
+    /// block if it's available and be equal to the `Storage::root_block()`.
     ///
     /// ```text,no_run
     /// [curr_block] <--- [next_block]
@@ -82,8 +83,8 @@ pub trait Storage {
     /// Get hash of a block previous to the one with provided hash. Return
     /// `Ok(None)` if there's no block with provided hash.
     ///
-    /// Previous block of the root block of the blockchain must be the
-    /// default hash (zeros).
+    /// Previous block of the root block must be the default hash
+    /// (`Hash::ZERO`).
     fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, StorageError> {
         match self.read_block(hash)? {
             Some(block) => Ok(Some(*block.prev_hash())),
@@ -94,56 +95,64 @@ pub trait Storage {
     /// Read block from its hash. Return `Ok(None)` if there's no such block.
     fn read_block(&self, hash: &Hash) -> Result<Option<Block>, StorageError>;
 
-    /// Try to write a block to the blockchain.
+    /// Try to write a block to the storage.
     ///
     /// This method must automatically prune excess blocks if this one modifies
-    /// the history. History modifications, block and stored messages must
-    /// be verified outside of this trait so this method should work without
-    /// extra verifications (but they still can be implemented if wanted).
+    /// the history. History modifications, block and stored blobs must be
+    /// verified outside of this trait so this method should work without extra
+    /// verifications (but they still can be implemented if wanted).
     ///
-    /// Messages with the same hash must not be allowed. If a new block is
-    /// attempted to be added to the history, then this method must return
-    /// `Ok(false)` if a message in this new block is already stored in some
+    /// Blobs with the same hash must not be allowed. If a new block is
+    /// attempting to be added to the history, then this method must return
+    /// `Ok(false)` if some blob in this new block is already stored in some
     /// previous block.
     ///
-    /// Return `Ok(true)` if the blockchain history was modified, otherwise
-    /// `Ok(false)`.
+    /// Return `Ok(true)` if stored history was modified, otherwise `Ok(false)`.
     ///
     /// # Blocks writing rules
     ///
-    /// - If a block with the same hash is already stored then reject it.
-    /// - If the provided block has messages with duplicate hashes then it must
-    ///   be rejected.
+    /// - If a block with the same hash is already stored then reject it and
+    ///   return `StorageWriteResult::BlockAlreadyStored`.
+    /// - If the provided block has blobs with duplicate hashes then it must
+    ///   be rejected and return `StorageWriteResult::BlockHasDuplicateBlobs`.
     /// - If there's no blocks in the storage then:
-    ///     - If the block is of the root type - store it;
-    ///     - Otherwise reject it.
+    ///     - If the block is of the root type - store it and return
+    ///       `StorageWriteResult::Success`;
+    ///     - Otherwise reject it and return `StorageWriteResult::NotRootBlock`.
     /// - If there's no block with the provided block's previous hash then
     ///   reject it because it's out of the history (can't be chained to any
-    ///   other block).
+    ///   other block) and return `StorageWriteResult::OutOfHistoryBlock`.
     /// - If the provided block's previous hash is stored and the provided block
     ///   is not stored yet then:
     ///     - If the previous block is the tail block of the history then:
-    ///         - If any block message hash is stored on the chain already then
-    ///           the block must be rejected;
-    ///         - Otherwise write this block to the end of the chain.
+    ///         - If any block blob hash is stored on the chain already then
+    ///           the block must be rejected, return
+    ///           `StorageWriteResult::BlockHasDuplicateHistoryBlobs`;
+    ///         - Otherwise write this block to the end of the chain and return
+    ///           `StorageWriteResult::Success`.
     ///     - If the previous block is not the tail block of the history then:
     ///         - Remove all the following blocks;
     ///         - If there's no duplicate messages then append the new block to
     ///           the chain;
-    ///         - Otherwise revert blocks removal and reject new block.
+    ///         - Otherwise revert blocks removal, reject new block and return
+    ///           `StorageWriteResult::BlockHasDuplicateHistoryBlobs`.
     fn write_block(
         &self,
         block: &Block
     ) -> Result<StorageWriteResult, StorageError>;
 
-    /// Check if blockchain has message with given hash.
-    fn has_message(&self, hash: &Hash) -> Result<bool, StorageError> {
-        Ok(self.find_message(hash)?.is_some())
+    /// Check if storage has a blob with given hash. `Ok(true)` is returned only
+    /// if the blob is physically stored and can be read.
+    fn has_blob(&self, hash: &Hash) -> Result<bool, StorageError> {
+        Ok(self.find_blob(hash)?.is_some())
     }
 
-    /// Find block hash in which message with provided hash is stored. Return
-    /// `Ok(None)` if there's no such message.
-    fn find_message(
+    /// Find block hash to which blob with provided hash is attached. Return
+    /// `Ok(None)` if there's no such blob.
+    ///
+    /// This method will return block hash for provided blob hash even if the
+    /// blob with this hash *is not stored* in the storage.
+    fn find_blob(
         &self,
         hash: &Hash
     ) -> Result<Option<Hash>, StorageError> {
@@ -151,8 +160,12 @@ pub trait Storage {
 
         while let Some(block_hash) = &curr_block {
             if let Some(block) = self.read_block(block_hash)? {
-                for message in block.messages() {
-                    if message.hash() == hash {
+                if block.blobs().contains(hash) {
+                    return Ok(Some(*block_hash));
+                }
+
+                for blob in block.inline_blobs() {
+                    if blob.hash() == hash {
                         return Ok(Some(*block_hash));
                     }
                 }
@@ -164,13 +177,13 @@ pub trait Storage {
         Ok(None)
     }
 
-    /// Read message from its hash. Return `Ok(None)` if there's no such
-    /// message.
-    fn read_message(
+    /// Read blob from its hash. Return `Ok(None)` if blob with provided hash
+    /// is not stored.
+    fn read_blob(
         &self,
         hash: &Hash
-    ) -> Result<Option<Message>, StorageError> {
-        let Some(block) = self.find_message(hash)? else {
+    ) -> Result<Option<Blob>, StorageError> {
+        let Some(block) = self.find_blob(hash)? else {
             return Ok(None);
         };
 
@@ -178,11 +191,19 @@ pub trait Storage {
             return Ok(None);
         };
 
-        Ok(block.messages()
+        Ok(block.inline_blobs()
             .iter()
             .find(|tr| tr.hash() == hash)
             .cloned())
     }
+
+    /// Try to write a blob to the storage.
+    ///
+    /// Return `Ok(true)` if blob was successfully written to the storage or
+    /// it was stored already.
+    ///
+    /// Return `Ok(false)` if blob was not written.
+    fn write_blob(&self, blob: &Blob) -> Result<bool, StorageError>;
 }
 
 impl<T> Storage for Box<T> where T: Storage {
@@ -225,29 +246,36 @@ impl<T> Storage for Box<T> where T: Storage {
     }
 
     #[inline]
-    fn has_message(&self, hash: &Hash) -> Result<bool, StorageError> {
-        T::has_message(self, hash)
+    fn has_blob(&self, hash: &Hash) -> Result<bool, StorageError> {
+        T::has_blob(self, hash)
     }
 
     #[inline]
-    fn find_message(
+    fn find_blob(
         &self,
         hash: &Hash
     ) -> Result<Option<Hash>, StorageError> {
-        T::find_message(self, hash)
+        T::find_blob(self, hash)
     }
 
     #[inline]
-    fn read_message(
+    fn read_blob(
         &self,
         hash: &Hash
-    ) -> Result<Option<Message>, StorageError> {
-        T::read_message(self, hash)
+    ) -> Result<Option<Blob>, StorageError> {
+        T::read_blob(self, hash)
+    }
+
+    #[inline]
+    fn write_blob(&self, blob: &Blob) -> Result<bool, StorageError> {
+        T::write_blob(self, blob)
     }
 }
 
 #[cfg(test)]
-pub fn test_storage<S: Storage>(storage: &S) -> Result<(), StorageError> {
+pub fn test_storage<S: Storage>(
+    storage: &S
+) -> Result<(), Box<dyn std::error::Error>> {
     use rand_chacha::ChaCha8Rng;
     use rand_chacha::rand_core::SeedableRng;
 
@@ -260,9 +288,9 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), StorageError> {
     assert!(!storage.has_block(&Hash::ZERO)?);
     assert!(storage.next_block(&Hash::ZERO)?.is_none());
     assert!(storage.read_block(&Hash::ZERO)?.is_none());
-    assert!(!storage.has_message(&Hash::ZERO)?);
-    assert!(storage.find_message(&Hash::ZERO)?.is_none());
-    assert!(storage.read_message(&Hash::ZERO)?.is_none());
+    assert!(!storage.has_blob(&Hash::ZERO)?);
+    assert!(storage.find_blob(&Hash::ZERO)?.is_none());
+    assert!(storage.read_blob(&Hash::ZERO)?.is_none());
 
     // Prepare test messages.
 
@@ -270,25 +298,28 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), StorageError> {
 
     let signing_key = SigningKey::random(&mut rng);
 
-    let message_1 = Message::create(&signing_key, b"Message 1".as_slice()).unwrap();
-    let message_2 = Message::create(&signing_key, b"Message 2".as_slice()).unwrap();
-    let message_3 = Message::create(&signing_key, b"Message 3".as_slice()).unwrap();
+    let blob_1 = Blob::create(&signing_key, b"Blob 1".as_slice())?;
+    let blob_2 = Blob::create(&signing_key, b"Blob 2".as_slice())?;
+    let blob_3 = Blob::create(&signing_key, b"Blob 3".as_slice())?;
 
     // Prepare test blocks.
 
-    let block_1 = Block::create_root(&signing_key).unwrap();
+    let block_1 = Block::builder()
+        .sign(&signing_key)
+        .unwrap();
 
     assert!(block_1.is_root());
     assert_eq!(block_1.prev_hash(), &Hash::ZERO);
 
-    let block_2 = Block::create(&signing_key, block_1.hash(), [
-        message_1.clone()
-    ]).unwrap();
+    let block_2 = Block::builder()
+        .with_prev_hash(block_1.hash())
+        .with_inline_blobs([blob_1.clone()])
+        .sign(&signing_key)?;
 
-    let block_3 = Block::create(&signing_key, block_2.hash(), [
-        message_2.clone(),
-        message_3.clone()
-    ]).unwrap();
+    let block_3 = Block::builder()
+        .with_prev_hash(block_2.hash())
+        .with_inline_blobs([blob_2.clone(), blob_3.clone()])
+        .sign(&signing_key)?;
 
     assert!(!block_2.is_root());
     assert!(!block_3.is_root());
@@ -347,17 +378,17 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), StorageError> {
     assert!(storage.read_block(block_2.hash())?.is_none());
     assert!(storage.read_block(block_3.hash())?.is_none());
 
-    assert!(!storage.has_message(message_1.hash())?);
-    assert!(!storage.has_message(message_2.hash())?);
-    assert!(!storage.has_message(message_3.hash())?);
+    assert!(!storage.has_blob(blob_1.hash())?);
+    assert!(!storage.has_blob(blob_2.hash())?);
+    assert!(!storage.has_blob(blob_3.hash())?);
 
-    assert!(storage.find_message(message_1.hash())?.is_none());
-    assert!(storage.find_message(message_2.hash())?.is_none());
-    assert!(storage.find_message(message_3.hash())?.is_none());
+    assert!(storage.find_blob(blob_1.hash())?.is_none());
+    assert!(storage.find_blob(blob_2.hash())?.is_none());
+    assert!(storage.find_blob(blob_3.hash())?.is_none());
 
-    assert!(storage.read_message(message_1.hash())?.is_none());
-    assert!(storage.read_message(message_2.hash())?.is_none());
-    assert!(storage.read_message(message_3.hash())?.is_none());
+    assert!(storage.read_blob(blob_1.hash())?.is_none());
+    assert!(storage.read_blob(blob_2.hash())?.is_none());
+    assert!(storage.read_blob(blob_3.hash())?.is_none());
 
     // 3. In-order writing.
     //
@@ -397,17 +428,17 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), StorageError> {
     assert_eq!(storage.read_block(block_2.hash())?.as_ref(), Some(&block_2));
     assert_eq!(storage.read_block(block_3.hash())?.as_ref(), Some(&block_3));
 
-    assert!(storage.has_message(message_1.hash())?);
-    assert!(storage.has_message(message_2.hash())?);
-    assert!(storage.has_message(message_3.hash())?);
+    assert!(storage.has_blob(blob_1.hash())?);
+    assert!(storage.has_blob(blob_2.hash())?);
+    assert!(storage.has_blob(blob_3.hash())?);
 
-    assert_eq!(storage.find_message(message_1.hash())?, Some(*block_2.hash()));
-    assert_eq!(storage.find_message(message_2.hash())?, Some(*block_3.hash()));
-    assert_eq!(storage.find_message(message_3.hash())?, Some(*block_3.hash()));
+    assert_eq!(storage.find_blob(blob_1.hash())?, Some(*block_2.hash()));
+    assert_eq!(storage.find_blob(blob_2.hash())?, Some(*block_3.hash()));
+    assert_eq!(storage.find_blob(blob_3.hash())?, Some(*block_3.hash()));
 
-    assert_eq!(storage.read_message(message_1.hash())?.as_ref(), Some(&message_1));
-    assert_eq!(storage.read_message(message_2.hash())?.as_ref(), Some(&message_2));
-    assert_eq!(storage.read_message(message_3.hash())?.as_ref(), Some(&message_3));
+    assert_eq!(storage.read_blob(blob_1.hash())?.as_ref(), Some(&blob_1));
+    assert_eq!(storage.read_blob(blob_2.hash())?.as_ref(), Some(&blob_2));
+    assert_eq!(storage.read_blob(blob_3.hash())?.as_ref(), Some(&blob_3));
 
     // 4. Tail block modification.
     //
@@ -415,9 +446,10 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), StorageError> {
     // Original block 3 must be removed completely. Message 3 must disappear
     // from the storage.
 
-    let block_3_alt = Block::create(&signing_key, block_2.hash(), [
-        message_2.clone()
-    ]).unwrap();
+    let block_3_alt = Block::builder()
+        .with_prev_hash(block_2.hash())
+        .with_inline_blobs([blob_2.clone()])
+        .sign(&signing_key)?;
 
     assert_eq!(
         storage.write_block(&block_3_alt)?,
@@ -445,17 +477,17 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), StorageError> {
     assert!(storage.read_block(block_3.hash())?.is_none());
     assert_eq!(storage.read_block(block_3_alt.hash())?.as_ref(), Some(&block_3_alt));
 
-    assert!(storage.has_message(message_1.hash())?);
-    assert!(storage.has_message(message_2.hash())?);
-    assert!(!storage.has_message(message_3.hash())?);
+    assert!(storage.has_blob(blob_1.hash())?);
+    assert!(storage.has_blob(blob_2.hash())?);
+    assert!(!storage.has_blob(blob_3.hash())?);
 
-    assert_eq!(storage.find_message(message_1.hash())?, Some(*block_2.hash()));
-    assert_eq!(storage.find_message(message_2.hash())?, Some(*block_3_alt.hash()));
-    assert!(storage.find_message(message_3.hash())?.is_none());
+    assert_eq!(storage.find_blob(blob_1.hash())?, Some(*block_2.hash()));
+    assert_eq!(storage.find_blob(blob_2.hash())?, Some(*block_3_alt.hash()));
+    assert!(storage.find_blob(blob_3.hash())?.is_none());
 
-    assert_eq!(storage.read_message(message_1.hash())?.as_ref(), Some(&message_1));
-    assert_eq!(storage.read_message(message_2.hash())?.as_ref(), Some(&message_2));
-    assert!(storage.read_message(message_3.hash())?.is_none());
+    assert_eq!(storage.read_blob(blob_1.hash())?.as_ref(), Some(&blob_1));
+    assert_eq!(storage.read_blob(blob_2.hash())?.as_ref(), Some(&blob_2));
+    assert!(storage.read_blob(blob_3.hash())?.is_none());
 
     // 5. Middle block modification.
     //
@@ -464,9 +496,10 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), StorageError> {
     // is not correct anymore. Message 1 must disappear since it was stored in
     // previous block 2.
 
-    let block_2_alt = Block::create(&signing_key, block_1.hash(), [
-        message_2.clone()
-    ]).unwrap();
+    let block_2_alt = Block::builder()
+        .with_prev_hash(block_1.hash())
+        .with_inline_blobs([blob_2.clone()])
+        .sign(&signing_key)?;
 
     assert_eq!(
         storage.write_block(&block_2_alt)?,
@@ -500,17 +533,17 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), StorageError> {
     assert!(storage.read_block(block_3.hash())?.is_none());
     assert!(storage.read_block(block_3_alt.hash())?.is_none());
 
-    assert!(!storage.has_message(message_1.hash())?);
-    assert!(storage.has_message(message_2.hash())?);
-    assert!(!storage.has_message(message_3.hash())?);
+    assert!(!storage.has_blob(blob_1.hash())?);
+    assert!(storage.has_blob(blob_2.hash())?);
+    assert!(!storage.has_blob(blob_3.hash())?);
 
-    assert!(storage.find_message(message_1.hash())?.is_none());
-    assert_eq!(storage.find_message(message_2.hash())?, Some(*block_2_alt.hash()));
-    assert!(storage.find_message(message_3.hash())?.is_none());
+    assert!(storage.find_blob(blob_1.hash())?.is_none());
+    assert_eq!(storage.find_blob(blob_2.hash())?, Some(*block_2_alt.hash()));
+    assert!(storage.find_blob(blob_3.hash())?.is_none());
 
-    assert!(storage.read_message(message_1.hash())?.is_none());
-    assert_eq!(storage.read_message(message_2.hash())?.as_ref(), Some(&message_2));
-    assert!(storage.read_message(message_3.hash())?.is_none());
+    assert!(storage.read_blob(blob_1.hash())?.is_none());
+    assert_eq!(storage.read_blob(blob_2.hash())?.as_ref(), Some(&blob_2));
+    assert!(storage.read_blob(blob_3.hash())?.is_none());
 
     // 6. Root block modification.
     //
@@ -519,10 +552,9 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), StorageError> {
     // is not correct anymore. No blocks but the alternative block 1 must remain
     // in the history at that point. All the messages must disappear.
 
-    // Hand-crafted root block with hash different to block_1.
-    let block_1_alt = Block::create(&signing_key, Hash::ZERO, [
-        message_1.clone()
-    ]).unwrap();
+    let block_1_alt = Block::builder()
+        .with_inline_blobs([blob_1.clone()])
+        .sign(&signing_key)?;
 
     assert_eq!(
         storage.write_block(&block_1_alt)?,
@@ -560,31 +592,35 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), StorageError> {
     assert!(storage.read_block(block_3.hash())?.is_none());
     assert!(storage.read_block(block_3_alt.hash())?.is_none());
 
-    assert!(storage.has_message(message_1.hash())?);
-    assert!(!storage.has_message(message_2.hash())?);
-    assert!(!storage.has_message(message_3.hash())?);
+    assert!(storage.has_blob(blob_1.hash())?);
+    assert!(!storage.has_blob(blob_2.hash())?);
+    assert!(!storage.has_blob(blob_3.hash())?);
 
-    assert_eq!(storage.find_message(message_1.hash())?, Some(*block_1_alt.hash()));
-    assert!(storage.find_message(message_2.hash())?.is_none());
-    assert!(storage.find_message(message_3.hash())?.is_none());
+    assert_eq!(storage.find_blob(blob_1.hash())?, Some(*block_1_alt.hash()));
+    assert!(storage.find_blob(blob_2.hash())?.is_none());
+    assert!(storage.find_blob(blob_3.hash())?.is_none());
 
-    assert_eq!(storage.read_message(message_1.hash())?.as_ref(), Some(&message_1));
-    assert!(storage.read_message(message_2.hash())?.is_none());
-    assert!(storage.read_message(message_3.hash())?.is_none());
+    assert_eq!(storage.read_blob(blob_1.hash())?.as_ref(), Some(&blob_1));
+    assert!(storage.read_blob(blob_2.hash())?.is_none());
+    assert!(storage.read_blob(blob_3.hash())?.is_none());
 
     // 7. Try to write blocks with the same messages.
     //
     // New alternative block 2 must be correctly written, but new alternative
     // block 3 must be rejected since it contains the same message.
 
-    let new_block_2_alt = Block::create(&signing_key, block_1_alt.hash(), [
-        message_2.clone()
-    ]).unwrap();
+    let new_block_2_alt = Block::builder()
+        .with_prev_hash(block_1_alt.hash())
+        .with_inline_blobs([blob_2.clone()])
+        .sign(&signing_key)?;
 
-    let new_block_3_alt = Block::create(&signing_key, new_block_2_alt.hash(), [
-        message_3.clone(),
-        message_1.clone() // repeat block_1_alt
-    ]).unwrap();
+    let new_block_3_alt = Block::builder()
+        .with_prev_hash(new_block_2_alt.hash())
+        .with_inline_blobs([
+            blob_3.clone(),
+            blob_1.clone() // repeat block_1_alt
+        ])
+        .sign(&signing_key)?;
 
     assert_eq!(
         storage.write_block(&new_block_2_alt)?,
@@ -593,24 +629,24 @@ pub fn test_storage<S: Storage>(storage: &S) -> Result<(), StorageError> {
 
     assert_eq!(
         storage.write_block(&new_block_3_alt)?,
-        StorageWriteResult::BlockHasDuplicateHistoryMessages
+        StorageWriteResult::BlockHasDuplicateHistoryBlobs
     );
 
     assert!(storage.has_block(block_1_alt.hash())?);
     assert!(storage.has_block(new_block_2_alt.hash())?);
     assert!(!storage.has_block(new_block_3_alt.hash())?);
 
-    assert!(storage.has_message(message_1.hash())?);
-    assert!(storage.has_message(message_2.hash())?);
-    assert!(!storage.has_message(message_3.hash())?);
+    assert!(storage.has_blob(blob_1.hash())?);
+    assert!(storage.has_blob(blob_2.hash())?);
+    assert!(!storage.has_blob(blob_3.hash())?);
 
-    assert_eq!(storage.find_message(message_1.hash())?, Some(*block_1_alt.hash()));
-    assert_eq!(storage.find_message(message_2.hash())?, Some(*new_block_2_alt.hash()));
-    assert!(storage.find_message(message_3.hash())?.is_none());
+    assert_eq!(storage.find_blob(blob_1.hash())?, Some(*block_1_alt.hash()));
+    assert_eq!(storage.find_blob(blob_2.hash())?, Some(*new_block_2_alt.hash()));
+    assert!(storage.find_blob(blob_3.hash())?.is_none());
 
-    assert_eq!(storage.read_message(message_1.hash())?.as_ref(), Some(&message_1));
-    assert_eq!(storage.read_message(message_2.hash())?.as_ref(), Some(&message_2));
-    assert!(storage.read_message(message_3.hash())?.is_none());
+    assert_eq!(storage.read_blob(blob_1.hash())?.as_ref(), Some(&blob_1));
+    assert_eq!(storage.read_blob(blob_2.hash())?.as_ref(), Some(&blob_2));
+    assert!(storage.read_blob(blob_3.hash())?.is_none());
 
     Ok(())
 }

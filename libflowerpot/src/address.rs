@@ -35,6 +35,18 @@ impl Address {
         Self(verifying_key.into(), chain_id)
     }
 
+    /// Get verifying key of a blockchain validator this address points to.
+    #[inline]
+    pub const fn verifying_key(&self) -> &VerifyingKey {
+        &self.0
+    }
+
+    /// Get chain identifier of a blockchain this address points to.
+    #[inline]
+    pub const fn chain_id(&self) -> u32 {
+        self.1
+    }
+
     /// Encode current blockchain address into a binary representation.
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut buf = [0; Self::SIZE];

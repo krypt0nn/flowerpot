@@ -20,8 +20,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use crate::crypto::hash::Hash;
-use crate::crypto::sign::{VerifyingKey, SignatureError};
-use crate::blob::Message;
+use crate::crypto::sign::SignatureError;
+use crate::blob::Blob;
 use crate::block::Block;
 
 use super::{Storage, StorageWriteResult, StorageError};
@@ -36,12 +36,17 @@ pub enum RamStorageError {
 }
 
 #[inline]
-fn has_message(
+fn has_blob(
     blocks: &RwLockReadGuard<'_, HashMap<Hash, Block>>,
+    blobs: &RwLockReadGuard<'_, HashMap<Hash, Blob>>,
     hash: &Hash
 ) -> bool {
+    if blobs.contains_key(hash) {
+        return true;
+    }
+
     for block in blocks.values() {
-        if block.messages().iter().any(|message| message.hash() == hash) {
+        if block.inline_blobs().iter().any(|blob| blob.hash() == hash) {
             return true;
         }
     }
@@ -50,12 +55,16 @@ fn has_message(
 }
 
 #[inline]
-fn find_message(
+fn find_blob(
     blocks: &RwLockReadGuard<'_, HashMap<Hash, Block>>,
     hash: &Hash
 ) -> Option<Hash> {
     for (block_hash, block) in blocks.iter() {
-        if block.messages().iter().any(|message| message.hash() == hash) {
+        if block.blobs().contains(hash) {
+            return Some(*block_hash);
+        }
+
+        if block.inline_blobs().iter().any(|blob| blob.hash() == hash) {
             return Some(*block_hash);
         }
     }
@@ -64,17 +73,22 @@ fn find_message(
 }
 
 #[inline]
-fn read_message(
+fn read_blob(
     blocks: &RwLockReadGuard<'_, HashMap<Hash, Block>>,
+    blobs: &RwLockReadGuard<'_, HashMap<Hash, Blob>>,
     hash: &Hash
-) -> Option<Message> {
-    for block in blocks.values() {
-        let message = block.messages()
-            .iter()
-            .find(|message| message.hash() == hash);
+) -> Option<Blob> {
+    if let Some(blob) = blobs.get(hash).cloned() {
+        return Some(blob);
+    }
 
-        if let Some(message) = message.cloned() {
-            return Some(message);
+    for block in blocks.values() {
+        let blob = block.inline_blobs()
+            .iter()
+            .find(|blob| blob.hash() == hash);
+
+        if let Some(blob) = blob.cloned() {
+            return Some(blob);
         }
     }
 
@@ -86,11 +100,11 @@ pub struct RamStorage {
     /// Table of stored blocks.
     blocks: Arc<RwLock<HashMap<Hash, Block>>>,
 
-    /// List of blocks hashes in historical order.
-    history: Arc<RwLock<Vec<Hash>>>,
+    /// Table of stored blobs.
+    blobs: Arc<RwLock<HashMap<Hash, Blob>>>,
 
-    /// Verifying key of the root block author (blockchain validator).
-    validator: Arc<RwLock<Option<VerifyingKey>>>
+    /// List of blocks hashes in historical order.
+    history: Arc<RwLock<Vec<Hash>>>
 }
 
 impl RamStorage {
@@ -189,11 +203,17 @@ impl Storage for RamStorage {
         };
 
         #[inline]
-        fn block_has_duplicate_messages(block: &Block) -> bool {
-            let mut messages = HashSet::new();
+        fn block_has_duplicate_blobs(block: &Block) -> bool {
+            let mut blobs = HashSet::new();
 
-            for message in block.messages() {
-                if !messages.insert(message.hash()) {
+            for hash in block.blobs() {
+                if !blobs.insert(hash) {
+                    return true;
+                }
+            }
+
+            for blob in block.inline_blobs() {
+                if !blobs.insert(blob.hash()) {
                     return true;
                 }
             }
@@ -202,23 +222,35 @@ impl Storage for RamStorage {
         }
 
         #[inline]
-        fn block_has_duplicate_messages_in_history(
+        fn block_has_duplicate_blobs_in_history(
             block: &Block,
             blocks: &HashMap<Hash, Block>,
             history: &[Hash]
         ) -> bool {
-            let mut messages = HashSet::new();
+            let mut blobs = HashSet::new();
 
-            for message in block.messages() {
-                if !messages.insert(message.hash()) {
+            for hash in block.blobs() {
+                if !blobs.insert(hash) {
+                    return true;
+                }
+            }
+
+            for blob in block.inline_blobs() {
+                if !blobs.insert(blob.hash()) {
                     return true;
                 }
             }
 
             for hash in history {
                 if let Some(block) = blocks.get(hash) {
-                    for message in block.messages() {
-                        if !messages.insert(message.hash()) {
+                    for hash in block.blobs() {
+                        if !blobs.insert(hash) {
+                            return true;
+                        }
+                    }
+
+                    for blob in block.inline_blobs() {
+                        if !blobs.insert(blob.hash()) {
                             return true;
                         }
                     }
@@ -233,9 +265,9 @@ impl Storage for RamStorage {
             Ok(StorageWriteResult::BlockAlreadyStored)
         }
 
-        // Ignore block if it has duplicate messages in it.
-        else if block_has_duplicate_messages(block) {
-            Ok(StorageWriteResult::BlockHasDuplicateMessages)
+        // Ignore block if it has duplicate blobs in it.
+        else if block_has_duplicate_blobs(block) {
+            Ok(StorageWriteResult::BlockHasDuplicateBlobs)
         }
 
         // Attempt to store the root block of the blockchain.
@@ -245,7 +277,7 @@ impl Storage for RamStorage {
                 return Ok(StorageWriteResult::NotRootBlock);
             }
 
-            let (is_valid, public_key) = block.verify()?;
+            let (is_valid, _) = block.verify()?;
 
             // Although it's not a part of convention for this method why would
             // we need an invalid block stored here?
@@ -253,16 +285,11 @@ impl Storage for RamStorage {
                 return Ok(StorageWriteResult::BlockInvalid);
             }
 
-            let Ok(mut validator) = self.validator.write() else {
-                return Err(Box::new(RamStorageError::Lock) as StorageError);
-            };
-
             history.clear();
             blocks.clear();
 
             history.push(*block.hash());
             blocks.insert(*block.hash(), block.clone());
-            validator.replace(public_key);
 
             Ok(StorageWriteResult::Success)
         }
@@ -278,9 +305,9 @@ impl Storage for RamStorage {
         // If the previous block is the last block of the history then we add
         // the new one to the end of the blockchain.
         else if history.last() == Some(block.prev_hash()) {
-            // Reject this block if it contains duplicate messages.
-            if block_has_duplicate_messages_in_history(block, &blocks, &history) {
-                return Ok(StorageWriteResult::BlockHasDuplicateHistoryMessages);
+            // Reject this block if it contains duplicate blobs.
+            if block_has_duplicate_blobs_in_history(block, &blocks, &history) {
+                return Ok(StorageWriteResult::BlockHasDuplicateHistoryBlobs);
             }
 
             history.push(*block.hash());
@@ -303,15 +330,15 @@ impl Storage for RamStorage {
                 i -= 1;
             }
 
-            // Check that the new block has no duplicate messages.
-            if block_has_duplicate_messages_in_history(
+            // Check that the new block has no duplicate blobs.
+            if block_has_duplicate_blobs_in_history(
                 block,
                 &blocks,
                 if i < n { &history[..i] }
                     else if n > 0 { &history[..n - 1] }
                     else { &history }
             ) {
-                return Ok(StorageWriteResult::BlockHasDuplicateHistoryMessages);
+                return Ok(StorageWriteResult::BlockHasDuplicateHistoryBlobs);
             }
 
             // Remove all the following blocks.
@@ -334,41 +361,72 @@ impl Storage for RamStorage {
     }
 
     #[inline]
-    fn has_message(
+    fn has_blob(
         &self,
         hash: &Hash
     ) -> Result<bool, StorageError> {
-        let lock = self.blocks.read()
+        let blocks = self.blocks.read()
             .map_err(|_| RamStorageError::Lock)?;
 
-        Ok(has_message(&lock, hash))
+        let blobs = self.blobs.read()
+            .map_err(|_| RamStorageError::Lock)?;
+
+        Ok(has_blob(&blocks, &blobs, hash))
     }
 
     #[inline]
-    fn find_message(
+    fn find_blob(
         &self,
         hash: &Hash
     ) -> Result<Option<Hash>, StorageError> {
         let lock = self.blocks.read()
             .map_err(|_| RamStorageError::Lock)?;
 
-        Ok(find_message(&lock, hash))
+        Ok(find_blob(&lock, hash))
     }
 
     #[inline]
-    fn read_message(
+    fn read_blob(
         &self,
         hash: &Hash
-    ) -> Result<Option<Message>, StorageError> {
-        let lock = self.blocks.read()
+    ) -> Result<Option<Blob>, StorageError> {
+        let blocks = self.blocks.read()
             .map_err(|_| RamStorageError::Lock)?;
 
-        Ok(read_message(&lock, hash))
+        let blobs = self.blobs.read()
+            .map_err(|_| RamStorageError::Lock)?;
+
+        Ok(read_blob(&blocks, &blobs, hash))
+    }
+
+    #[inline]
+    fn write_blob(&self, blob: &Blob) -> Result<bool, StorageError> {
+        let blocks = self.blocks.read()
+            .map_err(|_| RamStorageError::Lock)?;
+
+        let blobs = self.blobs.read()
+            .map_err(|_| RamStorageError::Lock)?;
+
+        // Do not store a blob which is already stored in some block as inline
+        // blob.
+        if has_blob(&blocks, &blobs, blob.hash()) {
+            return Ok(true);
+        }
+
+        drop(blocks);
+        drop(blobs);
+
+        let mut blobs = self.blobs.write()
+            .map_err(|_| RamStorageError::Lock)?;
+
+        blobs.insert(*blob.hash(), blob.clone());
+
+        Ok(true)
     }
 }
 
 #[test]
-fn test() -> Result<(), StorageError> {
+fn test() -> Result<(), Box<dyn std::error::Error>> {
     let storage = RamStorage::default();
 
     super::test_storage(&storage)?;

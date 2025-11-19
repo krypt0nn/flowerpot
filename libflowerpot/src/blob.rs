@@ -34,6 +34,10 @@ pub enum BlobDecodeError {
     InvalidSignature
 }
 
+// FIXME: it's currently impossible to implement a Storage outside of this lib
+//        because it's impossible to construct Blob struct outside of it from
+//        raw parts.
+
 /// Blob is the smallest, atomic value made by the library users. It contains:
 ///
 /// - A list of binary tags attached to it which could be used to identify
@@ -103,7 +107,7 @@ impl Blob {
     /// Derive current blob's author and verify that the signature is valid.
     #[inline]
     pub fn verify(&self) -> Result<(bool, VerifyingKey), SignatureError> {
-        self.sign.verify(&self.hash)
+        self.sign.verify(self.hash)
     }
 
     /// Encode current blob into a binary representation.
