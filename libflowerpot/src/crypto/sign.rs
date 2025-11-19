@@ -93,6 +93,12 @@ impl From<k256::ecdsa::SigningKey> for SigningKey {
     }
 }
 
+impl std::hash::Hash for SigningKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(&self.to_bytes());
+    }
+}
+
 impl std::fmt::Display for SigningKey {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -155,6 +161,12 @@ impl From<k256::ecdsa::VerifyingKey> for VerifyingKey {
     #[inline(always)]
     fn from(value: k256::ecdsa::VerifyingKey) -> Self {
         Self(value)
+    }
+}
+
+impl std::hash::Hash for VerifyingKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(&self.to_bytes());
     }
 }
 
@@ -243,6 +255,12 @@ impl Signature {
         buf.copy_from_slice(&sign);
 
         Self::from_bytes(&buf)
+    }
+}
+
+impl std::hash::Hash for Signature {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(&self.to_bytes());
     }
 }
 
