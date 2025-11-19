@@ -58,13 +58,7 @@ impl Address {
     }
 
     /// Try to decode a blockchain address from a binary representation.
-    pub fn from_bytes(address: impl AsRef<[u8]>) -> Option<Self> {
-        let address = address.as_ref();
-
-        if address.len() != Self::SIZE {
-            return None;
-        }
-
+    pub fn from_bytes(address: &[u8; Self::SIZE]) -> Option<Self> {
         let mut verifying_key = [0; VerifyingKey::SIZE];
         let mut seed = [0; 4];
 
@@ -84,9 +78,18 @@ impl Address {
     }
 
     /// Try to decode a blockchain address from a base64 string.
-    #[inline]
     pub fn from_base64(address: impl AsRef<[u8]>) -> Option<Self> {
-        Self::from_bytes(base64::decode(address).ok()?)
+        let address = base64::decode(address).ok()?;
+
+        if address.len() != Self::SIZE {
+            return None;
+        }
+
+        let mut buf = [0; Self::SIZE];
+
+        buf.copy_from_slice(&address);
+
+        Self::from_bytes(&buf)
     }
 }
 
