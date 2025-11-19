@@ -26,7 +26,7 @@ use flume::Sender;
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::{SigningKey, VerifyingKey};
-use crate::message::Message;
+use crate::blob::Message;
 use crate::block::{Block, BlockDecodeError};
 use crate::storage::StorageError;
 use crate::protocol::packets::Packet;

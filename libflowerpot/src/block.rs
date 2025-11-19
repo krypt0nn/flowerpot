@@ -21,7 +21,7 @@ use time::UtcDateTime;
 use crate::varint;
 use crate::crypto::hash::{Hash, Hasher};
 use crate::crypto::sign::{SigningKey, VerifyingKey, Signature, SignatureError};
-use crate::message::{Message, MessageDecodeError};
+use crate::blob::{Blob, BlobDecodeError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BlockDecodeError {
@@ -40,50 +40,50 @@ pub enum BlockDecodeError {
     #[error("invalid block signature format")]
     InvalidSignature,
 
-    #[error("invalid message length varint format")]
-    InvalidMessageLength,
+    #[error("invalid blob length varint format")]
+    InvalidBlobLength,
 
     #[error("failed to decode message from a block: {0}")]
-    DecodeMessage(#[from] MessageDecodeError)
+    DecodeBlob(#[from] BlobDecodeError)
 }
 
-#[inline]
-fn encode_messages(messages: &[Message]) -> Box<[u8]> {
-    let mut buf = Vec::new();
-
-    for message in messages {
-        let message = message.to_bytes();
-        let len = varint::write_u64(message.len() as u64);
-
-        buf.extend(len);
-        buf.extend(message);
-    }
-
-    buf.into_boxed_slice()
-}
-
-// TODO: make excuse for root blocks that they don't have messages and instead
-//       store fixed size random slice of data for hash seeding
-
+/// Block is a virtual group containing hashes of different users' blobs,
+/// timestamp of when this group was created, reference to the previous group,
+/// and a digital signature of a network validator.
+///
+/// Blobs hashes are enough to reconstruct the block hash and verify the
+/// signature. Actual blobs content should be requested from the network. Blocks
+/// purpose is to store the *history*, and work as a globally shared *index* of
+/// available content, not to share this content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
+    /// Hash of the previous block.
     pub(crate) prev_hash: Hash,
+
+    /// Hash of the current block. Virtual field, calculated in runtime from
+    /// other fields.
     pub(crate) curr_hash: Hash,
+
+    /// Timestamp when the block was said to be created. Defined by the block
+    /// author and can in fact be different from an actual creation timestamp.
     pub(crate) timestamp: UtcDateTime,
-    pub(crate) messages: Box<[Message]>,
+
+    /// List of hashes of blobs attached to this block.
+    pub(crate) blobs: Box<[Hash]>,
+
+    /// Digital signature proving the block validity and containing its author.
     pub(crate) sign: Signature
 }
 
 impl Block {
-    /// Create new block from provided previous block's hash and list of user
-    /// messages using authority's signing key.
+    /// Create new block.
     pub fn create(
         signing_key: impl AsRef<SigningKey>,
         prev_hash: impl Into<Hash>,
-        messages: impl Into<Box<[Message]>>
+        blobs: impl Into<Box<[Hash]>>
     ) -> Result<Self, SignatureError> {
         let prev_hash: Hash = prev_hash.into();
-        let messages: Box<[Message]> = messages.into();
+        let blobs: Box<[Hash]> = blobs.into();
 
         let timestamp = UtcDateTime::now()
             .replace_nanosecond(0)
@@ -93,7 +93,10 @@ impl Block {
 
         hasher.update(prev_hash.as_bytes());
         hasher.update(timestamp.unix_timestamp().to_le_bytes());
-        hasher.update(encode_messages(&messages));
+
+        for hash in &blobs {
+            hasher.update(hash.as_bytes());
+        }
 
         let curr_hash = hasher.finalize();
 
@@ -103,7 +106,7 @@ impl Block {
             prev_hash,
             curr_hash,
             timestamp,
-            messages,
+            blobs,
             sign
         })
     }
@@ -117,7 +120,7 @@ impl Block {
     }
 
     /// Hash of the previous block.
-    #[inline(always)]
+    #[inline]
     pub const fn prev_hash(&self) -> &Hash {
         &self.prev_hash
     }
@@ -126,25 +129,25 @@ impl Block {
     ///
     /// This value is pre-calculated for performance reasons and is stored in
     /// the struct, so no computations are performed.
-    #[inline(always)]
+    #[inline]
     pub const fn hash(&self) -> &Hash {
         &self.curr_hash
     }
 
     /// Current block creation timestamp (up to seconds precision).
-    #[inline(always)]
+    #[inline]
     pub const fn timestamp(&self) -> &UtcDateTime {
         &self.timestamp
     }
 
-    /// List of messages stored in the current block.
-    #[inline(always)]
-    pub const fn messages(&self) -> &[Message] {
-        &self.messages
+    /// List of hashes of blobs attached to the current block.
+    #[inline]
+    pub const fn blobs(&self) -> &[Hash] {
+        &self.blobs
     }
 
     /// Signature of the current block.
-    #[inline(always)]
+    #[inline]
     pub const fn sign(&self) -> &Signature {
         &self.sign
     }
@@ -153,42 +156,40 @@ impl Block {
     ///
     /// Root block is guatanteed to have `prev_hash = 0`, and its author is
     /// considered the authority of the blockchain.
-    #[inline(always)]
+    #[inline]
     pub fn is_root(&self) -> bool {
         self.prev_hash == Hash::ZERO
     }
 
     /// Verify signature of the current block and return embedded author's
-    /// public key.
+    /// verifying key.
     #[inline]
     pub fn verify(&self) -> Result<(bool, VerifyingKey), SignatureError> {
-        self.sign.verify(self.curr_hash)
+        self.sign.verify(&self.curr_hash)
     }
 
-    /// Encode block into a binary representation.
+    /// Encode current block into a binary representation.
     pub fn to_bytes(&self) -> Box<[u8]> {
         let timestamp = self.timestamp.unix_timestamp();
-        let messages = encode_messages(&self.messages);
 
-        let mut block = Vec::with_capacity(
-            // format, prev_hash, sign, messages
-            1 + Hash::SIZE + Signature::SIZE + messages.len()
-        );
+        let mut block = Vec::new();
 
-        // Format version
+        // Block format version.
         block.push(0);
 
-        // Previous block's hash
+        // Previous block hash (fixed size).
         block.extend(self.prev_hash.as_bytes());
 
-        // Creation timestamp
+        // Creation timestamp (varint).
         block.extend(varint::write_u64(timestamp as u64));
 
-        // Sign
+        // Block signature (fixed size).
         block.extend(self.sign.to_bytes());
 
-        // User messages
-        block.extend(messages);
+        // List of user blobs hashes (rest of the block with fixed-size hashes).
+        for hash in &self.blobs {
+            block.extend(hash.as_bytes());
+        }
 
         block.into_boxed_slice()
     }

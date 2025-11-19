@@ -20,7 +20,7 @@ use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::varint;
 use crate::crypto::hash::Hash;
-use crate::message::{Message, MessageDecodeError};
+use crate::blob::{Message, MessageDecodeError};
 use crate::block::{Block, BlockDecodeError};
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]

@@ -18,7 +18,7 @@
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
-use crate::message::Message;
+use crate::blob::Message;
 use crate::protocol::packets::Packet;
 
 use super::NodeState;

@@ -17,7 +17,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::crypto::hash::Hash;
-use crate::message::Message;
+use crate::blob::Message;
 use crate::block::Block;
 
 #[cfg(feature = "ram_storage")]

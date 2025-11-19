@@ -26,7 +26,7 @@ use time::UtcDateTime;
 
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::Signature;
-use crate::message::Message;
+use crate::blob::Message;
 use crate::block::Block;
 
 use super::{Storage, StorageWriteResult, StorageError};

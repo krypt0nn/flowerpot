@@ -21,7 +21,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::{VerifyingKey, SignatureError};
-use crate::message::Message;
+use crate::blob::Message;
 use crate::block::Block;
 
 use super::{Storage, StorageWriteResult, StorageError};

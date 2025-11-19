@@ -20,7 +20,7 @@ use std::collections::HashSet;
 
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::SignatureError;
-use crate::message::Message;
+use crate::blob::Message;
 use crate::block::Block;
 use crate::storage::{Storage, StorageError, StorageWriteResult};
 

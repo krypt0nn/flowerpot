@@ -20,7 +20,7 @@ pub use k256;
 
 pub mod varint;
 pub mod crypto;
-pub mod message;
+pub mod blob;
 pub mod block;
 pub mod storage;
 pub mod protocol;
