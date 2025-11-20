@@ -491,7 +491,7 @@ impl Packet {
                     let (Some(block_len), shifted_packet) = varint::read_u64(packet) else {
                         return Err(PacketDecodeError::InvalidParam {
                             packet_type: "V1_HISTORY",
-                            param: "max_length"
+                            param: "block_len"
                         });
                     };
 
@@ -718,6 +718,10 @@ fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
         },
 
         Packet::Nodes {
+            nodes: Box::new([])
+        },
+
+        Packet::Nodes {
             nodes: Box::new([
                 "127.0.0.1:10001".parse::<SocketAddr>().unwrap(),
                 "[::]:10002".parse::<SocketAddr>().unwrap(),
@@ -731,6 +735,12 @@ fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
             address: Address::new(signing_key.verifying_key(), 123),
             since_block: Hash::ZERO,
             max_length: u32::MAX as u64
+        },
+
+        Packet::History {
+            address: Address::new(signing_key.verifying_key(), 123),
+            since_block: Hash::ZERO,
+            history: Box::new([])
         },
 
         Packet::History {
@@ -760,11 +770,21 @@ fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
 
         Packet::AskPendingMessages {
             address: Address::new(signing_key.verifying_key(), 123),
+            except: Box::new([])
+        },
+
+        Packet::AskPendingMessages {
+            address: Address::new(signing_key.verifying_key(), 123),
             except: Box::new([
                 Hash::calc(b"Test 1"),
                 Hash::calc(b"Test 2"),
                 Hash::calc(b"Test 3")
             ])
+        },
+
+        Packet::PendingMessages {
+            address: Address::new(signing_key.verifying_key(), 123),
+            messages: Box::new([])
         },
 
         Packet::PendingMessages {
