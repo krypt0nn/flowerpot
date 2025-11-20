@@ -230,8 +230,21 @@ impl Default for PacketStreamOptions {
     }
 }
 
-/// Abstraction over a transport protocol data stream which supports packets
-/// sending and receiving, endpoint validation and optional stream encryption.
+#[derive(Default, Debug, Clone, Copy, PartialEq)]
+pub struct PacketStreamStats {
+    /// Total amount of uploaded (written) bytes.
+    pub upload_total: u64,
+
+    /// Total amount of downloaded (read) bytes.
+    pub download_total: u64,
+
+    /// Approximate bytes uploading (writing) speed per second.
+    pub upload_rate: f64,
+
+    /// Approximate bytes downloading (reading) speed per second.
+    pub download_rate: f64
+}
+
 #[derive(Debug)]
 pub struct PacketStream {
     stream: TcpStream,
@@ -241,7 +254,8 @@ pub struct PacketStream {
     read_encryptor: Option<PacketStreamEncryptor>,
     write_encryptor: Option<PacketStreamEncryptor>,
     buf: Vec<u8>,
-    peek_queue: VecDeque<Packet>
+    peek_queue: VecDeque<Packet>,
+    stats: PacketStreamStats
 }
 
 impl PacketStream {
@@ -506,7 +520,8 @@ impl PacketStream {
             read_encryptor,
             write_encryptor,
             buf: Vec::new(),
-            peek_queue: VecDeque::new()
+            peek_queue: VecDeque::new(),
+            stats: PacketStreamStats::default()
         })
     }
 
@@ -526,7 +541,7 @@ impl PacketStream {
     ///
     /// It is derived from the remote party's public key and can be used to
     /// keep only one connection with the same remote endpoint at once.
-    #[inline(always)]
+    #[inline]
     pub const fn local_id(&self) -> &[u8; 32] {
         &self.local_id
     }
@@ -535,15 +550,21 @@ impl PacketStream {
     ///
     /// It is derived from the remote party's public key and can be used to
     /// keep only one connection with the same remote endpoint at once.
-    #[inline(always)]
+    #[inline]
     pub const fn peer_id(&self) -> &[u8; 32] {
         &self.peer_id
     }
 
     /// Get shared secret for this stream.
-    #[inline(always)]
+    #[inline]
     pub const fn shared_secret(&self) -> &[u8; 32] {
         &self.shared_secret
+    }
+
+    /// Get packet stream stats.
+    #[inline]
+    pub const fn stats(&self) -> &PacketStreamStats {
+        &self.stats
     }
 
     /// Try to send a packet.
@@ -573,6 +594,8 @@ impl PacketStream {
             encryptor.apply(&mut packet);
         }
 
+        let now = std::time::Instant::now();
+
         let mut i = 0;
 
         while i < 4 {
@@ -601,6 +624,13 @@ impl PacketStream {
             }
         }
 
+        let elapsed = now.elapsed().as_secs_f64();
+
+        let upload_rate = (packet.len() + 4) as f64 / elapsed;
+
+        self.stats.upload_total += packet.len() as u64 + 4;
+        self.stats.upload_rate = (upload_rate * 2.0 + self.stats.upload_rate) / 3.0;
+
         Ok(())
     }
 
@@ -618,6 +648,9 @@ impl PacketStream {
 
         // Try to read a new packet in chunks of 4096 bytes.
         let mut buf = [0; 4096];
+        let mut read = 0;
+
+        let now = std::time::Instant::now();
 
         loop {
             let n = self.buf.len();
@@ -657,11 +690,24 @@ impl PacketStream {
 
                     // And write it to the buffer.
                     self.buf.extend(&buf[..n]);
+
+                    read += n as u64;
                 },
 
                 // Otherwise, if stream doesn't contain any more data - then
                 // return from method saying that there's no packet to read yet.
-                Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(None),
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    if read > 0 {
+                        let elapsed = now.elapsed().as_secs_f64();
+
+                        let download_rate = read as f64 / elapsed;
+
+                        self.stats.download_total += read;
+                        self.stats.download_rate = (download_rate * 2.0 + self.stats.download_rate) / 3.0;
+                    }
+
+                    return Ok(None);
+                }
 
                 // Propagate the error.
                 Err(err) => return Err(PacketStreamError::Stream(err))
