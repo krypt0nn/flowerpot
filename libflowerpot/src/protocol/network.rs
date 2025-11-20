@@ -585,7 +585,13 @@ impl PacketStream {
         }
 
         #[cfg(feature = "tracing")]
-        tracing::trace!(?length, stats = ?self.stats, "write packet");
+        tracing::trace!(
+            ?length,
+            local_id = base64::encode(self.local_id),
+            peer_id = base64::encode(self.peer_id),
+            stats = ?self.stats,
+            "write packet"
+        );
 
         let mut length: [u8; 4] = (length as u32).to_le_bytes();
 
@@ -665,7 +671,13 @@ impl PacketStream {
                 // If we already have the whole packet.
                 if n >= length + 4 {
                     #[cfg(feature = "tracing")]
-                    tracing::trace!(?length, stats = ?self.stats, "read packet");
+                    tracing::trace!(
+                        ?length,
+                        local_id = base64::encode(self.local_id),
+                        peer_id = base64::encode(self.peer_id),
+                        stats = ?self.stats,
+                        "read packet"
+                    );
 
                     // Try to decode it.
                     let packet = Packet::from_bytes(&self.buf[4..length + 4]);
