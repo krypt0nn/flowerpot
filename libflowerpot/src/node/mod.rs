@@ -26,8 +26,9 @@ use flume::Sender;
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::{SigningKey, VerifyingKey};
-use crate::blob::Message;
+use crate::blob::Blob;
 use crate::block::{Block, BlockDecodeError};
+use crate::address::Address;
 use crate::storage::StorageError;
 use crate::protocol::packets::Packet;
 use crate::protocol::network::{PacketStream, PacketStreamError};
@@ -58,37 +59,27 @@ pub enum NodeError {
     Block(BlockDecodeError)
 }
 
+// TODO: get rid of tracker and work with storage directly; implement something
+//       to download not-inline blobs from blocks; consider renaming them into
+//       like local_blobs and network_blobs.
+
 #[derive(Debug, Clone, Copy)]
 pub struct NodeOptions {
-    /// Maximal length of the `History` packet which will be sent as a response
-    /// on the `AskHistory` packet.
+    /// Maximal amount of blocks included to the `History` packet which will be
+    /// sent as a response on the `AskHistory` packet.
     ///
-    /// The `History` packet scales linearly with abount 32 bytes per history
-    /// entry, so it doesn't take much space and network bandwidth to be sent.
-    /// It is not recommended to keep this value low - this will result in
-    /// increased amount of `AskHistory` packets.
-    ///
-    /// Default is `1024`.
+    /// Default is `32`.
     pub max_history_length: usize,
 
-    /// Maximal size in bytes of a user message.
+    /// Accept incoming blobs.
     ///
-    /// Bigger messages will be rejected immediately upon receiving.
-    ///
-    /// > This is applied to the `Message` packets only.
-    ///
-    /// Default is `33554432` bytes (32 MiB).
-    pub max_message_size: usize,
-
-    /// Accept incoming messages.
-    ///
-    /// This option disables the `Message` packet processing.
+    /// This option disables the `Blob` packet processing.
     ///
     /// If disabled your node will not act as a normal blockchain node and
     /// reduce overall network quality.
     ///
     /// Default is `true`.
-    pub accept_messages: bool,
+    pub accept_blobs: bool,
 
     /// Accept incoming blocks.
     ///
@@ -116,44 +107,34 @@ pub struct NodeOptions {
     /// Default is `true`.
     pub fetch_pending_messages: bool,
 
-    /// When specified this function will be used to filter incoming messages
+    /// When specified this function will be used to filter incoming blobs
     /// and accept only those for which the provided function returned `true`.
     ///
-    /// This filter function is applied to the `Message` packets only. It is not
-    /// applied to the blocks, so you'd need to specify the `blocks_filter` as
-    /// well.
-    ///
     /// The function's inputs are
-    /// `(root_block_hash, message, message_verifying_key)`.
+    /// `(address, blob, blob_verifying_key)`.
     ///
-    /// Default is `None` (every message is accepted).
-    pub messages_filter: Option<fn(&Hash, &Message, &VerifyingKey) -> bool>,
-
-    /// Amount of time a validator thread will wait before starting to create
-    /// new blocks. This time is needed so that the node can synchronize all the
-    /// pending data. It is recommended to keep this value relatively high, as
-    /// it will be used only initially and won't affect further algorithm work.
-    ///
-    /// Default is `1m`.
-    pub validator_warmup_time: Duration,
+    /// Default is `None` (every blob is accepted).
+    pub blobs_filter: Option<fn(&Address, &Blob, &VerifyingKey) -> bool>,
 
     /// Amount of time a validator thread will wait before trying to make a new
     /// block. This timeout is needed because validator thread will lock node
     /// handler and prevent other threads to access internal structures which
-    /// are needed for the node to function normally.
+    /// are needed for the node to function normally. It's also adviced against
+    /// issuing new blocks very frequently and recommended to try to batch
+    /// multiple blobs within a single block.
     ///
     /// Default is `10s`.
     pub validator_wait_time: Duration,
 
-    /// Minimal amount of messages needed to form a new block.
+    /// Minimal amount of blobs needed to form a new block.
     ///
     /// Default is `1`.
-    pub validator_min_messages_num: usize,
+    pub validator_min_blobs_num: usize,
 
-    /// Maximal amount of messages needed to form a new block.
+    /// Maximal amount of blobs needed to form a new block.
     ///
     /// Default is `128`.
-    pub validator_max_messages_num: usize
+    pub validator_max_blobs_num: usize
 }
 
 impl Default for NodeOptions {
@@ -165,7 +146,6 @@ impl Default for NodeOptions {
             accept_blocks: true,
             fetch_pending_messages: true,
             messages_filter: None,
-            validator_warmup_time: Duration::from_secs(60),
             validator_wait_time: Duration::from_secs(10),
             validator_min_messages_num: 1,
             validator_max_messages_num: 128

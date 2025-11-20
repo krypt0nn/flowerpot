@@ -20,7 +20,7 @@ use std::collections::HashSet;
 
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::SignatureError;
-use crate::blob::Message;
+use crate::blob::Blob;
 use crate::block::Block;
 use crate::storage::{Storage, StorageError, StorageWriteResult};
 
@@ -37,14 +37,14 @@ pub enum TrackerError {
 /// blockchain and synchronizes it with a storage if it's provided.
 pub enum Tracker {
     /// Data + metadata tracker.
-    Full(Box<dyn Storage + Send>),
+    Storage(Box<dyn Storage + Send>),
 
-    /// Metadata-only tracker.
-    HeadOnly {
-        /// List of messages indexed in the blocks.
+    /// Metadata-only in-RAM tracker.
+    Memory {
+        /// List of blobs indexed in the blocks.
         ///
-        /// This table is needed to prevent double-indexing of messages.
-        messages: HashSet<Hash>,
+        /// This table is needed to prevent double-indexing of blobs.
+        blobs: HashSet<Hash>,
 
         /// List of blocks hashes in historic order.
         blocks: Vec<Hash>
@@ -52,9 +52,10 @@ pub enum Tracker {
 }
 
 impl Default for Tracker {
+    #[inline]
     fn default() -> Self {
-        Self::HeadOnly {
-            messages: HashSet::new(),
+        Self::Memory {
+            blobs: HashSet::new(),
             blocks: Vec::new()
         }
     }
@@ -64,46 +65,46 @@ impl Tracker {
     /// Create new tracker from provided blockchain storage.
     #[inline]
     pub fn from_storage(storage: impl Storage + Send + 'static) -> Self {
-        Self::Full(Box::new(storage))
+        Self::Storage(Box::new(storage))
     }
 
     /// Get reference to the blockchain storage if the tracker owns it.
     #[inline]
     pub fn storage(&self) -> Option<&dyn Storage> {
         match self {
-            Self::Full(storage) => Some(storage.as_ref()),
-            Self::HeadOnly { .. } => None
+            Self::Storage(storage) => Some(storage.as_ref()),
+            Self::Memory { .. } => None
         }
     }
 
     /// Try to get the root block of the blockchain.
     pub fn get_root_block(&self) -> Result<Option<Hash>, TrackerError> {
         match self {
-            Self::Full(storage) => storage.root_block()
+            Self::Storage(storage) => storage.root_block()
                 .map_err(TrackerError::Storage),
 
-            Self::HeadOnly { blocks, .. } => Ok(blocks.first().copied())
+            Self::Memory { blocks, .. } => Ok(blocks.first().copied())
         }
     }
 
     /// Try to get the tail block of the blockchain.
     pub fn get_tail_block(&self) -> Result<Option<Hash>, TrackerError> {
         match self {
-            Self::Full(storage) => storage.tail_block()
+            Self::Storage(storage) => storage.tail_block()
                 .map_err(TrackerError::Storage),
 
-            Self::HeadOnly { blocks, .. } => Ok(blocks.last().copied())
+            Self::Memory { blocks, .. } => Ok(blocks.last().copied())
         }
     }
 
-    /// Try to check if message with provided hash is stored in the blockchain.
-    pub fn has_message(&self, hash: &Hash) -> Result<bool, TrackerError> {
+    /// Try to check if blob with provided hash is stored in the blockchain.
+    pub fn has_blob(&self, hash: &Hash) -> Result<bool, TrackerError> {
         match self {
-            Self::Full(storage) => storage.has_message(hash)
+            Self::Storage(storage) => storage.has_blob(hash)
                 .map_err(TrackerError::Storage),
 
-            Self::HeadOnly { messages, .. } => {
-                Ok(messages.contains(hash))
+            Self::Memory { blobs, .. } => {
+                Ok(blobs.contains(hash))
             }
         }
     }
@@ -111,57 +112,57 @@ impl Tracker {
     /// Try to check if block with provided hash is stored in the blockchain.
     pub fn has_block(&self, hash: &Hash) -> Result<bool, TrackerError> {
         match self {
-            Self::Full(storage) => storage.has_block(hash)
+            Self::Storage(storage) => storage.has_block(hash)
                 .map_err(TrackerError::Storage),
 
-            Self::HeadOnly { blocks, .. } => Ok(blocks.contains(hash))
+            Self::Memory { blocks, .. } => Ok(blocks.contains(hash))
         }
     }
 
-    /// Try to read message from the underlying blockchain storage.
+    /// Try to read blob from the underlying blockchain storage.
     ///
     /// This method will return `Ok(Some(..))` *only* if tracker has a storage.
-    /// Head-only tracker doesn't store any actual data besides the hashes and
-    /// cannot read transactions.
-    pub fn read_message(
+    /// Metadata-only tracker doesn't store any actual data besides the hashes
+    /// and cannot read blobs.
+    pub fn read_blob(
         &self,
         hash: &Hash
-    ) -> Result<Option<Message>, TrackerError> {
+    ) -> Result<Option<Blob>, TrackerError> {
         match self {
-            Self::Full(storage) => storage.read_message(hash)
+            Self::Storage(storage) => storage.read_blob(hash)
                 .map_err(TrackerError::Storage),
 
-            Self::HeadOnly { .. } => Ok(None)
+            Self::Memory { .. } => Ok(None)
         }
     }
 
     /// Try to read block from the underlying blockchain storage.
     ///
     /// This method will return `Ok(Some(..))` *only* if tracker has a storage.
-    /// Head-only tracker doesn't store any actual data besides the hashes and
-    /// cannot read block.
+    /// Metadata-only tracker doesn't store any actual data besides the hashes
+    /// and cannot read block.
     pub fn read_block(
         &self,
         hash: &Hash
     ) -> Result<Option<Block>, TrackerError> {
         match self {
-            Self::Full(storage) => storage.read_block(hash)
+            Self::Storage(storage) => storage.read_block(hash)
                 .map_err(TrackerError::Storage),
 
-            Self::HeadOnly { .. } => Ok(None)
+            Self::Memory { .. } => Ok(None)
         }
     }
 
     /// Try to get a part of the known blockchain history. Returned slice will
-    /// *not* contain the `since_block` hash and be at most `max_length` values
+    /// *not* contain the `since_block` hash and be at most `max_length` blocks
     /// long.
     pub fn get_history(
         &self,
         since_block: Hash,
         max_length: usize
-    ) -> Result<Box<[Hash]>, TrackerError> {
+    ) -> Result<Box<[Block]>, TrackerError> {
         match self {
-            Self::Full(storage) => {
+            Self::Storage(storage) => {
                 let mut history = Vec::with_capacity(max_length);
                 let mut curr_block = since_block;
 
@@ -181,7 +182,7 @@ impl Tracker {
                 Ok(history.into_boxed_slice())
             }
 
-            Self::HeadOnly { blocks, .. } => {
+            Self::Memory { blocks, .. } => {
                 let history = blocks.iter()
                     .skip_while(|hash| hash != &&since_block)
                     .skip(1)
@@ -234,10 +235,10 @@ impl Tracker {
                     );
 
                     match self {
-                        Self::Full(storage) => storage.write_block(block)
+                        Self::Storage(storage) => storage.write_block(block)
                             .map_err(TrackerError::Storage),
 
-                        Self::HeadOnly { messages, blocks, .. } => {
+                        Self::Memory { messages, blocks, .. } => {
                             // Store this block in the history.
                             blocks.push(*block.hash());
 
@@ -305,10 +306,10 @@ impl Tracker {
                 );
 
                 match self {
-                    Self::Full(storage) => storage.write_block(block)
+                    Self::Storage(storage) => storage.write_block(block)
                         .map_err(TrackerError::Storage),
 
-                    Self::HeadOnly { messages, blocks } => {
+                    Self::Memory { messages, blocks } => {
                         // Clear the containers just in case.
                         blocks.clear();
                         messages.clear();

@@ -20,49 +20,43 @@ use crate::crypto::hash::Hash;
 use crate::crypto::sign::{SigningKey, VerifyingKey, Signature, SignatureError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum BlobDecodeError {
-    #[error("encoded blob is too short: got {got} bytes, at least {expected} expected")]
+pub enum MessageDecodeError {
+    #[error("encoded message is too short: got {got} bytes, at least {expected} expected")]
     TooShort {
         got: usize,
         expected: usize
     },
 
-    #[error("unsupported blob format: {0:0X}")]
+    #[error("unsupported message format: {0:0X}")]
     UnsupportedFormat(u8),
 
-    #[error("invalid blob signature format")]
+    #[error("invalid message signature format")]
     InvalidSignature
 }
 
 // FIXME: it's currently impossible to implement a Storage outside of this lib
-//        because it's impossible to construct Blob struct outside of it from
+//        because it's impossible to construct Message struct outside of it from
 //        raw parts.
 
-/// Blob is the smallest, atomic value made by the library users. It contains:
-///
-/// - A list of binary tags attached to it which could be used to identify
-///   different blobs by e.g. being related to different protocols;
-/// - A binary data;
-/// - A digital signature proving tags and data validity.
-///
-/// Blobs should be used to share messages, files, or any other form of data
-/// with other library users.
+/// Message is the smallest, atomic value made by the library users. Messages
+/// should be used to share data between the library users.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Blob {
-    /// Virtually constructed hash of the blob. Calculated in runtime from tags
-    /// and data. Used to identify blobs.
+pub struct Message {
+    /// Virtually constructed hash of the message. Calculated in runtime from
+    /// data. Used to identify messages.
     pub(crate) hash: Hash,
 
-    /// Binary content of the blob. Practically not limited in size, but the
+    /// Binary content of the message. Practically not limited in size, but the
     /// limit can be applied by the node implementation individually.
     pub(crate) data: Box<[u8]>,
 
-    /// Digital signature proving the blob validity and containing its author.
+    /// Digital signature proving the message validity and containing its
+    /// author.
     pub(crate) sign: Signature
 }
 
-impl Blob {
-    /// Create new blob.
+impl Message {
+    /// Create new message.
     pub fn create(
         signing_key: impl AsRef<SigningKey>,
         data: impl Into<Box<[u8]>>
@@ -83,7 +77,7 @@ impl Blob {
         })
     }
 
-    /// Get current blob hash.
+    /// Get current message hash.
     ///
     /// This value is pre-calculated for performance reasons and is stored in
     /// the struct, so no computations are performed.
@@ -92,50 +86,50 @@ impl Blob {
         &self.hash
     }
 
-    /// Get current blob data.
+    /// Get current message data.
     #[inline]
     pub const fn data(&self) -> &[u8] {
         &self.data
     }
 
-    /// Get current blob signature.
+    /// Get current message signature.
     #[inline]
     pub const fn sign(&self) -> &Signature {
         &self.sign
     }
 
-    /// Derive current blob's author and verify that the signature is valid.
+    /// Derive current message's author and verify that the signature is valid.
     #[inline]
     pub fn verify(&self) -> Result<(bool, VerifyingKey), SignatureError> {
         self.sign.verify(self.hash)
     }
 
-    /// Encode current blob into a binary representation.
+    /// Encode current message into a binary representation.
     pub fn to_bytes(&self) -> Box<[u8]> {
         let mut bytes = Vec::new();
 
-        // Blob format version.
+        // Message format version.
         bytes.push(0);
 
-        // Blob signature (fixed size).
+        // Message signature (fixed size).
         bytes.extend(self.sign.to_bytes());
 
-        // Blob data (rest of the blob so no length needed).
+        // Message data (rest of the message so no length needed).
         bytes.extend(&self.data);
 
         bytes.into_boxed_slice()
     }
 
-    /// Decode blob from a binary representation.
+    /// Decode message from a binary representation.
     pub fn from_bytes(
         bytes: impl AsRef<[u8]>
-    ) -> Result<Self, BlobDecodeError> {
+    ) -> Result<Self, MessageDecodeError> {
         let bytes = bytes.as_ref();
         let n = bytes.len();
 
         // Format byte + signature.
         if n < Signature::SIZE + 1 {
-            return Err(BlobDecodeError::TooShort {
+            return Err(MessageDecodeError::TooShort {
                 got: n,
                 expected: Signature::SIZE + 1
             });
@@ -143,7 +137,7 @@ impl Blob {
 
         // Check that the format byte is 0 (there's no different format now).
         if bytes[0] != 0 {
-            return Err(BlobDecodeError::UnsupportedFormat(bytes[0]));
+            return Err(MessageDecodeError::UnsupportedFormat(bytes[0]));
         }
 
         // Read the signature.
@@ -152,7 +146,7 @@ impl Blob {
         sign.copy_from_slice(&bytes[1..Signature::SIZE + 1]);
 
         let sign = Signature::from_bytes(&sign)
-            .ok_or(BlobDecodeError::InvalidSignature)?;
+            .ok_or(MessageDecodeError::InvalidSignature)?;
 
         if n == Signature::SIZE + 1 {
             // Empty message.
@@ -179,42 +173,42 @@ impl Blob {
 mod tests {
     use super::*;
 
-    fn get_blob() -> Result<(SigningKey, Blob), Box<dyn std::error::Error>> {
+    fn get_message() -> Result<(SigningKey, Message), Box<dyn std::error::Error>> {
         use rand_chacha::rand_core::SeedableRng;
 
         let mut rand = rand_chacha::ChaCha20Rng::seed_from_u64(123);
 
         let signing_key = SigningKey::random(&mut rand);
 
-        let blob = Blob::create(
+        let message = Message::create(
             &signing_key,
             b"hello, world!".to_vec()
         )?;
 
-        Ok((signing_key, blob))
+        Ok((signing_key, message))
     }
 
     #[test]
     fn validate() -> Result<(), Box<dyn std::error::Error>> {
-        let (signing_key, blob) = get_blob()?;
+        let (signing_key, message) = get_message()?;
 
-        let (is_valid, author) = blob.verify()?;
+        let (is_valid, author) = message.verify()?;
 
         assert!(is_valid);
-        assert_eq!(blob.hash().to_base64(), "vkhPqCNXEhkbIzEYoEuoXKLwdRCjHpk9yGjncZlOQLs=");
+        assert_eq!(message.hash().to_base64(), "vkhPqCNXEhkbIzEYoEuoXKLwdRCjHpk9yGjncZlOQLs=");
         assert_eq!(author, signing_key.verifying_key());
-        assert_eq!(blob.data(), b"hello, world!");
+        assert_eq!(message.data(), b"hello, world!");
 
         Ok(())
     }
 
     #[test]
     fn serialize() -> Result<(), Box<dyn std::error::Error>> {
-        let (_, blob) = get_blob()?;
+        let (_, message) = get_message()?;
 
-        let serialized = blob.to_bytes();
+        let serialized = message.to_bytes();
 
-        assert_eq!(Blob::from_bytes(serialized)?, blob);
+        assert_eq!(Message::from_bytes(serialized)?, message);
 
         Ok(())
     }

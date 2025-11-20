@@ -26,11 +26,12 @@ use time::UtcDateTime;
 
 use crate::crypto::hash::Hash;
 use crate::crypto::sign::Signature;
-use crate::blob::Blob;
+use crate::message::Message;
 use crate::block::Block;
 
 use super::{Storage, StorageWriteResult, StorageError};
 
+#[inline]
 fn root_block(
     database: &MutexGuard<'_, Connection>
 ) -> rusqlite::Result<Option<Hash>> {
@@ -49,6 +50,7 @@ fn root_block(
     }
 }
 
+#[inline]
 fn tail_block(
     database: &MutexGuard<'_, Connection>
 ) -> rusqlite::Result<Option<Hash>> {
@@ -67,6 +69,7 @@ fn tail_block(
     }
 }
 
+#[inline]
 fn has_block(
     database: &MutexGuard<'_, Connection>,
     hash: &Hash
@@ -82,30 +85,16 @@ fn has_block(
     }
 }
 
-fn has_blob(
-    database: &MutexGuard<'_, Connection>,
-    hash: &Hash
-) -> rusqlite::Result<bool> {
-    let mut query = database.prepare_cached("
-        SELECT 1 FROM v1_blobs WHERE hash = ?1 LIMIT 1
-    ")?;
-
-    match query.query_row([hash.as_bytes()], |_| Ok(true)) {
-        Ok(_) => Ok(true),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
-        Err(err) => Err(err)
-    }
-}
-
-fn find_blob(
+#[inline]
+fn find_message(
     database: &MutexGuard<'_, Connection>,
     hash: &Hash
 ) -> rusqlite::Result<Option<Hash>> {
     let mut query = database.prepare_cached("
         SELECT v1_blocks.hash as block_hash
-        FROM v1_blocks INNER JOIN v1_block_blobs
-        ON v1_block_blobs.block_id = v1_blocks.id
-        WHERE v1_block_blobs.blob_hash = ?1
+        FROM v1_blocks INNER JOIN v1_block_messages
+        ON v1_block_messages.block_id = v1_blocks.id
+        WHERE v1_block_messages.message_hash = ?1
         LIMIT 1
     ")?;
 
@@ -147,7 +136,7 @@ impl SqliteStorage {
                 prev_hash
             );
 
-            CREATE TABLE IF NOT EXISTS v1_blobs (
+            CREATE TABLE IF NOT EXISTS v1_messages (
                 hash BLOB NOT NULL UNIQUE,
                 data BLOB NOT NULL,
                 sign BLOB NOT NULL,
@@ -155,32 +144,32 @@ impl SqliteStorage {
                 PRIMARY KEY (hash)
             );
 
-            CREATE INDEX IF NOT EXISTS v1_blobs_idx ON v1_blobs (hash);
+            CREATE INDEX IF NOT EXISTS v1_messages_idx ON v1_messages (hash);
 
-            CREATE TABLE IF NOT EXISTS v1_block_blobs (
-                block_id  INTEGER NOT NULL,
-                blob_hash BLOB    NOT NULL,
-                is_inline BOOLEAN NOT NULL,
+            CREATE TABLE IF NOT EXISTS v1_block_messages (
+                block_id     INTEGER NOT NULL,
+                message_hash BLOB    NOT NULL,
+                is_inline    BOOLEAN NOT NULL,
 
-                UNIQUE (block_id, blob_hash),
+                UNIQUE (block_id, message_hash),
 
                 FOREIGN KEY (block_id) REFERENCES v1_blocks (id) ON DELETE CASCADE
             );
 
-            CREATE INDEX IF NOT EXISTS v1_block_blobs_idx ON v1_block_blobs (
+            CREATE INDEX IF NOT EXISTS v1_block_messages_idx ON v1_block_messages (
                 block_id,
-                blob_hash
+                message_hash
             );
 
             CREATE TRIGGER IF NOT EXISTS v1_delete_orphan_blobs_trg
-            AFTER DELETE ON v1_block_blobs
+            AFTER DELETE ON v1_block_messages
             FOR EACH ROW
             BEGIN
-                DELETE FROM v1_blobs
-                WHERE hash = OLD.blob_hash AND NOT EXISTS (
+                DELETE FROM v1_messages
+                WHERE hash = OLD.message_hash AND NOT EXISTS (
                     SELECT 1
-                    FROM v1_block_blobs b
-                    WHERE b.blob_hash = OLD.blob_hash
+                    FROM v1_block_messages b
+                    WHERE b.message_hash = OLD.message_hash
                 );
             END;
         "#)?;
@@ -282,36 +271,36 @@ impl Storage for SqliteStorage {
         let sign = Signature::from_bytes(&sign)
             .ok_or_else(|| rusqlite::Error::InvalidQuery)?;
 
-        // Read blobs.
+        // Read referenced messages.
 
         let mut query = lock.prepare_cached("
-            SELECT blob_hash
-            FROM v1_block_blobs
+            SELECT message_hash
+            FROM v1_block_messages
             WHERE block_id = ?1 AND is_inline = FALSE
         ")?;
 
         let rows = query.query_map([id], |row| {
-            row.get::<_, [u8; Hash::SIZE]>("blob_hash")
+            row.get::<_, [u8; Hash::SIZE]>("message_hash")
         })?;
 
-        let mut blobs = Vec::new();
+        let mut ref_messages = Vec::new();
 
         for row in rows {
-            blobs.push(Hash::from(row?));
+            ref_messages.push(Hash::from(row?));
         }
 
-        // Read inline blobs.
+        // Read inline messages.
 
         let mut query = lock.prepare_cached("
             SELECT
-                v1_blobs.hash as hash,
-                v1_blobs.data as data,
-                v1_blobs.sign as sign
-            FROM v1_blobs INNER JOIN v1_block_blobs
-            ON v1_block_blobs.blob_hash = v1_blobs.hash
+                v1_messages.hash as hash,
+                v1_messages.data as data,
+                v1_messages.sign as sign
+            FROM v1_messages INNER JOIN v1_block_messages
+            ON v1_block_messages.message_hash = v1_messages.hash
             WHERE
-                v1_block_blobs.block_id = ?1 AND
-                v1_block_blobs.is_inline = TRUE
+                v1_block_messages.block_id = ?1 AND
+                v1_block_messages.is_inline = TRUE
         ")?;
 
         let rows = query.query_map([id], |row| {
@@ -322,12 +311,12 @@ impl Storage for SqliteStorage {
             ))
         })?;
 
-        let mut inline_blobs = Vec::new();
+        let mut inline_messages = Vec::new();
 
         for row in rows {
             let (hash, data, sign) = row?;
 
-            inline_blobs.push(Blob {
+            inline_messages.push(Message {
                 hash: Hash::from(hash),
                 data,
                 sign: Signature::from_bytes(&sign)
@@ -340,8 +329,8 @@ impl Storage for SqliteStorage {
             prev_hash: Hash::from(prev_hash),
             curr_hash: *hash,
             timestamp,
-            blobs: blobs.into_boxed_slice(),
-            inline_blobs: inline_blobs.into_boxed_slice(),
+            ref_messages: ref_messages.into_boxed_slice(),
+            inline_messages: inline_messages.into_boxed_slice(),
             sign
         }))
     }
@@ -376,45 +365,45 @@ impl Storage for SqliteStorage {
 
             // Prepare shared query.
 
-            let mut insert_block_blobs_query = database.prepare_cached("
-                INSERT INTO v1_block_blobs (
+            let mut insert_block_messages_query = database.prepare_cached("
+                INSERT INTO v1_block_messages (
                     block_id,
-                    blob_hash,
+                    message_hash,
                     is_inline
                 ) VALUES (?1, ?2, ?3)
             ")?;
 
-            // Blobs.
+            // Referenced messages.
 
-            for hash in block.blobs() {
-                query.execute((
+            for hash in block.ref_messages() {
+                insert_block_messages_query.execute((
                     block_id,
                     hash.as_bytes(),
                     false
                 ))?;
             }
 
-            // Inline blobs.
+            // Inline messages.
 
             let mut query = database.prepare_cached("
-                INSERT INTO v1_blobs (
+                INSERT INTO v1_messages (
                     hash,
                     data,
                     sign
                 ) VALUES (?1, ?2, ?3)
             ")?;
 
-            for blob in block.inline_blobs() {
-                insert_block_blobs_query.execute((
+            for message in block.inline_messages() {
+                insert_block_messages_query.execute((
                     block_id,
-                    blob.hash().as_bytes(),
+                    message.hash().as_bytes(),
                     true
                 ))?;
 
                 query.execute((
-                    blob.hash().as_bytes(),
-                    blob.data(),
-                    blob.sign().to_bytes()
+                    message.hash().as_bytes(),
+                    message.data(),
+                    message.sign().to_bytes()
                 ))?;
             }
 
@@ -422,17 +411,17 @@ impl Storage for SqliteStorage {
         }
 
         #[inline]
-        fn block_has_duplicate_blobs(block: &Block) -> bool {
-            let mut blobs = HashSet::new();
+        fn block_has_duplicate_messages(block: &Block) -> bool {
+            let mut messages = HashSet::new();
 
-            for hash in block.blobs() {
-                if !blobs.insert(hash) {
+            for hash in block.ref_messages() {
+                if !messages.insert(hash) {
                     return true;
                 }
             }
 
-            for blob in block.inline_blobs() {
-                if !blobs.insert(blob.hash()) {
+            for message in block.inline_messages() {
+                if !messages.insert(message.hash()) {
                     return true;
                 }
             }
@@ -441,41 +430,41 @@ impl Storage for SqliteStorage {
         }
 
         #[inline]
-        fn block_has_duplicate_blobs_in_history(
+        fn block_has_duplicate_messages_in_history(
             lock: &MutexGuard<'_, Connection>,
             block: &Block
         ) -> rusqlite::Result<bool> {
-            let mut blobs = HashSet::new();
+            let mut messages = HashSet::new();
 
-            for hash in block.blobs() {
-                if !blobs.insert(*hash) {
+            for hash in block.ref_messages() {
+                if !messages.insert(*hash) {
                     return Ok(true);
                 }
             }
 
-            for blob in block.inline_blobs() {
-                if !blobs.insert(*blob.hash()) {
+            for message in block.inline_messages() {
+                if !messages.insert(*message.hash()) {
                     return Ok(true);
                 }
             }
 
             let mut query = lock.prepare_cached("
-                SELECT v1_block_blobs.blob_hash as blob_hash
-                FROM v1_blocks INNER JOIN v1_block_blobs
-                ON v1_block_blobs.block_id = v1_blocks.id
+                SELECT v1_block_messages.message_hash as message_hash
+                FROM v1_blocks INNER JOIN v1_block_messages
+                ON v1_block_messages.block_id = v1_blocks.id
                 WHERE v1_blocks.id <= (SELECT id FROM v1_blocks WHERE hash = ?1)
                 ORDER BY v1_blocks.id ASC
             ")?;
 
-            let blobs_history = query.query_map(
+            let messages_history = query.query_map(
                 [block.prev_hash().as_bytes()],
-                |row| row.get::<_, [u8; Hash::SIZE]>("blob_hash")
+                |row| row.get::<_, [u8; Hash::SIZE]>("message_hash")
             )?;
 
-            for hash in blobs_history {
+            for hash in messages_history {
                 let hash = Hash::from(hash?);
 
-                if !blobs.insert(hash) {
+                if !messages.insert(hash) {
                     return Ok(true);
                 }
             }
@@ -501,9 +490,9 @@ impl Storage for SqliteStorage {
             Ok(StorageWriteResult::BlockAlreadyStored)
         }
 
-        // Ignore block if it has duplicate blobs in it.
-        else if block_has_duplicate_blobs(block) {
-            Ok(StorageWriteResult::BlockHasDuplicateBlobs)
+        // Ignore block if it has duplicate messages in it.
+        else if block_has_duplicate_messages(block) {
+            Ok(StorageWriteResult::BlockHasDuplicateMessages)
         }
 
         // Attempt to store the root block of the blockchain.
@@ -530,9 +519,9 @@ impl Storage for SqliteStorage {
             Ok(StorageWriteResult::OutOfHistoryBlock)
         }
 
-        // Reject blocks that contain already stored blobs.
-        else if block_has_duplicate_blobs_in_history(&lock, block)? {
-            Ok(StorageWriteResult::BlockHasDuplicateHistoryBlobs)
+        // Reject blocks that contain already stored messages.
+        else if block_has_duplicate_messages_in_history(&lock, block)? {
+            Ok(StorageWriteResult::BlockHasDuplicateHistoryMessages)
         }
 
         // At that point we're sure that the block is not stored and its
@@ -575,30 +564,75 @@ impl Storage for SqliteStorage {
         }
     }
 
-    #[inline]
-    fn has_blob(&self, hash: &Hash) -> Result<bool, StorageError> {
-        has_blob(&self.0.lock(), hash)
-            .map_err(|err| Box::new(err) as StorageError)
+    fn is_message_referenced(&self, hash: &Hash) -> Result<bool, StorageError> {
+        let lock = self.0.lock();
+
+        let mut query = lock.prepare_cached("
+            SELECT 1
+            FROM v1_block_messages
+            WHERE message_hash = ?1 AND is_inline = FALSE
+            LIMIT 1
+        ")?;
+
+        match query.query_row([hash.as_bytes()], |_| Ok(true)) {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(err) => Err(Box::new(err) as StorageError)
+        }
+    }
+
+    fn is_message_stored(&self, hash: &Hash) -> Result<bool, StorageError> {
+        let lock = self.0.lock();
+
+        let mut query = lock.prepare_cached("
+            SELECT 1
+            FROM v1_block_messages
+            WHERE message_hash = ?1 AND is_inline = TRUE
+            LIMIT 1
+        ")?;
+
+        match query.query_row([hash.as_bytes()], |_| Ok(true)) {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(err) => Err(Box::new(err) as StorageError)
+        }
+    }
+
+    fn has_message(&self, hash: &Hash) -> Result<bool, StorageError> {
+        let lock = self.0.lock();
+
+        let mut query = lock.prepare_cached("
+            SELECT 1
+            FROM v1_block_messages
+            WHERE message_hash = ?1
+            LIMIT 1
+        ")?;
+
+        match query.query_row([hash.as_bytes()], |_| Ok(true)) {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(err) => Err(Box::new(err) as StorageError)
+        }
     }
 
     #[inline]
-    fn find_blob(
+    fn find_message(
         &self,
         hash: &Hash
     ) -> Result<Option<Hash>, StorageError> {
-        find_blob(&self.0.lock(), hash)
+        find_message(&self.0.lock(), hash)
             .map_err(|err| Box::new(err) as StorageError)
     }
 
-    fn read_blob(
+    fn read_message(
         &self,
         hash: &Hash
-    ) -> Result<Option<Blob>, StorageError> {
+    ) -> Result<Option<Message>, StorageError> {
         let lock = self.0.lock();
 
         let mut query = lock.prepare_cached("
             SELECT data, sign
-            FROM v1_blobs
+            FROM v1_messages
             WHERE hash = ?1
         ")?;
 
@@ -610,7 +644,7 @@ impl Storage for SqliteStorage {
         });
 
         match result {
-            Ok((data, sign)) => Ok(Some(Blob {
+            Ok((data, sign)) => Ok(Some(Message {
                 hash: *hash,
                 data,
                 sign: Signature::from_bytes(&sign)
@@ -622,18 +656,18 @@ impl Storage for SqliteStorage {
         }
     }
 
-    fn write_blob(&self, blob: &Blob) -> Result<bool, StorageError> {
+    fn write_message(&self, message: &Message) -> Result<bool, StorageError> {
         let lock = self.0.lock();
 
         let mut query = lock.prepare_cached("
-            INSERT INTO v1_blobs (hash, data, sign)
+            INSERT INTO v1_messages (hash, data, sign)
             VALUES (?1, ?2, ?3)
         ")?;
 
         query.execute((
-            blob.hash().as_bytes(),
-            blob.data(),
-            blob.sign().to_bytes()
+            message.hash().as_bytes(),
+            message.data(),
+            message.sign().to_bytes()
         ))?;
 
         Ok(true)

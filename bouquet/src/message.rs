@@ -26,7 +26,7 @@ use flowerpot::crypto::base64;
 use flowerpot::crypto::hash::Hash;
 use flowerpot::crypto::sign::SigningKey;
 use flowerpot::crypto::key_exchange::SecretKey;
-use flowerpot::blob::Message;
+use flowerpot::message::Message;
 use flowerpot::protocol::network::{
     PacketStream, PacketStreamOptions, PacketStreamEncryption
 };

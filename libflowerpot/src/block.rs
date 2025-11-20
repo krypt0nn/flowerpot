@@ -23,13 +23,13 @@ use time::UtcDateTime;
 use crate::varint;
 use crate::crypto::hash::{Hash, Hasher};
 use crate::crypto::sign::{SigningKey, Signature, SignatureError};
-use crate::blob::{Blob, BlobDecodeError};
+use crate::message::{Message, MessageDecodeError};
 use crate::address::Address;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlockCreateError {
-    #[error("block can't contain duplicate blobs; duplicate blob hash: {0}")]
-    DuplicateBlob(Hash),
+    #[error("block can't contain duplicate messages; duplicate message hash: {0}")]
+    DuplicateMessage(Hash),
 
     #[error("failed to sign the block: {0}")]
     Signature(#[from] SignatureError)
@@ -52,52 +52,53 @@ pub enum BlockDecodeError {
     #[error("invalid block creation timestamp varint format")]
     InvalidTimestamp,
 
-    #[error("invalid blobs amount varint format")]
-    InvalidBlobsAmount,
+    #[error("invalid referenced messages amount varint format")]
+    InvalidRefMessagesAmount,
 
-    #[error("invalid inline blobs amount varint format")]
-    InvalidInlineBlobsAmount,
+    #[error("invalid inline messages amount varint format")]
+    InvalidInlineMessagesAmount,
 
-    #[error("invalid inline blob length varint format")]
-    InvalidInlineBlobLength,
+    #[error("invalid inline message length varint format")]
+    InvalidInlineMessageLength,
 
     #[error("failed to decode blob: {0}")]
-    DecodeBlob(#[from] BlobDecodeError)
+    DecodeMessage(#[from] MessageDecodeError)
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct BlockBuilder {
     /// Identifier of the chain the current block belongs to. Required to
     /// reconstruct the blockchain address.
-    chain_id: u32,
+    pub chain_id: u32,
 
     /// Hash of the previous block.
-    prev_hash: Hash,
+    pub prev_hash: Hash,
 
-    /// List of hashes of blobs attached to this block.
+    /// List of hashes of messages attached to this block.
     ///
-    /// These blobs are stored off-chain and can be requested using the network
-    /// protocol.
+    /// These messages are stored off-chain and can be requested using the
+    /// network protocol.
     ///
-    /// If you need to store some blobs directly in the block and force network
-    /// clients to download them - then you need to use `inline_blobs` field.
-    blobs: Vec<Hash>,
+    /// If you need to store some messages directly in the block and force
+    /// network clients to download them - then you need to use
+    /// `inline_messages` field.
+    pub ref_messages: Vec<Hash>,
 
-    /// List of blobs attached to this block.
+    /// List of messages attached to this block.
     ///
-    /// You have to know these blobs exactly to reconstruct the block's hash,
+    /// You have to know these messages exactly to reconstruct the block's hash,
     /// and thus to verify its signature. It forces network clients to download
-    /// these blobs at least once, and to store and share these blobs with other
-    /// network clients in order to operate as proper network nodes.
+    /// these messages at least once, and to store and share these messages with
+    /// other network clients in order to operate as proper network nodes.
     ///
     /// It is generally recommended to use this field only for administration
-    /// purposes or for small enough blobs, because they will be stored in the
-    /// blockchain history directly and downloaded every time a history is
+    /// purposes or for small enough messages, because they will be stored in
+    /// the blockchain history directly and downloaded every time a history is
     /// verified when a new node is connecting to the network.
     ///
-    /// For large blobs you should use the `blobs` field and store blobs hashes
-    /// only.
-    inline_blobs: Vec<Blob>
+    /// For large messages you should use the `ref_messages` field and store
+    /// messages' hashes only.
+    pub inline_messages: Vec<Message>
 }
 
 impl BlockBuilder {
@@ -116,11 +117,11 @@ impl BlockBuilder {
     }
 
     #[inline]
-    pub fn with_blobs<T: Into<Hash>>(
+    pub fn with_ref_messages<T: Into<Hash>>(
         mut self,
-        blobs: impl IntoIterator<Item = T>
+        messages: impl IntoIterator<Item = T>
     ) -> Self {
-        self.blobs = blobs.into_iter()
+        self.ref_messages = messages.into_iter()
             .map(T::into)
             .collect();
 
@@ -128,26 +129,26 @@ impl BlockBuilder {
     }
 
     #[inline]
-    pub fn with_inline_blobs(
+    pub fn with_inline_messages(
         mut self,
-        inline_blobs: impl IntoIterator<Item = Blob>
+        messages: impl IntoIterator<Item = Message>
     ) -> Self {
-        self.inline_blobs = inline_blobs.into_iter()
+        self.inline_messages = messages.into_iter()
             .collect();
 
         self
     }
 
     #[inline]
-    pub fn add_blob(&mut self, blob_hash: impl Into<Hash>) -> &mut Self {
-        self.blobs.push(blob_hash.into());
+    pub fn add_ref_message(&mut self, hash: impl Into<Hash>) -> &mut Self {
+        self.ref_messages.push(hash.into());
 
         self
     }
 
     #[inline]
-    pub fn add_inline_blob(&mut self, blob: Blob) -> &mut Self {
-        self.inline_blobs.push(blob);
+    pub fn add_inline_message(&mut self, message: Message) -> &mut Self {
+        self.inline_messages.push(message);
 
         self
     }
@@ -157,33 +158,33 @@ impl BlockBuilder {
         self,
         signing_key: impl AsRef<SigningKey>
     ) -> Result<Block, BlockCreateError> {
-        let Self { chain_id, prev_hash, blobs, inline_blobs } = self;
+        let Self { chain_id, prev_hash, ref_messages, inline_messages } = self;
 
         let timestamp = UtcDateTime::now()
             .replace_nanosecond(0)
             .unwrap_or_else(|_| UtcDateTime::now());
 
-        let mut stored_blobs = HashSet::new();
+        let mut messages = HashSet::new();
         let mut hasher = Hasher::new();
 
         hasher.update(chain_id.to_le_bytes());
         hasher.update(prev_hash.as_bytes());
         hasher.update(timestamp.unix_timestamp().to_le_bytes());
 
-        for hash in &blobs {
-            if !stored_blobs.insert(*hash) {
-                return Err(BlockCreateError::DuplicateBlob(*hash));
+        for hash in &ref_messages {
+            if !messages.insert(*hash) {
+                return Err(BlockCreateError::DuplicateMessage(*hash));
             }
 
             hasher.update(hash.as_bytes());
         }
 
-        for blob in &inline_blobs {
-            if !stored_blobs.insert(*blob.hash()) {
-                return Err(BlockCreateError::DuplicateBlob(*blob.hash()));
+        for message in &inline_messages {
+            if !messages.insert(*message.hash()) {
+                return Err(BlockCreateError::DuplicateMessage(*message.hash()));
             }
 
-            hasher.update(blob.to_bytes());
+            hasher.update(message.to_bytes());
         }
 
         let curr_hash = hasher.finalize();
@@ -195,8 +196,8 @@ impl BlockBuilder {
             prev_hash,
             curr_hash,
             timestamp,
-            blobs: blobs.into_boxed_slice(),
-            inline_blobs: inline_blobs.into_boxed_slice(),
+            ref_messages: ref_messages.into_boxed_slice(),
+            inline_messages: inline_messages.into_boxed_slice(),
             sign
         })
     }
@@ -206,16 +207,16 @@ impl BlockBuilder {
 //        because it's impossible to construct Block struct outside of it from
 //        raw parts.
 
-/// Block is a virtual group containing hashes of different users' blobs or
-/// these blobs themselves, randomly chosen chain identifier, timestamp of when
-/// this group was created, reference to the previous group, and a digital
+/// Block is a virtual group containing hashes of different users' messages or
+/// these messages themselves, randomly chosen chain identifier, timestamp of
+/// when this group was created, reference to the previous group, and a digital
 /// signature of a network validator.
 ///
 /// Block is the atomic unit of a blockchain history. A history is formed of
-/// blocks chained with each other using `prev_hash` values. Some blobs can be
-/// stored within these blocks, so stored within the blockchain history and be
-/// available for every blockchain users. Other blobs could be referenced by
-/// hash value only to be downloaded off-chain using the network protocol.
+/// blocks chained with each other using `prev_hash` values. Some messages can
+/// be stored within these blocks, so stored within the blockchain history and
+/// be available for every blockchain users. Other messages could be referenced
+/// by hash value only to be downloaded off-chain using the network protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     /// Identifier of the chain the current block belongs to. Required to
@@ -233,30 +234,31 @@ pub struct Block {
     /// author and can in fact be different from an actual creation timestamp.
     pub(crate) timestamp: UtcDateTime,
 
-    /// List of hashes of blobs attached to this block.
+    /// List of hashes of messages attached to this block.
     ///
-    /// These blobs are stored off-chain and can be requested using the network
-    /// protocol.
+    /// These messages are stored off-chain and can be requested using the
+    /// network protocol.
     ///
-    /// If you need to store some blobs directly in the block and force network
-    /// clients to download them - then you need to use `inline_blobs` field.
-    pub(crate) blobs: Box<[Hash]>,
+    /// If you need to store some messages directly in the block and force
+    /// network clients to download them - then you need to use
+    /// `inline_messages` field.
+    pub(crate) ref_messages: Box<[Hash]>,
 
-    /// List of blobs attached to this block.
+    /// List of messages attached to this block.
     ///
-    /// You have to know these blobs exactly to reconstruct the block's hash,
+    /// You have to know these messages exactly to reconstruct the block's hash,
     /// and thus to verify its signature. It forces network clients to download
-    /// these blobs at least once, and to store and share these blobs with other
-    /// network clients in order to operate as proper network nodes.
+    /// these messages at least once, and to store and share these messages with
+    /// other network clients in order to operate as proper network nodes.
     ///
     /// It is generally recommended to use this field only for administration
-    /// purposes or for small enough blobs, because they will be stored in the
-    /// blockchain history directly and downloaded every time a history is
+    /// purposes or for small enough messages, because they will be stored in
+    /// the blockchain history directly and downloaded every time a history is
     /// verified when a new node is connecting to the network.
     ///
-    /// For large blobs you should use the `blobs` field and store blobs hashes
-    /// only.
-    pub(crate) inline_blobs: Box<[Blob]>,
+    /// For large messages you should use the `ref_messages` field and store
+    /// messages' hashes only.
+    pub(crate) inline_messages: Box<[Message]>,
 
     /// Digital signature proving the block validity and containing its author.
     pub(crate) sign: Signature
@@ -296,16 +298,16 @@ impl Block {
         &self.timestamp
     }
 
-    /// List of hashes of blobs attached to the current block.
+    /// List of hashes of messages referenced in the current block.
     #[inline]
-    pub const fn blobs(&self) -> &[Hash] {
-        &self.blobs
+    pub const fn ref_messages(&self) -> &[Hash] {
+        &self.ref_messages
     }
 
-    /// List of inline blobs attached to the current block.
+    /// List of inline messages attached to the current block.
     #[inline]
-    pub const fn inline_blobs(&self) -> &[Blob] {
-        &self.inline_blobs
+    pub const fn inline_messages(&self) -> &[Message] {
+        &self.inline_messages
     }
 
     /// Signature of the current block.
@@ -354,23 +356,23 @@ impl Block {
         // Creation timestamp (varint).
         block.extend(varint::write_u64(self.timestamp.unix_timestamp() as u64));
 
-        // List of blobs hashes.
-        block.extend(varint::write_u64(self.blobs.len() as u64));
+        // List of referenced messages hashes.
+        block.extend(varint::write_u64(self.ref_messages.len() as u64));
 
-        for hash in &self.blobs {
-            // Blob hash (fixed size).
+        for hash in &self.ref_messages {
+            // Message hash (fixed size).
             block.extend(hash.as_bytes());
         }
 
-        // List of inline blobs.
-        block.extend(varint::write_u64(self.inline_blobs.len() as u64));
+        // List of inline messages.
+        block.extend(varint::write_u64(self.inline_messages.len() as u64));
 
-        for blob in &self.inline_blobs {
-            let blob = blob.to_bytes();
+        for message in &self.inline_messages {
+            let message = message.to_bytes();
 
-            // Inline blob size (varint) + blob content.
-            block.extend(varint::write_u64(blob.len() as u64));
-            block.extend(blob);
+            // Inline message size (varint) + message content.
+            block.extend(varint::write_u64(message.len() as u64));
+            block.extend(message);
         }
 
         block.into_boxed_slice()
@@ -432,55 +434,55 @@ impl Block {
         let timestamp = UtcDateTime::from_unix_timestamp(timestamp as i64)
             .map_err(|_| BlockDecodeError::InvalidTimestamp)?;
 
-        // Read blobs amount.
-        let (Some(mut blobs_amount), mut block) = varint::read_u64(block) else {
-            return Err(BlockDecodeError::InvalidBlobsAmount);
+        // Read referenced messages amount.
+        let (Some(mut ref_messages_amount), mut block) = varint::read_u64(block) else {
+            return Err(BlockDecodeError::InvalidRefMessagesAmount);
         };
 
-        // Read blobs hashes.
-        let mut blobs = Vec::with_capacity(blobs_amount as usize);
-        let mut blob_hash = [0; Hash::SIZE];
+        // Read messages hashes.
+        let mut ref_messages = Vec::with_capacity(ref_messages_amount as usize);
+        let mut message_hash = [0; Hash::SIZE];
 
-        while blobs_amount > 0 {
-            blob_hash.copy_from_slice(&block[..Hash::SIZE]);
+        while ref_messages_amount > 0 {
+            message_hash.copy_from_slice(&block[..Hash::SIZE]);
 
-            hasher.update(blob_hash);
+            hasher.update(message_hash);
 
-            blobs.push(Hash::from(blob_hash));
+            ref_messages.push(Hash::from(message_hash));
 
-            blobs_amount -= 1;
+            ref_messages_amount -= 1;
 
             block = &block[Hash::SIZE..];
         }
 
-        // Read inline blobs amount.
-        let (Some(mut blobs_amount), mut block) = varint::read_u64(block) else {
-            return Err(BlockDecodeError::InvalidInlineBlobsAmount);
+        // Read inline messages amount.
+        let (Some(mut inline_messages_amount), mut block) = varint::read_u64(block) else {
+            return Err(BlockDecodeError::InvalidInlineMessagesAmount);
         };
 
-        // Read inline blobs.
-        let mut inline_blobs = Vec::with_capacity(blobs_amount as usize);
+        // Read inline messages.
+        let mut inline_messages = Vec::with_capacity(inline_messages_amount as usize);
 
-        while blobs_amount > 0 {
-            let (Some(blob_len), shifted_block) = varint::read_u64(block) else {
-                return Err(BlockDecodeError::InvalidInlineBlobLength);
+        while inline_messages_amount > 0 {
+            let (Some(message_len), shifted_block) = varint::read_u64(block) else {
+                return Err(BlockDecodeError::InvalidInlineMessageLength);
             };
 
-            let inline_blob = &shifted_block[..blob_len as usize];
+            let inline_message = &shifted_block[..message_len as usize];
 
-            hasher.update(inline_blob);
+            hasher.update(inline_message);
 
-            inline_blobs.push(Blob::from_bytes(inline_blob)?);
+            inline_messages.push(Message::from_bytes(inline_message)?);
 
-            blobs_amount -= 1;
+            inline_messages_amount -= 1;
 
             // Early exit to not to update block ref to not to cause out of
             // bounds.
-            if blobs_amount == 0 {
+            if inline_messages_amount == 0 {
                 break;
             }
 
-            block = &shifted_block[blob_len as usize..];
+            block = &shifted_block[message_len as usize..];
         }
 
         Ok(Self {
@@ -488,8 +490,8 @@ impl Block {
             prev_hash: Hash::from(prev_hash),
             curr_hash: hasher.finalize(),
             timestamp,
-            blobs: blobs.into_boxed_slice(),
-            inline_blobs: inline_blobs.into_boxed_slice(),
+            ref_messages: ref_messages.into_boxed_slice(),
+            inline_messages: inline_messages.into_boxed_slice(),
             sign
         })
     }
@@ -503,13 +505,13 @@ fn test() -> Result<(), Box<dyn std::error::Error>> {
 
     let signing_key = SigningKey::random(&mut rand);
 
-    let blob_1 = Blob::create(&signing_key, b"Blob 1".as_slice())?;
-    let blob_2 = Blob::create(&signing_key, b"Blob 2".as_slice())?;
-    let blob_3 = Blob::create(&signing_key, b"Blob 3".as_slice())?;
+    let message_1 = Message::create(&signing_key, b"Message 1".as_slice())?;
+    let message_2 = Message::create(&signing_key, b"Message 2".as_slice())?;
+    let message_3 = Message::create(&signing_key, b"Message 3".as_slice())?;
 
     let block = Block::builder()
-        .with_blobs([*blob_1.hash()])
-        .with_inline_blobs([blob_2, blob_3])
+        .with_ref_messages([*message_1.hash()])
+        .with_inline_messages([message_2, message_3])
         .sign(&signing_key)?;
 
     let (is_valid, address) = block.verify()?;
