@@ -20,7 +20,7 @@ use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::varint;
 use crate::crypto::hash::Hash;
-use crate::blob::{Blob, BlobDecodeError};
+use crate::message::{Message, MessageDecodeError};
 use crate::block::{Block, BlockDecodeError};
 use crate::address::Address;
 
@@ -44,8 +44,8 @@ pub enum PacketDecodeError {
     #[error("invalid blockchain address value")]
     InvalidAddress,
 
-    #[error("failed to decode blob: {0}")]
-    DecodeBlob(#[from] BlobDecodeError),
+    #[error("failed to decode message: {0}")]
+    DecodeMessage(#[from] MessageDecodeError),
 
     #[error("failed to decode block: {0}")]
     DecodeBlock(#[from] BlockDecodeError)
@@ -105,40 +105,41 @@ pub enum Packet {
         history: Box<[Block]>
     },
 
-    /// Ask list of pending blobs.
-    AskPendingBlobs {
+    /// Ask list of pending messages.
+    AskPendingMessages {
         /// Blockchain address.
         address: Address,
 
-        /// List of blobs' hashes which should not be returned.
+        /// List of messages' hashes which should not be returned.
         except: Box<[Hash]>
     },
 
-    /// List of pending blobs of a blockchain.
-    PendingBlobs {
+    /// List of pending messages of a blockchain.
+    PendingMessages {
         /// Blockchain address.
         address: Address,
 
-        /// List of pending blobs' hashes.
-        blobs: Box<[Hash]>
+        /// List of pending messages' hashes.
+        messages: Box<[Hash]>
     },
 
-    /// Ask for a blob stored in a blockchain or in the pending blobs pool.
-    AskBlob {
+    /// Ask for a message stored in a blockchain or in the pending messages
+    /// pool.
+    AskMessage {
         /// Blockchain address.
         address: Address,
 
-        /// Hash of requested blob.
+        /// Hash of requested message.
         hash: Hash
     },
 
-    /// Blockchain blob.
-    Blob {
+    /// Blockchain message.
+    Message {
         /// Blockchain address.
         address: Address,
 
-        /// Blockchain blob.
-        blob: Blob
+        /// Blockchain message.
+        message: Message
     },
 
     /// Ask for a blockchain block.
@@ -161,17 +162,17 @@ pub enum Packet {
 }
 
 impl Packet {
-    pub const V1_HEARTBEAT: u16         = 0;
-    pub const V1_ASK_NODES: u16         = 1;
-    pub const V1_NODES: u16             = 2;
-    pub const V1_ASK_HISTORY: u16       = 3;
-    pub const V1_HISTORY: u16           = 4;
-    pub const V1_ASK_PENDING_BLOBS: u16 = 5;
-    pub const V1_PENDING_BLOBS: u16     = 6;
-    pub const V1_ASK_BLOB: u16          = 7;
-    pub const V1_BLOB: u16              = 8;
-    pub const V1_ASK_BLOCK: u16         = 9;
-    pub const V1_BLOCK: u16             = 10;
+    pub const V1_HEARTBEAT: u16            = 0;
+    pub const V1_ASK_NODES: u16            = 1;
+    pub const V1_NODES: u16                = 2;
+    pub const V1_ASK_HISTORY: u16          = 3;
+    pub const V1_HISTORY: u16              = 4;
+    pub const V1_ASK_PENDING_MESSAGES: u16 = 5;
+    pub const V1_PENDING_MESSAGES: u16     = 6;
+    pub const V1_ASK_MESSAGE: u16          = 7;
+    pub const V1_MESSAGE: u16              = 8;
+    pub const V1_ASK_BLOCK: u16            = 9;
+    pub const V1_BLOCK: u16                = 10;
 
     /// Encode current packet into a binary representation.
     pub fn to_bytes(&self) -> Box<[u8]> {
@@ -257,12 +258,12 @@ impl Packet {
                 buf.into_boxed_slice()
             }
 
-            Self::AskPendingBlobs { address, except } => {
+            Self::AskPendingMessages { address, except } => {
                 let mut buf = Vec::with_capacity(
                     2 + Address::SIZE * (1 + except.len())
                 );
 
-                buf.extend(Self::V1_ASK_PENDING_BLOBS.to_le_bytes());
+                buf.extend(Self::V1_ASK_PENDING_MESSAGES.to_le_bytes());
 
                 buf.extend(address.to_bytes());
 
@@ -273,26 +274,26 @@ impl Packet {
                 buf.into_boxed_slice()
             }
 
-            Self::PendingBlobs { address, blobs } => {
+            Self::PendingMessages { address, messages } => {
                 let mut buf = Vec::with_capacity(
-                    2 + Address::SIZE + Hash::SIZE * blobs.len()
+                    2 + Address::SIZE + Hash::SIZE * messages.len()
                 );
 
-                buf.extend(Self::V1_PENDING_BLOBS.to_le_bytes());
+                buf.extend(Self::V1_PENDING_MESSAGES.to_le_bytes());
 
                 buf.extend(address.to_bytes());
 
-                for hash in blobs {
+                for hash in messages {
                     buf.extend(hash.as_bytes());
                 }
 
                 buf.into_boxed_slice()
             }
 
-            Self::AskBlob { address, hash } => {
+            Self::AskMessage { address, hash } => {
                 let mut buf = [0; 2 + Address::SIZE + Hash::SIZE];
 
-                buf[0..2].copy_from_slice(&Self::V1_ASK_BLOB.to_le_bytes());
+                buf[0..2].copy_from_slice(&Self::V1_ASK_MESSAGE.to_le_bytes());
 
                 buf[2..2 + Address::SIZE].copy_from_slice(&address.to_bytes());
                 buf[2 + Address::SIZE..].copy_from_slice(hash.as_bytes());
@@ -300,13 +301,13 @@ impl Packet {
                 Box::new(buf)
             }
 
-            Self::Blob { address, blob } => {
+            Self::Message { address, message } => {
                 let mut buf = Vec::new();
 
-                buf.extend(Self::V1_BLOB.to_le_bytes());
+                buf.extend(Self::V1_MESSAGE.to_le_bytes());
 
                 buf.extend(address.to_bytes());
-                buf.extend(blob.to_bytes());
+                buf.extend(message.to_bytes());
 
                 buf.into_boxed_slice()
             }
@@ -514,7 +515,7 @@ impl Packet {
                 })
             }
 
-            Self::V1_ASK_PENDING_BLOBS => {
+            Self::V1_ASK_PENDING_MESSAGES => {
                 if n < 2 + Address::SIZE {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
@@ -531,7 +532,7 @@ impl Packet {
 
                 let packet = &packet[2 + Address::SIZE..];
 
-                let mut blobs = Vec::with_capacity(packet.len() / Hash::SIZE);
+                let mut messages = Vec::with_capacity(packet.len() / Hash::SIZE);
                 let mut hash = [0; Hash::SIZE];
 
                 let n = packet.len();
@@ -540,18 +541,18 @@ impl Packet {
                 while i < n {
                     hash.copy_from_slice(&packet[i..i + Hash::SIZE]);
 
-                    blobs.push(Hash::from(hash));
+                    messages.push(Hash::from(hash));
 
                     i += Hash::SIZE;
                 }
 
-                Ok(Self::AskPendingBlobs {
+                Ok(Self::AskPendingMessages {
                     address,
-                    except: blobs.into_boxed_slice()
+                    except: messages.into_boxed_slice()
                 })
             }
 
-            Self::V1_PENDING_BLOBS => {
+            Self::V1_PENDING_MESSAGES => {
                 if n < 2 + Hash::SIZE {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
@@ -568,7 +569,7 @@ impl Packet {
 
                 let packet = &packet[2 + Address::SIZE..];
 
-                let mut blobs = Vec::new();
+                let mut messages = Vec::new();
                 let mut hash = [0; Hash::SIZE];
 
                 let n = packet.len();
@@ -577,18 +578,18 @@ impl Packet {
                 while i < n {
                     hash.copy_from_slice(&packet[i..i + Hash::SIZE]);
 
-                    blobs.push(Hash::from(hash));
+                    messages.push(Hash::from(hash));
 
                     i += Hash::SIZE;
                 }
 
-                Ok(Self::PendingBlobs {
+                Ok(Self::PendingMessages {
                     address,
-                    blobs: blobs.into_boxed_slice()
+                    messages: messages.into_boxed_slice()
                 })
             }
 
-            Self::V1_ASK_BLOB => {
+            Self::V1_ASK_MESSAGE => {
                 if n < 2 + Address::SIZE + Hash::SIZE {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
@@ -602,7 +603,7 @@ impl Packet {
                 address.copy_from_slice(&packet[2..2 + Address::SIZE]);
                 hash.copy_from_slice(&packet[2 + Address::SIZE..]);
 
-                Ok(Self::AskBlob {
+                Ok(Self::AskMessage {
                     address: Address::from_bytes(&address)
                         .ok_or(PacketDecodeError::InvalidAddress)?,
 
@@ -610,7 +611,7 @@ impl Packet {
                 })
             }
 
-            Self::V1_BLOB => {
+            Self::V1_MESSAGE => {
                 if n < 2 + Hash::SIZE + 1 {
                     return Err(PacketDecodeError::TooShort {
                         got: n,
@@ -622,11 +623,11 @@ impl Packet {
 
                 address.copy_from_slice(&packet[2..2 + Address::SIZE]);
 
-                Ok(Self::Blob {
+                Ok(Self::Message {
                     address: Address::from_bytes(&address)
                         .ok_or(PacketDecodeError::InvalidAddress)?,
 
-                    blob: Blob::from_bytes(&packet[2 + Address::SIZE..])?
+                    message: Message::from_bytes(&packet[2 + Address::SIZE..])?
                 })
             }
 
@@ -740,15 +741,15 @@ fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
                     .sign(&signing_key)?,
 
                 Block::builder()
-                    .with_inline_blobs([
-                        Blob::create(&signing_key, b"Blob 1".as_slice())?,
-                        Blob::create(&signing_key, b"Blob 2".as_slice())?,
-                        Blob::create(&signing_key, b"Blob 3".as_slice())?
+                    .with_inline_messages([
+                        Message::create(&signing_key, b"Message 1".as_slice())?,
+                        Message::create(&signing_key, b"Message 2".as_slice())?,
+                        Message::create(&signing_key, b"Message 3".as_slice())?
                     ])
                     .sign(&signing_key)?,
 
                 Block::builder()
-                    .with_blobs([
+                    .with_ref_messages([
                         Hash::calc(b"Test 1"),
                         Hash::calc(b"Test 2"),
                         Hash::calc(b"Test 3")
@@ -757,7 +758,7 @@ fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
             ])
         },
 
-        Packet::AskPendingBlobs {
+        Packet::AskPendingMessages {
             address: Address::new(signing_key.verifying_key(), 123),
             except: Box::new([
                 Hash::calc(b"Test 1"),
@@ -766,23 +767,23 @@ fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
             ])
         },
 
-        Packet::PendingBlobs {
+        Packet::PendingMessages {
             address: Address::new(signing_key.verifying_key(), 123),
-            blobs: Box::new([
+            messages: Box::new([
                 Hash::calc(b"Test 1"),
                 Hash::calc(b"Test 2"),
                 Hash::calc(b"Test 3")
             ])
         },
 
-        Packet::AskBlob {
+        Packet::AskMessage {
             address: Address::new(signing_key.verifying_key(), 123),
             hash: Hash::calc(b"Test")
         },
 
-        Packet::Blob {
+        Packet::Message {
             address: Address::new(signing_key.verifying_key(), 123),
-            blob: Blob::create(
+            message: Message::create(
                 &signing_key,
                 [1, 2, 3]
             )?
@@ -796,10 +797,10 @@ fn test_serialize() -> Result<(), Box<dyn std::error::Error>> {
         Packet::Block {
             address: Address::new(signing_key.verifying_key(), 123),
             block: Block::builder()
-                .with_inline_blobs([
-                    Blob::create(&signing_key, b"Blob 1".as_slice())?,
-                    Blob::create(&signing_key, b"Blob 2".as_slice())?,
-                    Blob::create(&signing_key, b"Blob 3".as_slice())?
+                .with_inline_messages([
+                    Message::create(&signing_key, b"Message 1".as_slice())?,
+                    Message::create(&signing_key, b"Message 2".as_slice())?,
+                    Message::create(&signing_key, b"Message 3".as_slice())?
                 ])
                 .sign(&signing_key)?
         }
