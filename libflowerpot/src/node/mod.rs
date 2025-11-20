@@ -475,6 +475,9 @@ impl NodeHandler {
     }
 
     /// Send packet to all the available streams.
+    ///
+    /// This is a blocking method which will wait until all the streams will
+    /// receive the packet.
     fn send(&self, packet: Packet) {
         let mut disconnected = Vec::new();
 
@@ -499,6 +502,9 @@ impl NodeHandler {
 
     /// Ask connected nodes to share their pending messages for a blockchain
     /// with provided address.
+    ///
+    /// This is a blocking method which will wait until all the streams will
+    /// receive the packet.
     pub fn ask_pending_messages(&self, address: impl Into<Address>) {
         let address: Address = address.into();
 
@@ -519,6 +525,9 @@ impl NodeHandler {
 
     /// Send message to all the connected nodes which host a blockchain with
     /// provided address.
+    ///
+    /// This is a blocking method which will wait until all the streams will
+    /// receive the message.
     pub fn send_message(
         &self,
         address: impl Into<Address>,
@@ -532,6 +541,9 @@ impl NodeHandler {
 
     /// Send block to all the connected nodes which host a blockchain with
     /// provided address.
+    ///
+    /// This is a blocking method which will wait until all the streams will
+    /// receive the block.
     pub fn send_block(
         &self,
         address: impl Into<Address>,
