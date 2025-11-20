@@ -18,6 +18,8 @@
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
+use crate::address::Address;
+use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
 
 use super::NodeState;
@@ -28,37 +30,38 @@ use super::NodeState;
 /// terminated.
 pub fn handle(
     state: &mut NodeState,
-    root_block: Hash,
-    target_block: Hash
+    stream: &mut PacketStream,
+    address: Address,
+    hash: Hash
 ) -> bool {
     #[cfg(feature = "tracing")]
     tracing::debug!(
-        local_id = base64::encode(state.stream.local_id()),
-        peer_id = base64::encode(state.stream.peer_id()),
-        root_block = root_block.to_base64(),
-        target_block = target_block.to_base64(),
+        local_id = base64::encode(stream.local_id()),
+        peer_id = base64::encode(stream.peer_id()),
+        ?address,
+        ?hash,
         "handle AskBlock packet"
     );
 
-    // Try to read block from tracker.
-    let result = state.handler.map_tracker(root_block, |_, tracker| {
-        tracker.read_block(&target_block).transpose()
+    // Try to read block from a storage.
+    let result = state.handler.map_storage(&address, |storage| {
+        storage.read_block(&hash).transpose()
     }).flatten().transpose();
 
     match result {
-        // Send it back to the requester if message is found.
+        // Send it back to the requester if block is found.
         Ok(Some(block)) => {
-            if let Err(err) = state.stream.send(Packet::Block {
-                root_block,
+            if let Err(err) = stream.send(Packet::Block {
+                address: address.clone(),
                 block
             }) {
                 #[cfg(feature = "tracing")]
                 tracing::error!(
                     ?err,
-                    local_id = base64::encode(state.stream.local_id()),
-                    peer_id = base64::encode(state.stream.peer_id()),
-                    root_block = root_block.to_base64(),
-                    target_block = target_block.to_base64(),
+                    local_id = base64::encode(stream.local_id()),
+                    peer_id = base64::encode(stream.peer_id()),
+                    ?address,
+                    ?hash,
                     "failed to send Block packet"
                 );
 
@@ -72,10 +75,10 @@ pub fn handle(
             #[cfg(feature = "tracing")]
             tracing::warn!(
                 ?err,
-                local_id = base64::encode(state.stream.local_id()),
-                peer_id = base64::encode(state.stream.peer_id()),
-                root_block = root_block.to_base64(),
-                target_block = target_block.to_base64(),
+                local_id = base64::encode(stream.local_id()),
+                peer_id = base64::encode(stream.peer_id()),
+                ?address,
+                ?hash,
                 "failed to read block from tracker"
             );
 

@@ -16,7 +16,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use flume::{Receiver, TryRecvError};
+use std::sync::Weak;
+use std::time::Duration;
+
+use spin::Mutex;
 
 use crate::crypto::base64;
 use crate::protocol::packets::Packet;
@@ -32,19 +35,35 @@ mod message;
 mod ask_block;
 mod block;
 
+/// Amount of time a packet stream processing thread will sleep between locking
+/// and unlocking the packet stream so other threads could access it.
+const THREAD_SLEEP_DURATION: Duration = Duration::from_millis(50);
+
 pub struct NodeState {
-    pub handler: NodeHandler,
-    pub stream: PacketStream,
-    pub receiver: Receiver<Packet>
+    pub stream: Weak<Mutex<PacketStream>>,
+    pub handler: NodeHandler
 }
 
 impl NodeState {
     /// Send packet to every connected node besides the current one.
     pub fn broadcast(&self, packet: Packet) {
+        let (local_id, peer_id) = match self.stream.upgrade() {
+            Some(stream) => {
+                let lock = stream.lock();
+
+                let local_id = *lock.local_id();
+                let peer_id = *lock.peer_id();
+
+                (Some(local_id), Some(peer_id))
+            }
+
+            None => (None, None)
+        };
+
         #[cfg(feature = "tracing")]
         tracing::debug!(
-            local_id = base64::encode(self.stream.local_id()),
-            peer_id = base64::encode(self.stream.peer_id()),
+            local_id = ?local_id.map(base64::encode),
+            peer_id = ?peer_id.map(base64::encode),
             "broadcast packet"
         );
 
@@ -52,11 +71,13 @@ impl NodeState {
 
         let lock = self.handler.streams.read();
 
-        for (endpoint_id, sender) in lock.iter() {
-            if endpoint_id != self.stream.peer_id()
+        for (sender_peer_id, sender) in lock.iter() {
+            let mut sender = sender.lock();
+
+            if Some(sender_peer_id) != peer_id.as_ref()
                 && sender.send(packet.clone()).is_err()
             {
-                disconnected.push(*endpoint_id);
+                disconnected.push(*sender_peer_id);
             }
         }
 
@@ -75,67 +96,49 @@ impl NodeState {
 /// Handle connection.
 pub fn handle(mut state: NodeState) {
     // Ask remote node to share pending messages if we support their storing.
-    // if state.handler.options.accept_messages &&
-    //     let Err(err) = state.stream.send(Packet::AskPendingMessages {
-    //         root_block: state.handler.root_block
-    //     })
-    // {
-    //     #[cfg(feature = "tracing")]
-    //     tracing::error!(
-    //         ?err,
-    //         local_id = base64::encode(state.stream.local_id()),
-    //         peer_id = base64::encode(state.stream.peer_id()),
-    //         "failed to send packet to the packets stream"
-    //     );
+    if let Some(stream) = state.stream.upgrade() {
+        let mut stream = stream.lock();
+        let storages = state.handler.storages.lock();
 
-    //     return;
-    // }
+        for address in storages.keys() {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                local_id = base64::encode(stream.local_id()),
+                peer_id = base64::encode(stream.peer_id()),
+                ?address,
+                "ask pending messages"
+            );
 
-    // Process incoming packets in a loop.
-    loop {
-        // Send packets to the remote node.
-        loop {
-            match state.receiver.try_recv() {
-                Ok(packet) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(
-                        local_id = base64::encode(state.stream.local_id()),
-                        peer_id = base64::encode(state.stream.peer_id()),
-                        "broadcasting packet"
-                    );
+            if state.handler.options.accept_messages &&
+                state.handler.options.fetch_pending_messages &&
+                let Err(err) = stream.send(Packet::AskPendingMessages {
+                    address: address.clone(),
+                    except: Box::new([])
+                })
+            {
+                #[cfg(feature = "tracing")]
+                tracing::error!(
+                    ?err,
+                    local_id = base64::encode(stream.local_id()),
+                    peer_id = base64::encode(stream.peer_id()),
+                    "failed to send packet to the packets stream"
+                );
 
-                    if let Err(err) = state.stream.send(packet) {
-                        #[cfg(feature = "tracing")]
-                        tracing::error!(
-                            ?err,
-                            local_id = base64::encode(state.stream.local_id()),
-                            peer_id = base64::encode(state.stream.peer_id()),
-                            "failed to send packet to the packets stream"
-                        );
-
-                        return;
-                    }
-                }
-
-                Err(TryRecvError::Disconnected) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::info!(
-                        local_id = base64::encode(state.stream.local_id()),
-                        peer_id = base64::encode(state.stream.peer_id()),
-                        "local node went offline, terminating connection"
-                    );
-
-                    return;
-                }
-
-                Err(TryRecvError::Empty) => break
+                return;
             }
         }
+    }
+
+    // Process incoming packets in a loop while the stream is still stored
+    // in a node handler.
+    while let Some(stream) = state.stream.upgrade() {
+        // Allow other threads to access stream for some time.
+        std::thread::sleep(THREAD_SLEEP_DURATION);
+
+        let mut stream = stream.lock();
 
         // Try to read packet from the remote endpoint.
-        let Some(packet) = state.stream.try_recv().transpose() else {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-
+        let Some(packet) = stream.try_recv().transpose() else {
             continue;
         };
 
@@ -143,15 +146,15 @@ pub fn handle(mut state: NodeState) {
         match packet {
             Ok(packet) => {
                 match packet {
-                    // If we were asked to share the blockchain history.
                     Packet::AskHistory {
-                        root_block,
+                        address,
                         since_block,
                         max_length
                     } => {
                         if !ask_history::handle(
                             &mut state,
-                            root_block,
+                            &mut stream,
+                            address,
                             since_block,
                             max_length
                         ) {
@@ -159,84 +162,84 @@ pub fn handle(mut state: NodeState) {
                         }
                     }
 
-                    // If we were asked to send the pending messages list.
                     Packet::AskPendingMessages {
-                        root_block,
-                        known_messages
+                        address,
+                        except
                     } => {
                         if !ask_pending_messages::handle(
                             &mut state,
-                            root_block,
-                            &known_messages
+                            &mut stream,
+                            address,
+                            &except
                         ) {
                             return;
                         }
                     }
 
-                    // If we received list of available pending messages.
                     Packet::PendingMessages {
-                        root_block,
-                        pending_messages
+                        address,
+                        messages
                     } if state.handler.options.fetch_pending_messages => {
                         if !pending_messages::handle(
                             &mut state,
-                            root_block,
-                            pending_messages
+                            &mut stream,
+                            address,
+                            messages
                         ) {
                             return;
                         }
                     }
 
-                    // If we were asked to send message.
                     Packet::AskMessage {
-                        root_block,
-                        message
+                        address,
+                        hash
                     } => {
                         if !ask_message::handle(
                             &mut state,
-                            root_block,
-                            message
+                            &mut stream,
+                            address,
+                            hash
                         ) {
                             return;
                         }
                     }
 
-                    // If we received some message.
                     Packet::Message {
-                        root_block,
+                        address,
                         message
                     } if state.handler.options.accept_messages => {
                         if !message::handle(
                             &mut state,
-                            root_block,
+                            &mut stream,
+                            address,
                             message
                         ) {
                             return;
                         }
                     }
 
-                    // If we were asked to send a block of the blockchain.
                     Packet::AskBlock {
-                        root_block,
-                        target_block
+                        address,
+                        hash
                     } => {
                         if !ask_block::handle(
                             &mut state,
-                            root_block,
-                            target_block
+                            &mut stream,
+                            address,
+                            hash
                         ) {
                             return;
                         }
                     }
 
-                    // If we received some block.
                     Packet::Block {
-                        root_block,
+                        address,
                         block
                     } if state.handler.options.accept_blocks => {
                         if !block::handle(
                             &mut state,
-                            root_block,
+                            &mut stream,
+                            address,
                             block
                         ) {
                             return;
@@ -251,8 +254,8 @@ pub fn handle(mut state: NodeState) {
                 #[cfg(feature = "tracing")]
                 tracing::error!(
                     ?err,
-                    local_id = base64::encode(state.stream.local_id()),
-                    peer_id = base64::encode(state.stream.peer_id()),
+                    local_id = base64::encode(stream.local_id()),
+                    peer_id = base64::encode(stream.peer_id()),
                     "failed to read packet from the packets stream"
                 );
 

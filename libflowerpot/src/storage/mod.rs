@@ -346,6 +346,13 @@ impl<T> Storage for Box<T> where T: Storage {
     }
 }
 
+impl<T> From<T> for Box<dyn Storage> where T: Storage + 'static {
+    #[inline]
+    fn from(storage: T) -> Self {
+        Box::new(storage)
+    }
+}
+
 #[cfg(test)]
 pub fn test_storage<S: Storage>(
     storage: &S

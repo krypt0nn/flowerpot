@@ -18,6 +18,8 @@
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
+use crate::address::Address;
+use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
 
 use super::NodeState;
@@ -28,39 +30,41 @@ use super::NodeState;
 /// terminated.
 pub fn handle(
     state: &mut NodeState,
-    root_block: Hash,
-    known_messages: &[Hash]
+    stream: &mut PacketStream,
+    address: Address,
+    except: &[Hash]
 ) -> bool {
     #[cfg(feature = "tracing")]
     tracing::debug!(
-        local_id = base64::encode(state.stream.local_id()),
-        peer_id = base64::encode(state.stream.peer_id()),
-        root_block = root_block.to_base64(),
+        local_id = base64::encode(stream.local_id()),
+        peer_id = base64::encode(stream.peer_id()),
+        ?address,
+        ?except,
         "handle AskPendingMessages packet"
     );
 
     // Get list of pending messages.
     let pending_messages = state.handler.map_pending_messages(
-        root_block,
+        &address,
         |pending_messages| {
             pending_messages.keys()
-                .filter(|hash| !known_messages.contains(hash))
+                .filter(|hash| !except.contains(hash))
                 .copied()
                 .collect::<Box<[Hash]>>()
         }
     );
 
     // Try to send it back to the requester.
-    if let Err(err) = state.stream.send(Packet::PendingMessages {
-        root_block,
-        pending_messages: pending_messages.unwrap_or_default()
+    if let Err(err) = stream.send(Packet::PendingMessages {
+        address: address.clone(),
+        messages: pending_messages.unwrap_or_default()
     }) {
         #[cfg(feature = "tracing")]
         tracing::error!(
             ?err,
-            local_id = base64::encode(state.stream.local_id()),
-            peer_id = base64::encode(state.stream.peer_id()),
-            root_block = root_block.to_base64(),
+            local_id = base64::encode(stream.local_id()),
+            peer_id = base64::encode(stream.peer_id()),
+            ?address,
             "failed to send PendingMessages packet"
         );
 

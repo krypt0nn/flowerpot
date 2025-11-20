@@ -18,6 +18,8 @@
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
+use crate::address::Address;
+use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
 
 use super::NodeState;
@@ -28,41 +30,43 @@ use super::NodeState;
 /// terminated.
 pub fn handle(
     state: &mut NodeState,
-    root_block: Hash,
+    stream: &mut PacketStream,
+    address: Address,
     message: Hash
 ) -> bool {
     #[cfg(feature = "tracing")]
     tracing::debug!(
-        local_id = base64::encode(state.stream.local_id()),
-        peer_id = base64::encode(state.stream.peer_id()),
-        root_block = root_block.to_base64(),
-        message = message.to_base64(),
+        local_id = base64::encode(stream.local_id()),
+        peer_id = base64::encode(stream.peer_id()),
+        ?address,
+        ?message,
         "handle AskMessage packet"
     );
 
     // Try to read requested message from pending messages pool.
     let mut value = state.handler.map_pending_messages(
-        root_block,
+        &address,
         |pending_messages| pending_messages.get(&message).cloned()
     ).flatten();
 
-    // If it's not available there then try to read it from a tracker.
+    // If it's not available there then try to read it from a storage.
     if value.is_none() {
-        let result = state.handler.map_tracker(root_block, |_, tracker| {
-            tracker.read_message(&message).transpose()
+        let result = state.handler.map_storage(&address, |storage| {
+            storage.read_message(&message).transpose()
         }).flatten().transpose();
 
         match result {
             Ok(message) => value = message,
+
             Err(err) => {
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
                     ?err,
-                    local_id = base64::encode(state.stream.local_id()),
-                    peer_id = base64::encode(state.stream.peer_id()),
-                    root_block = root_block.to_base64(),
-                    message = message.to_base64(),
-                    "failed to read message from tracker"
+                    local_id = base64::encode(stream.local_id()),
+                    peer_id = base64::encode(stream.peer_id()),
+                    ?address,
+                    ?message,
+                    "failed to read message from a storage"
                 );
 
                 return true;
@@ -73,18 +77,18 @@ pub fn handle(
     // Send it back to the requester if message is found.
     #[allow(clippy::collapsible_if)]
     if let Some(value) = value {
-        if let Err(err) = state.stream.send(Packet::Message {
-            root_block,
+        if let Err(err) = stream.send(Packet::Message {
+            address: address.clone(),
             message: value
         }) {
             #[cfg(feature = "tracing")]
             tracing::error!(
                 ?err,
-                local_id = base64::encode(state.stream.local_id()),
-                peer_id = base64::encode(state.stream.peer_id()),
-                root_block = root_block.to_base64(),
-                message = message.to_base64(),
-                "failed to send Transaction packet"
+                local_id = base64::encode(stream.local_id()),
+                peer_id = base64::encode(stream.peer_id()),
+                ?address,
+                ?message,
+                "failed to send Message packet"
             );
 
             return false;

@@ -26,4 +26,4 @@ pub mod address;
 pub mod storage;
 pub mod protocol;
 pub mod viewer;
-// pub mod node;
+pub mod node;

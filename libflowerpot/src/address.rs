@@ -93,6 +93,13 @@ impl Address {
     }
 }
 
+impl AsRef<Address> for Address {
+    #[inline(always)]
+    fn as_ref(&self) -> &Address {
+        self
+    }
+}
+
 impl std::fmt::Display for Address {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

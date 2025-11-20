@@ -18,11 +18,11 @@
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
+use crate::address::Address;
+use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
 
 use super::NodeState;
-
-// TODO: some option to reject messages for untracked blockchains.
 
 /// Handle `PendingMessages` packet.
 ///
@@ -30,47 +30,48 @@ use super::NodeState;
 /// terminated.
 pub fn handle(
     state: &mut NodeState,
-    root_block: Hash,
-    pending_messages: Box<[Hash]>
+    stream: &mut PacketStream,
+    address: Address,
+    messages: Box<[Hash]>
 ) -> bool {
     #[cfg(feature = "tracing")]
     tracing::debug!(
-        local_id = base64::encode(state.stream.local_id()),
-        peer_id = base64::encode(state.stream.peer_id()),
-        root_block = root_block.to_base64(),
-        pending_messages = ?pending_messages.iter()
+        local_id = base64::encode(stream.local_id()),
+        peer_id = base64::encode(stream.peer_id()),
+        ?address,
+        messages = ?messages.iter()
             .map(|hash| hash.to_base64())
             .collect::<Box<[String]>>(),
         "handle PendingMessages packet"
     );
 
-    let lock = state.handler.pending_messages.read();
+    let result = state.handler.map_pending_messages(
+        address.clone(),
+        move |pending_messages| {
+            for hash in messages {
+                #[allow(clippy::collapsible_if)]
+                if !pending_messages.contains_key(&hash) {
+                    if let Err(err) = stream.send(Packet::AskMessage {
+                        address: address.clone(),
+                        hash
+                    }) {
+                        #[cfg(feature = "tracing")]
+                        tracing::error!(
+                            ?err,
+                            local_id = base64::encode(stream.local_id()),
+                            peer_id = base64::encode(stream.peer_id()),
+                            ?address,
+                            "failed to send AskMessage packet"
+                        );
 
-    for message in pending_messages {
-        let is_available = match lock.get(&root_block) {
-            Some(values) => values.contains_key(&message),
-            None => false
-        };
-
-        #[allow(clippy::collapsible_if)]
-        if !is_available {
-            if let Err(err) = state.stream.send(Packet::AskMessage {
-                root_block,
-                message
-            }) {
-                #[cfg(feature = "tracing")]
-                tracing::error!(
-                    ?err,
-                    local_id = base64::encode(state.stream.local_id()),
-                    peer_id = base64::encode(state.stream.peer_id()),
-                    root_block = root_block.to_base64(),
-                    "failed to send AskMessage packet"
-                );
-
-                return false;
+                        return false;
+                    }
+                }
             }
-        }
-    }
 
-    true
+            true
+        }
+    );
+
+    result.unwrap_or(true)
 }

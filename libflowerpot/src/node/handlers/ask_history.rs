@@ -18,6 +18,9 @@
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
+use crate::address::Address;
+use crate::storage::StorageError;
+use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
 
 use super::NodeState;
@@ -28,37 +31,53 @@ use super::NodeState;
 /// terminated.
 pub fn handle(
     state: &mut NodeState,
-    root_block: Hash,
+    stream: &mut PacketStream,
+    address: Address,
     since_block: Hash,
     max_length: u64
 ) -> bool {
     #[cfg(feature = "tracing")]
     tracing::debug!(
-        local_id = base64::encode(state.stream.local_id()),
-        peer_id = base64::encode(state.stream.peer_id()),
-        root_block = root_block.to_base64(),
-        since_block = since_block.to_base64(),
+        local_id = base64::encode(stream.local_id()),
+        peer_id = base64::encode(stream.peer_id()),
+        ?address,
+        ?since_block,
         ?max_length,
         "handle AskHistory packet"
     );
 
     // Read known blockchain history.
-    let max_history_length = state.handler.options.max_history_length;
+    let max_length = state.handler.options.max_history_length
+        .min(max_length as usize);
 
-    let history = state.handler.map_tracker(root_block, move |_, tracker| {
-        tracker.get_history(
-            since_block,
-            (max_length as usize).min(max_history_length)
-        )
+    let history = state.handler.map_storage(&address, move |storage| {
+        let mut history = Vec::with_capacity(max_length);
+        let mut curr_block = since_block;
+
+        for _ in 0..max_length {
+            let Some(next_block) = storage.next_block(&curr_block)? else {
+                break;
+            };
+
+            curr_block = next_block;
+
+            let Some(block) = storage.read_block(&curr_block)? else {
+                break;
+            };
+
+            history.push(block);
+        }
+
+        Ok::<_, StorageError>(history)
     });
 
     let Some(history) = history else {
         #[cfg(feature = "tracing")]
         tracing::debug!(
-            local_id = base64::encode(state.stream.local_id()),
-            peer_id = base64::encode(state.stream.peer_id()),
-            root_block = root_block.to_base64(),
-            since_block = since_block.to_base64(),
+            local_id = base64::encode(stream.local_id()),
+            peer_id = base64::encode(stream.peer_id()),
+            ?address,
+            ?since_block,
             ?max_length,
             "history for this blockchain is not available"
         );
@@ -68,16 +87,17 @@ pub fn handle(
 
     let history = match history {
         Ok(history) => history,
+
         Err(err) => {
             #[cfg(feature = "tracing")]
             tracing::warn!(
                 ?err,
-                local_id = base64::encode(state.stream.local_id()),
-                peer_id = base64::encode(state.stream.peer_id()),
-                root_block = root_block.to_base64(),
-                since_block = since_block.to_base64(),
+                local_id = base64::encode(stream.local_id()),
+                peer_id = base64::encode(stream.peer_id()),
+                ?address,
+                ?since_block,
                 ?max_length,
-                "failed to read blockchain history"
+                "failed to read blockchain history from a storage"
             );
 
             return true;
@@ -85,18 +105,18 @@ pub fn handle(
     };
 
     // Try to send this history back to the requester.
-    if let Err(err) = state.stream.send(Packet::History {
-        root_block,
+    if let Err(err) = stream.send(Packet::History {
+        address: address.clone(),
         since_block,
-        history
+        history: history.into_boxed_slice()
     }) {
         #[cfg(feature = "tracing")]
         tracing::error!(
             ?err,
-            local_id = base64::encode(state.stream.local_id()),
-            peer_id = base64::encode(state.stream.peer_id()),
-            root_block = root_block.to_base64(),
-            since_block = since_block.to_base64(),
+            local_id = base64::encode(stream.local_id()),
+            peer_id = base64::encode(stream.peer_id()),
+            ?address,
+            ?since_block,
             ?max_length,
             "failed to send History packet"
         );

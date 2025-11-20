@@ -17,8 +17,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::crypto::base64;
-use crate::crypto::hash::Hash;
-use crate::blob::Message;
+use crate::message::Message;
+use crate::address::Address;
+use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
 
 use super::NodeState;
@@ -29,16 +30,17 @@ use super::NodeState;
 /// terminated.
 pub fn handle(
     state: &mut NodeState,
-    root_block: Hash,
+    stream: &mut PacketStream,
+    address: Address,
     message: Message
 ) -> bool {
     let message_size = message.data().len();
 
     #[cfg(feature = "tracing")]
     tracing::debug!(
-        local_id = base64::encode(state.stream.local_id()),
-        peer_id = base64::encode(state.stream.peer_id()),
-        root_block = root_block.to_base64(),
+        local_id = base64::encode(stream.local_id()),
+        peer_id = base64::encode(stream.peer_id()),
+        ?address,
         message_hash = message.hash().to_base64(),
         ?message_size,
         "handle Message packet"
@@ -48,9 +50,9 @@ pub fn handle(
     if message_size > state.handler.options.max_message_size {
         #[cfg(feature = "tracing")]
         tracing::warn!(
-            local_id = base64::encode(state.stream.local_id()),
-            peer_id = base64::encode(state.stream.peer_id()),
-            root_block = root_block.to_base64(),
+            local_id = base64::encode(stream.local_id()),
+            peer_id = base64::encode(stream.peer_id()),
+            ?address,
             message_hash = message.hash().to_base64(),
             ?message_size,
             "received message is too large"
@@ -66,9 +68,9 @@ pub fn handle(
             #[cfg(feature = "tracing")]
             tracing::error!(
                 ?err,
-                local_id = base64::encode(state.stream.local_id()),
-                peer_id = base64::encode(state.stream.peer_id()),
-                root_block = root_block.to_base64(),
+                local_id = base64::encode(stream.local_id()),
+                peer_id = base64::encode(stream.peer_id()),
+                ?address,
                 message_hash = message.hash().to_base64(),
                 ?message_size,
                 "failed to verify received message"
@@ -82,9 +84,9 @@ pub fn handle(
     if !is_valid {
         #[cfg(feature = "tracing")]
         tracing::warn!(
-            local_id = base64::encode(state.stream.local_id()),
-            peer_id = base64::encode(state.stream.peer_id()),
-            root_block = root_block.to_base64(),
+            local_id = base64::encode(stream.local_id()),
+            peer_id = base64::encode(stream.peer_id()),
+            ?address,
             verifying_key = verifying_key.to_base64(),
             message_hash = message.hash().to_base64(),
             ?message_size,
@@ -94,18 +96,18 @@ pub fn handle(
         return true;
     }
 
-    // Skip pending transactions.
+    // Skip pending messages.
     let is_pending = state.handler.map_pending_messages(
-        root_block,
+        &address,
         |pending_messages| pending_messages.contains_key(message.hash())
     );
 
     if is_pending == Some(true) {
         #[cfg(feature = "tracing")]
         tracing::trace!(
-            local_id = base64::encode(state.stream.local_id()),
-            peer_id = base64::encode(state.stream.peer_id()),
-            root_block = root_block.to_base64(),
+            local_id = base64::encode(stream.local_id()),
+            peer_id = base64::encode(stream.peer_id()),
+            ?address,
             verifying_key = verifying_key.to_base64(),
             message_hash = message.hash().to_base64(),
             ?message_size,
@@ -117,13 +119,13 @@ pub fn handle(
 
     // Check this message using the provided filter.
     if let Some(filter) = &state.handler.options.messages_filter
-        && !filter(&root_block, &message, &verifying_key)
+        && !filter(&address, &message, &verifying_key)
     {
         #[cfg(feature = "tracing")]
         tracing::debug!(
-            local_id = base64::encode(state.stream.local_id()),
-            peer_id = base64::encode(state.stream.peer_id()),
-            root_block = root_block.to_base64(),
+            local_id = base64::encode(stream.local_id()),
+            peer_id = base64::encode(stream.peer_id()),
+            ?address,
             verifying_key = verifying_key.to_base64(),
             message_hash = message.hash().to_base64(),
             ?message_size,
@@ -133,23 +135,23 @@ pub fn handle(
         return true;
     }
 
-    // Skip message if it's already stored in the tracker.
-    let is_stored = state.handler.map_tracker(
-        root_block,
-        |_, tracker| tracker.has_message(message.hash())
+    // Skip message if it's already stored in the storage.
+    let is_stored = state.handler.map_storage(
+        &address,
+        |storage| storage.is_message_stored(message.hash())
     ).transpose();
 
     match is_stored {
         Ok(Some(true)) => {
             #[cfg(feature = "tracing")]
             tracing::trace!(
-                local_id = base64::encode(state.stream.local_id()),
-                peer_id = base64::encode(state.stream.peer_id()),
-                root_block = root_block.to_base64(),
+                local_id = base64::encode(stream.local_id()),
+                peer_id = base64::encode(stream.peer_id()),
+                ?address,
                 verifying_key = verifying_key.to_base64(),
                 message_hash = message.hash().to_base64(),
                 ?message_size,
-                "received message is already stored in the tracker"
+                "received message is already stored in the storage"
             );
 
             return true;
@@ -159,13 +161,13 @@ pub fn handle(
             #[cfg(feature = "tracing")]
             tracing::warn!(
                 ?err,
-                local_id = base64::encode(state.stream.local_id()),
-                peer_id = base64::encode(state.stream.peer_id()),
-                root_block = root_block.to_base64(),
+                local_id = base64::encode(stream.local_id()),
+                peer_id = base64::encode(stream.peer_id()),
+                ?address,
                 verifying_key = verifying_key.to_base64(),
                 message_hash = message.hash().to_base64(),
                 ?message_size,
-                "failed to check if received message is already stored in the tracker"
+                "failed to check if received message is already stored in the storage"
             );
 
             return true;
@@ -176,9 +178,9 @@ pub fn handle(
 
     #[cfg(feature = "tracing")]
     tracing::info!(
-        local_id = base64::encode(state.stream.local_id()),
-        peer_id = base64::encode(state.stream.peer_id()),
-        root_block = root_block.to_base64(),
+        local_id = base64::encode(stream.local_id()),
+        peer_id = base64::encode(stream.peer_id()),
+        ?address,
         verifying_key = verifying_key.to_base64(),
         message_hash = message.hash().to_base64(),
         ?message_size,
@@ -188,13 +190,13 @@ pub fn handle(
     // Insert message to the pending messages pool.
     let message_clone = message.clone();
 
-    state.handler.map_pending_messages_mut(root_block, move |pending_messages| {
+    state.handler.map_pending_messages_mut(&address, move |pending_messages| {
         pending_messages.insert(*message_clone.hash(), message_clone);
     });
 
     // Broadcast this message to other connected nodes.
     state.broadcast(Packet::Message {
-        root_block,
+        address,
         message
     });
 
