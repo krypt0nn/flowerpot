@@ -585,7 +585,7 @@ impl PacketStream {
         }
 
         #[cfg(feature = "tracing")]
-        tracing::trace!(?length, "send packet");
+        tracing::trace!(?length, stats = ?self.stats, "write packet");
 
         let mut length: [u8; 4] = (length as u32).to_le_bytes();
 
@@ -665,7 +665,7 @@ impl PacketStream {
                 // If we already have the whole packet.
                 if n >= length + 4 {
                     #[cfg(feature = "tracing")]
-                    tracing::trace!(?length, "read packet");
+                    tracing::trace!(?length, stats = ?self.stats, "read packet");
 
                     // Try to decode it.
                     let packet = Packet::from_bytes(&self.buf[4..length + 4]);
