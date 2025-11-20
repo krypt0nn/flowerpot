@@ -541,6 +541,25 @@ impl Storage for SqliteStorage {
 
         // Otherwise we need to modify the history.
         else {
+            // Check if the new block is older than the old one.
+            let mut query = lock.prepare_cached("
+                SELECT timestamp FROM v1_blocks WHERE prev_hash = ?1 LIMIT 1
+            ")?;
+
+            let timestamp = query.query_row([block.prev_hash().as_bytes()], |row| {
+                row.get::<_, i64>("timestamp")
+            })?;
+
+            let timestamp = UtcDateTime::from_unix_timestamp(timestamp)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+
+            if &timestamp >= block.timestamp() {
+                return Ok(StorageWriteResult::NewerBlockStored);
+            }
+
+            drop(query);
+
+            // Update the history.
             let transaction = lock.transaction()?;
 
             let mut query = transaction.prepare_cached("

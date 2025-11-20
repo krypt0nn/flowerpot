@@ -342,6 +342,13 @@ impl Storage for RamStorage {
                 i -= 1;
             }
 
+            // Check if the new block is older than the old one.
+            if let Some(old_block) = blocks.get(&history[i + 1])
+                && old_block.timestamp() >= block.timestamp()
+            {
+                return Ok(StorageWriteResult::NewerBlockStored);
+            }
+
             // Check that the new block has no duplicate messages.
             if block_has_duplicate_messages_in_history(
                 block,

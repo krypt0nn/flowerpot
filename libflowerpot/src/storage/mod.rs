@@ -49,7 +49,11 @@ pub enum StorageWriteResult {
 
     /// Provided block cannot be chained to any other stored block (there's no
     /// block with its prev_hash hash).
-    OutOfHistoryBlock
+    OutOfHistoryBlock,
+
+    /// Provided block attempts to replace already stored block, and already
+    /// stored block is newer than provided one.
+    NewerBlockStored
 }
 
 pub type StorageError = Box<dyn std::error::Error>;
@@ -112,6 +116,9 @@ pub trait Storage {
     ///
     /// # Blocks writing rules
     ///
+    /// The following rules must be implemented by all the `Storage`-s in order
+    /// to operate properly:
+    ///
     /// - If a block with the same hash is already stored then reject it and
     ///   return `StorageWriteResult::BlockAlreadyStored`.
     /// - If the provided block has messages with duplicate hashes then it must
@@ -133,11 +140,15 @@ pub trait Storage {
     ///         - Otherwise write this block to the end of the chain and return
     ///           `StorageWriteResult::Success`.
     ///     - If the previous block is not the tail block of the history then:
-    ///         - Remove all the following blocks;
-    ///         - If there's no duplicate messages then append the new block to
-    ///           the chain;
-    ///         - Otherwise revert blocks removal, reject new block and return
-    ///           `StorageWriteResult::BlockHasDuplicateHistoryMessages`.
+    ///         - If the block we're trying to replace it newer than the one
+    ///           we're trying to write, then reject it and return
+    ///           `StorageWriteResult::NewerBlockStored`.
+    ///         - Otherwise, if we're writing a block with higher timestamp:
+    ///             - Remove all the following blocks;
+    ///             - If there's no duplicate messages then append the new block to
+    ///               the chain;
+    ///             - Otherwise revert blocks removal, reject new block and return
+    ///               `StorageWriteResult::BlockHasDuplicateHistoryMessages`.
     fn write_block(
         &self,
         block: &Block
@@ -527,6 +538,8 @@ pub fn test_storage<S: Storage>(
     // Original block 3 must be removed completely. Message 3 must disappear
     // from the storage.
 
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
     let block_3_alt = Block::builder()
         .with_prev_hash(block_2.hash())
         .with_inline_messages([message_2.clone()])
@@ -576,6 +589,8 @@ pub fn test_storage<S: Storage>(
     // Alternative block 3 must be removed completely since its previous hash
     // is not correct anymore. Message 1 must disappear since it was stored in
     // previous block 2.
+
+    std::thread::sleep(std::time::Duration::from_secs(1));
 
     let block_2_alt = Block::builder()
         .with_prev_hash(block_1.hash())
@@ -632,6 +647,8 @@ pub fn test_storage<S: Storage>(
     // Alternative block 2 must be removed completely since its previous hash
     // is not correct anymore. No blocks but the alternative block 1 must remain
     // in the history at that point. All the messages must disappear.
+
+    std::thread::sleep(std::time::Duration::from_secs(1));
 
     let block_1_alt = Block::builder()
         .with_inline_messages([message_1.clone()])
