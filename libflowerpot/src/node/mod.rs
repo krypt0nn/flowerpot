@@ -261,9 +261,9 @@ impl Node {
     pub fn add_storage(
         mut self,
         address: impl Into<Address>,
-        storage: impl Into<Box<dyn Storage + Send>>
+        storage: impl Storage + Send + 'static
     ) -> Self {
-        self.storages.insert(address.into(), storage.into());
+        self.storages.insert(address.into(), Box::new(storage));
 
         self
     }
