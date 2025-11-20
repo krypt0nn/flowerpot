@@ -487,7 +487,7 @@ impl Packet {
                 let mut packet = &packet[2 + Address::SIZE + Hash::SIZE..];
                 let mut history = Vec::new();
 
-                loop {
+                while !packet.is_empty() {
                     let (Some(block_len), shifted_packet) = varint::read_u64(packet) else {
                         return Err(PacketDecodeError::InvalidParam {
                             packet_type: "V1_HISTORY",
