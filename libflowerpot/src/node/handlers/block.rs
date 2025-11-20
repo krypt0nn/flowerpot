@@ -18,6 +18,7 @@
 
 use crate::crypto::base64;
 use crate::block::Block;
+use crate::storage::StorageWriteResult;
 use crate::address::Address;
 use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
@@ -87,73 +88,69 @@ pub fn handle(
 
     // Try to write this block.
     let should_broadcast = {
-        false
+        let local_id = base64::encode(stream.local_id());
+        let peer_id = base64::encode(stream.peer_id());
 
-        // let local_id = base64::encode(stream.local_id());
-        // let peer_id = base64::encode(stream.peer_id());
+        let address = address.clone();
+        let block = block.clone();
 
-        // let block = block.clone();
+        state.handler.map_storage(address.clone(), move |storage| {
+            match storage.write_block(&block) {
+                Ok(StorageWriteResult::Success) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::info!(
+                        ?local_id,
+                        ?peer_id,
+                        ?address,
+                        block_hash = block.hash().to_base64(),
+                        "indexed block in tracker"
+                    );
 
-        // state.handler.map_storage(&address, move |storage| {
-        //     match storage.write_block(&block) {
-        //         Ok(StorageWriteResult::Success) => {
-        //             #[cfg(feature = "tracing")]
-        //             tracing::info!(
-        //                 ?local_id,
-        //                 ?peer_id,
-        //                 ?address,
-        //                 block_hash = block.hash().to_base64(),
-        //                 "indexed block in tracker"
-        //             );
+                    return true;
+                }
 
-        //             return true;
-        //         }
+                Ok(StorageWriteResult::BlockAlreadyStored) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::info!(
+                        ?local_id,
+                        ?peer_id,
+                        ?address,
+                        block_hash = block.hash().to_base64(),
+                        "block was already stored"
+                    );
+                }
 
-        //         Ok(StorageWriteResult::BlockAlreadyStored) => {
-        //             #[cfg(feature = "tracing")]
-        //             tracing::info!(
-        //                 ?local_id,
-        //                 ?peer_id,
-        //                 root_block = root_block.to_base64(),
-        //                 block_hash = block.hash().to_base64(),
-        //                 verifying_key = verifying_key.to_base64(),
-        //                 "block was already stored"
-        //             );
-        //         }
+                Ok(result) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        ?local_id,
+                        ?peer_id,
+                        ?address,
+                        block_hash = block.hash().to_base64(),
+                        ?result,
+                        "block was not indexed in tracker"
+                    );
+                }
 
-        //         Ok(result) => {
-        //             #[cfg(feature = "tracing")]
-        //             tracing::warn!(
-        //                 ?local_id,
-        //                 ?peer_id,
-        //                 root_block = root_block.to_base64(),
-        //                 block_hash = block.hash().to_base64(),
-        //                 verifying_key = verifying_key.to_base64(),
-        //                 ?result,
-        //                 "block was not indexed in tracker"
-        //             );
-        //         }
+                Err(err) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        ?err,
+                        ?local_id,
+                        ?peer_id,
+                        ?address,
+                        block_hash = block.hash().to_base64(),
+                        "failed to write block to the tracker"
+                    );
+                }
+            }
 
-        //         Err(err) => {
-        //             #[cfg(feature = "tracing")]
-        //             tracing::warn!(
-        //                 ?err,
-        //                 ?local_id,
-        //                 ?peer_id,
-        //                 root_block = root_block.to_base64(),
-        //                 block_hash = block.hash().to_base64(),
-        //                 verifying_key = verifying_key.to_base64(),
-        //                 "failed to write block to the tracker"
-        //             );
-        //         }
-        //     }
-
-        //     false
-        // })
+            false
+        })
     };
 
     // If we've written the block to the storage then broadcast it further.
-    if should_broadcast {
+    if should_broadcast == Some(true) {
         state.broadcast(Packet::Block {
             address,
             block
