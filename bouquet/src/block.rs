@@ -28,6 +28,7 @@ use flowerpot::crypto::sign::SigningKey;
 use flowerpot::crypto::key_exchange::SecretKey;
 use flowerpot::message::Message;
 use flowerpot::block::Block;
+use flowerpot::address::Address;
 use flowerpot::protocol::network::{
     PacketStream, PacketStreamOptions, PacketStreamEncryption
 };
@@ -58,7 +59,11 @@ pub enum BlockCommands {
 
         /// Flowerpot message to add to the block.
         #[arg(short = 'm', long = "message")]
-        messages: Vec<String>
+        messages: Vec<String>,
+
+        /// Flowerpot blockchain address.
+        #[arg(short = 'a', long, alias = "addr")]
+        address: String
     },
 
     /// Send block to the flowerpot network.
@@ -67,9 +72,9 @@ pub enum BlockCommands {
         #[arg(short = 'r', long, alias = "rand", alias = "random")]
         seed: Option<u64>,
 
-        /// Hash of the root block of the flowerpot chain.
-        #[arg(short = 'b', long, alias = "root")]
-        root_block: String,
+        /// Flowerpot blockchain address.
+        #[arg(short = 'a', long, alias = "addr")]
+        address: String,
 
         /// Address of remote node to connect to.
         #[arg(short = 'n', long = "node", alias = "connect")]
@@ -88,7 +93,16 @@ pub enum BlockCommands {
 impl BlockCommands {
     pub fn run(self) -> anyhow::Result<()> {
         match self {
-            Self::Create { seed, signing_key, previous, messages } => {
+            Self::Create {
+                seed,
+                signing_key,
+                previous,
+                messages,
+                address
+            } => {
+                let address = Address::from_base64(address)
+                    .ok_or_else(|| anyhow::anyhow!("invalid flowerpot address"))?;
+
                 let signing_key = match signing_key {
                     Some(signing_key) => {
                         match SigningKey::from_base64(signing_key) {
@@ -124,11 +138,17 @@ impl BlockCommands {
                             decoded_messages.push(message);
                         }
 
-                        Block::create(signing_key, previous, decoded_messages)
+                        Block::builder()
+                            .with_chain_id(address.chain_id())
+                            .with_prev_hash(previous)
+                            .with_inline_messages(decoded_messages)
+                            .sign(signing_key)
                             .context("failed to create block")?
                     }
 
-                    None => Block::create_root(signing_key)
+                    None => Block::builder()
+                        .with_chain_id(address.chain_id())
+                        .sign(signing_key)
                         .context("failed to create root block")?
                 };
 
@@ -139,13 +159,13 @@ impl BlockCommands {
 
             Self::Send {
                 seed,
-                root_block,
+                address,
                 nodes,
                 block,
                 no_encryption
             } => {
-                let root_block = Hash::from_base64(root_block)
-                    .ok_or_else(|| anyhow::anyhow!("invalid root block"))?;
+                let address = Address::from_base64(address)
+                    .ok_or_else(|| anyhow::anyhow!("invalid flowerpot address"))?;
 
                 let block = match block {
                     Some(block) => {
@@ -202,7 +222,7 @@ impl BlockCommands {
                         base64::encode(stream.peer_id())
                     );
 
-                    node.add_stream(stream);
+                    node = node.add_stream(stream);
                 }
 
                 println!("starting the node...");
@@ -210,15 +230,13 @@ impl BlockCommands {
                 let handler = node.start(NodeOptions {
                     accept_messages: true,
                     accept_blocks: false,
+
                     ..NodeOptions::default()
                 }).map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
                 println!("sending block...");
 
-                handler.send_block(root_block, block);
-
-                // TODO: some sort of .wait() method on the handler.
-                std::thread::sleep(std::time::Duration::from_secs(3));
+                handler.send_block(address, block);
             }
         }
 

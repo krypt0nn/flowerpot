@@ -25,6 +25,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 
 mod keypair;
+mod address;
 mod message;
 mod block;
 mod blockchain;
@@ -58,9 +59,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Manage public and secret flowerpot keys.
+    /// Manage flowerpot signing keys.
     #[command(subcommand)]
     Keypair(keypair::KeypairCommands),
+
+    /// Manage flowerpot blockchain addresses.
+    #[command(subcommand)]
+    Address(address::AddressCommands),
 
     /// Manage flowerpot messages.
     #[command(subcommand)]
@@ -96,6 +101,7 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Keypair(command) => command.run(),
+        Commands::Address(command) => command.run(),
         Commands::Message(command) => command.run(),
         Commands::Block(command) => command.run(),
         Commands::Blockchain(command) => command.run()

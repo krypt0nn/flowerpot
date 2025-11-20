@@ -23,10 +23,10 @@ use anyhow::Context;
 use clap::Subcommand;
 
 use flowerpot::crypto::base64;
-use flowerpot::crypto::hash::Hash;
 use flowerpot::crypto::sign::SigningKey;
 use flowerpot::crypto::key_exchange::SecretKey;
 use flowerpot::message::Message;
+use flowerpot::address::Address;
 use flowerpot::protocol::network::{
     PacketStream, PacketStreamOptions, PacketStreamEncryption
 };
@@ -56,9 +56,9 @@ pub enum MessageCommands {
         #[arg(short = 'r', long, alias = "rand", alias = "random")]
         seed: Option<u64>,
 
-        /// Hash of the root block of the flowerpot chain.
-        #[arg(short = 'b', long, alias = "root")]
-        root_block: String,
+        /// Flowerpot blockchain address.
+        #[arg(short = 'a', long, alias = "addr")]
+        address: String,
 
         /// Address of remote node to connect to.
         #[arg(short = 'n', long = "node", alias = "connect")]
@@ -110,13 +110,13 @@ impl MessageCommands {
 
             Self::Send {
                 seed,
-                root_block,
+                address,
                 nodes,
                 message,
                 no_encryption
             } => {
-                let root_block = Hash::from_base64(root_block)
-                    .ok_or_else(|| anyhow::anyhow!("invalid root block"))?;
+                let address = Address::from_base64(address)
+                    .ok_or_else(|| anyhow::anyhow!("invalid blockchain address"))?;
 
                 let message = match message {
                     Some(message) => {
@@ -173,7 +173,7 @@ impl MessageCommands {
                         base64::encode(stream.peer_id())
                     );
 
-                    node.add_stream(stream);
+                    node = node.add_stream(stream);
                 }
 
                 println!("starting the node...");
@@ -181,15 +181,13 @@ impl MessageCommands {
                 let handler = node.start(NodeOptions {
                     accept_messages: true,
                     accept_blocks: false,
+
                     ..NodeOptions::default()
                 }).map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
                 println!("sending message...");
 
-                handler.send_message(root_block, message);
-
-                // TODO: some sort of .wait() method on the handler.
-                std::thread::sleep(std::time::Duration::from_secs(3));
+                handler.send_message(address, message);
             }
         }
 
