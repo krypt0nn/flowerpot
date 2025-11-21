@@ -21,16 +21,15 @@ use crate::address::Address;
 use crate::message::Message;
 use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
-
-use super::NodeState;
+use crate::node::NodeHandler;
 
 /// Handle `Message` packet.
 ///
 /// Return `false` if critical error occured and node connection must be
 /// terminated.
 pub fn handle(
-    state: &mut NodeState,
     stream: &mut PacketStream,
+    handler: &NodeHandler,
     address: Address,
     message: Message
 ) -> bool {
@@ -47,7 +46,7 @@ pub fn handle(
     );
 
     // Reject large messages.
-    if message_size > state.handler.options.max_message_size {
+    if message_size > handler.options.max_message_size {
         #[cfg(feature = "tracing")]
         tracing::warn!(
             local_id = base64::encode(stream.local_id()),
@@ -97,7 +96,7 @@ pub fn handle(
     }
 
     // Skip pending messages.
-    let is_pending = state.handler.map_pending_messages(
+    let is_pending = handler.map_pending_messages(
         &address,
         |pending_messages| pending_messages.contains_key(message.hash())
     );
@@ -118,7 +117,7 @@ pub fn handle(
     }
 
     // Check this message using the provided filter.
-    if let Some(filter) = &state.handler.options.messages_filter
+    if let Some(filter) = &handler.options.messages_filter
         && !filter(&address, &message, &verifying_key)
     {
         #[cfg(feature = "tracing")]
@@ -136,7 +135,7 @@ pub fn handle(
     }
 
     // Skip message if it's already stored in the storage.
-    let is_stored = state.handler.map_storage(
+    let is_stored = handler.map_storage(
         &address,
         |storage| storage.is_message_stored(message.hash())
     ).transpose();
@@ -190,15 +189,19 @@ pub fn handle(
     // Insert message to the pending messages pool.
     let message_clone = message.clone();
 
-    state.handler.map_pending_messages_mut(&address, move |pending_messages| {
+    handler.map_pending_messages_mut(&address, move |pending_messages| {
         pending_messages.insert(*message_clone.hash(), message_clone);
     });
 
     // Broadcast this message to other connected nodes.
-    state.broadcast(Packet::Message {
-        address,
-        message
-    });
+    super::broadcast(
+        &handler.streams,
+        &[*stream.peer_id()],
+        &Packet::Message {
+            address,
+            message
+        }
+    );
 
     true
 }

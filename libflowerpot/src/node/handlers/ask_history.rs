@@ -22,16 +22,15 @@ use crate::address::Address;
 use crate::storage::StorageError;
 use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
-
-use super::NodeState;
+use crate::node::NodeHandler;
 
 /// Handle `AskHistory` packet.
 ///
 /// Return `false` if critical error occured and node connection must be
 /// terminated.
 pub fn handle(
-    state: &mut NodeState,
     stream: &mut PacketStream,
+    handler: &NodeHandler,
     address: Address,
     since_block: Hash,
     max_length: u64
@@ -47,10 +46,10 @@ pub fn handle(
     );
 
     // Read known blockchain history.
-    let max_length = state.handler.options.max_history_length
+    let max_length = handler.options.max_history_length
         .min(max_length as usize);
 
-    let history = state.handler.map_storage(&address, move |storage| {
+    let history = handler.map_storage(&address, move |storage| {
         let mut history = Vec::with_capacity(max_length);
         let mut curr_block = since_block;
 

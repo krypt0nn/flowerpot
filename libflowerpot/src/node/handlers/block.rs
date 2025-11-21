@@ -22,16 +22,15 @@ use crate::block::Block;
 use crate::storage::StorageWriteResult;
 use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
-
-use super::NodeState;
+use crate::node::NodeHandler;
 
 /// Handle `Block` packet.
 ///
 /// Return `false` if critical error occured and node connection must be
 /// terminated.
 pub fn handle(
-    state: &mut NodeState,
     stream: &mut PacketStream,
+    handler: &NodeHandler,
     address: Address,
     block: Block
 ) -> bool {
@@ -94,7 +93,7 @@ pub fn handle(
         let address = address.clone();
         let block = block.clone();
 
-        state.handler.map_storage(address.clone(), move |storage| {
+        handler.map_storage(address.clone(), move |storage| {
             match storage.write_block(&block) {
                 Ok(StorageWriteResult::Success) => {
                     #[cfg(feature = "tracing")]
@@ -151,10 +150,14 @@ pub fn handle(
 
     // If we've written the block to the storage then broadcast it further.
     if should_broadcast == Some(true) {
-        state.broadcast(Packet::Block {
-            address,
-            block
-        });
+        super::broadcast(
+            &handler.streams,
+            &[*stream.peer_id()],
+            &Packet::Block {
+                address,
+                block
+            }
+        );
     }
 
     true

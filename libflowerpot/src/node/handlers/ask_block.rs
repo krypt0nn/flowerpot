@@ -21,16 +21,15 @@ use crate::crypto::hash::Hash;
 use crate::address::Address;
 use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
-
-use super::NodeState;
+use crate::node::NodeHandler;
 
 /// Handle `AskBlock` packet.
 ///
 /// Return `false` if critical error occured and node connection must be
 /// terminated.
 pub fn handle(
-    state: &mut NodeState,
     stream: &mut PacketStream,
+    handler: &NodeHandler,
     address: Address,
     hash: Hash
 ) -> bool {
@@ -44,7 +43,7 @@ pub fn handle(
     );
 
     // Try to read block from a storage.
-    let result = state.handler.map_storage(&address, |storage| {
+    let result = handler.map_storage(&address, |storage| {
         storage.read_block(&hash).transpose()
     }).flatten().transpose();
 

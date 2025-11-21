@@ -21,16 +21,15 @@ use crate::crypto::hash::Hash;
 use crate::address::Address;
 use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
-
-use super::NodeState;
+use crate::node::NodeHandler;
 
 /// Handle `AskMessage` packet.
 ///
 /// Return `false` if critical error occured and node connection must be
 /// terminated.
 pub fn handle(
-    state: &mut NodeState,
     stream: &mut PacketStream,
+    handler: &NodeHandler,
     address: Address,
     message: Hash
 ) -> bool {
@@ -44,14 +43,14 @@ pub fn handle(
     );
 
     // Try to read requested message from pending messages pool.
-    let mut value = state.handler.map_pending_messages(
+    let mut value = handler.map_pending_messages(
         &address,
         |pending_messages| pending_messages.get(&message).cloned()
     ).flatten();
 
     // If it's not available there then try to read it from a storage.
     if value.is_none() {
-        let result = state.handler.map_storage(&address, |storage| {
+        let result = handler.map_storage(&address, |storage| {
             storage.read_message(&message).transpose()
         }).flatten().transpose();
 

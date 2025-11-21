@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use spin::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -379,7 +379,7 @@ pub struct NodeHandler {
     ///
     /// `[peer_id] => [stream]`
     #[allow(clippy::type_complexity)]
-    streams: Arc<RwLock<HashMap<[u8; 32], Arc<Mutex<PacketStream>>>>>,
+    streams: Arc<RwLock<HashMap<[u8; 32], Weak<Mutex<PacketStream>>>>>,
 
     /// Table of pending messages which are meant to be added into a new block.
     ///
@@ -411,7 +411,7 @@ impl NodeHandler {
         let stream = Arc::new(Mutex::new(stream));
 
         let state = handlers::NodeState {
-            stream: Arc::downgrade(&stream),
+            stream: stream.clone(),
             handler: self.clone()
         };
 
@@ -419,14 +419,14 @@ impl NodeHandler {
             handlers::handle(state);
         });
 
-        self.streams.write().insert(peer_id, stream);
+        self.streams.write().insert(peer_id, Arc::downgrade(&stream));
     }
 
     /// Get table of available packet streams.
     #[inline]
     pub fn streams(
         &self
-    ) -> RwLockReadGuard<'_, HashMap<[u8; 32], Arc<Mutex<PacketStream>>>> {
+    ) -> RwLockReadGuard<'_, HashMap<[u8; 32], Weak<Mutex<PacketStream>>>> {
         self.streams.read()
     }
 
@@ -434,7 +434,7 @@ impl NodeHandler {
     #[inline]
     pub fn streams_mut(
         &self
-    ) -> RwLockWriteGuard<'_, HashMap<[u8; 32], Arc<Mutex<PacketStream>>>> {
+    ) -> RwLockWriteGuard<'_, HashMap<[u8; 32], Weak<Mutex<PacketStream>>>> {
         self.streams.write()
     }
 
@@ -484,8 +484,14 @@ impl NodeHandler {
         let lock = self.streams.read();
 
         for (peer_id, sender) in lock.iter() {
-            if sender.lock().send(packet.clone()).is_err() {
-                disconnected.push(*peer_id);
+            match sender.upgrade() {
+                Some(sender) => {
+                    if sender.lock().send(packet.clone()).is_err() {
+                        disconnected.push(*peer_id);
+                    }
+                }
+
+                None => disconnected.push(*peer_id)
             }
         }
 
@@ -494,8 +500,8 @@ impl NodeHandler {
         if !disconnected.is_empty() {
             let mut lock = self.streams.write();
 
-            for endpoint_id in disconnected {
-                lock.remove(&endpoint_id);
+            for peer_id in disconnected {
+                lock.remove(&peer_id);
             }
         }
     }

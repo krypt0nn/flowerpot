@@ -21,16 +21,15 @@ use crate::crypto::hash::Hash;
 use crate::address::Address;
 use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
-
-use super::NodeState;
+use crate::node::NodeHandler;
 
 /// Handle `PendingMessages` packet.
 ///
 /// Return `false` if critical error occured and node connection must be
 /// terminated.
 pub fn handle(
-    state: &mut NodeState,
     stream: &mut PacketStream,
+    handler: &NodeHandler,
     address: Address,
     messages: Box<[Hash]>
 ) -> bool {
@@ -45,7 +44,7 @@ pub fn handle(
         "handle PendingMessages packet"
     );
 
-    let result = state.handler.map_pending_messages(
+    let result = handler.map_pending_messages(
         address.clone(),
         move |pending_messages| {
             for hash in messages {

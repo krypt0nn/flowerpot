@@ -16,10 +16,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
+use std::collections::HashMap;
 
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 
 use crate::crypto::base64;
 use crate::protocol::packets::Packet;
@@ -40,102 +41,93 @@ mod block;
 const THREAD_SLEEP_DURATION: Duration = Duration::from_millis(50);
 
 pub struct NodeState {
-    pub stream: Weak<Mutex<PacketStream>>,
+    pub stream: Arc<Mutex<PacketStream>>,
     pub handler: NodeHandler
 }
 
-impl NodeState {
-    /// Send packet to every connected node besides the current one.
-    pub fn broadcast(&self, packet: Packet) {
-        let (local_id, peer_id) = match self.stream.upgrade() {
-            Some(stream) => {
-                let lock = stream.lock();
+/// Broadcast packet to all the streams besides the ones with given peer IDs.
+pub fn broadcast(
+    streams: &RwLock<HashMap<[u8; 32], Weak<Mutex<PacketStream>>>>,
+    except: &[[u8; 32]],
+    packet: &Packet
+) {
+    #[cfg(feature = "tracing")]
+    tracing::debug!("broadcast packet");
 
-                let local_id = *lock.local_id();
-                let peer_id = *lock.peer_id();
+    let mut disconnected = Vec::new();
 
-                (Some(local_id), Some(peer_id))
-            }
+    let lock = streams.read();
 
-            None => (None, None)
-        };
-
-        #[cfg(feature = "tracing")]
-        tracing::debug!(
-            local_id = ?local_id.map(base64::encode),
-            peer_id = ?peer_id.map(base64::encode),
-            "broadcast packet"
-        );
-
-        let mut disconnected = Vec::new();
-
-        let lock = self.handler.streams.read();
-
-        for (sender_peer_id, sender) in lock.iter() {
-            let mut sender = sender.lock();
-
-            if Some(sender_peer_id) != peer_id.as_ref()
-                && sender.send(packet.clone()).is_err()
-            {
-                disconnected.push(*sender_peer_id);
-            }
+    for (peer_id, sender) in lock.iter() {
+        if except.contains(peer_id) {
+            continue;
         }
 
-        drop(lock);
-
-        if !disconnected.is_empty() {
-            let mut lock = self.handler.streams.write();
-
-            for endpoint_id in disconnected {
-                lock.remove(&endpoint_id);
+        match sender.upgrade() {
+            Some(sender) => {
+                if sender.lock().send(packet.clone()).is_err() {
+                    disconnected.push(*peer_id);
+                }
             }
+
+            None => disconnected.push(*peer_id)
+        }
+    }
+
+    drop(lock);
+
+    if !disconnected.is_empty() {
+        let mut lock = streams.write();
+
+        for peer_id in disconnected {
+            lock.remove(&peer_id);
         }
     }
 }
 
 /// Handle connection.
-pub fn handle(mut state: NodeState) {
+pub fn handle(state: NodeState) {
     // Ask remote node to share pending messages if we support their storing.
-    if let Some(stream) = state.stream.upgrade() {
-        let mut stream = stream.lock();
-        let storages = state.handler.storages.lock();
+    let mut stream = state.stream.lock();
+    let storages = state.handler.storages.lock();
 
-        for address in storages.keys() {
+    for address in storages.keys() {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            local_id = base64::encode(stream.local_id()),
+            peer_id = base64::encode(stream.peer_id()),
+            address = address.to_base64(),
+            "ask pending messages"
+        );
+
+        if state.handler.options.accept_messages &&
+            state.handler.options.fetch_pending_messages &&
+            let Err(err) = stream.send(Packet::AskPendingMessages {
+                address: address.clone(),
+                except: Box::new([])
+            })
+        {
             #[cfg(feature = "tracing")]
-            tracing::debug!(
+            tracing::error!(
+                ?err,
                 local_id = base64::encode(stream.local_id()),
                 peer_id = base64::encode(stream.peer_id()),
-                address = address.to_base64(),
-                "ask pending messages"
+                "failed to send packet to the packets stream"
             );
 
-            if state.handler.options.accept_messages &&
-                state.handler.options.fetch_pending_messages &&
-                let Err(err) = stream.send(Packet::AskPendingMessages {
-                    address: address.clone(),
-                    except: Box::new([])
-                })
-            {
-                #[cfg(feature = "tracing")]
-                tracing::error!(
-                    ?err,
-                    local_id = base64::encode(stream.local_id()),
-                    peer_id = base64::encode(stream.peer_id()),
-                    "failed to send packet to the packets stream"
-                );
-
-                return;
-            }
+            return;
         }
     }
 
+    drop(stream);
+
     // Process incoming packets in a loop while the stream is still stored
     // in a node handler.
-    while let Some(stream) = state.stream.upgrade() {
+    loop {
         // Allow other threads to access stream for some time.
         std::thread::sleep(THREAD_SLEEP_DURATION);
 
-        let mut stream = stream.lock();
+        let mut stream = state.stream.lock();
 
         // Try to read packet from the remote endpoint.
         let Some(packet) = stream.try_recv().transpose() else {
@@ -152,8 +144,8 @@ pub fn handle(mut state: NodeState) {
                         max_length
                     } => {
                         if !ask_history::handle(
-                            &mut state,
                             &mut stream,
+                            &state.handler,
                             address,
                             since_block,
                             max_length
@@ -167,8 +159,8 @@ pub fn handle(mut state: NodeState) {
                         except
                     } => {
                         if !ask_pending_messages::handle(
-                            &mut state,
                             &mut stream,
+                            &state.handler,
                             address,
                             &except
                         ) {
@@ -181,8 +173,8 @@ pub fn handle(mut state: NodeState) {
                         messages
                     } if state.handler.options.fetch_pending_messages => {
                         if !pending_messages::handle(
-                            &mut state,
                             &mut stream,
+                            &state.handler,
                             address,
                             messages
                         ) {
@@ -195,8 +187,8 @@ pub fn handle(mut state: NodeState) {
                         hash
                     } => {
                         if !ask_message::handle(
-                            &mut state,
                             &mut stream,
+                            &state.handler,
                             address,
                             hash
                         ) {
@@ -209,8 +201,8 @@ pub fn handle(mut state: NodeState) {
                         message
                     } if state.handler.options.accept_messages => {
                         if !message::handle(
-                            &mut state,
                             &mut stream,
+                            &state.handler,
                             address,
                             message
                         ) {
@@ -223,8 +215,8 @@ pub fn handle(mut state: NodeState) {
                         hash
                     } => {
                         if !ask_block::handle(
-                            &mut state,
                             &mut stream,
+                            &state.handler,
                             address,
                             hash
                         ) {
@@ -237,8 +229,8 @@ pub fn handle(mut state: NodeState) {
                         block
                     } if state.handler.options.accept_blocks => {
                         if !block::handle(
-                            &mut state,
                             &mut stream,
+                            &state.handler,
                             address,
                             block
                         ) {
