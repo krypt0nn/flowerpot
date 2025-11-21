@@ -120,6 +120,7 @@ pub fn handle(state: NodeState) {
     }
 
     drop(stream);
+    drop(storages);
 
     // Process incoming packets in a loop while the stream is still stored
     // in a node handler.
