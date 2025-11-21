@@ -17,9 +17,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::crypto::base64;
+use crate::address::Address;
 use crate::block::Block;
 use crate::storage::StorageWriteResult;
-use crate::address::Address;
 use crate::protocol::network::PacketStream;
 use crate::protocol::packets::Packet;
 

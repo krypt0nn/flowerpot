@@ -27,9 +27,9 @@ use crate::crypto::base64;
 use crate::crypto::hash::Hash;
 use crate::crypto::key_exchange::SecretKey;
 use crate::crypto::sign::{SigningKey, VerifyingKey};
+use crate::address::Address;
 use crate::message::Message;
 use crate::block::{Block, BlockDecodeError};
-use crate::address::Address;
 use crate::storage::{Storage, StorageError};
 use crate::protocol::packets::Packet;
 use crate::protocol::network::{
@@ -37,7 +37,7 @@ use crate::protocol::network::{
 };
 use crate::viewer::{BatchedViewer, ViewerError};
 
-// mod validator;
+mod validator;
 mod handlers;
 
 #[derive(Debug, thiserror::Error)]
@@ -356,13 +356,13 @@ impl Node {
         }
 
         // Start validator threads.
-        // for (root_block, signing_key) in self.validators {
-        //     let handler = handler.clone();
+        for (address, signing_key) in self.validators {
+            let handler = handler.clone();
 
-        //     std::thread::spawn(move || {
-        //         validator::run(handler, root_block, signing_key);
-        //     });
-        // }
+            std::thread::spawn(move || {
+                validator::run(handler, address, signing_key);
+            });
+        }
 
         #[cfg(feature = "tracing")]
         tracing::info!("node started");

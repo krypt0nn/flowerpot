@@ -20,9 +20,9 @@ pub use k256;
 
 pub mod varint;
 pub mod crypto;
+pub mod address;
 pub mod message;
 pub mod block;
-pub mod address;
 pub mod storage;
 pub mod protocol;
 pub mod viewer;
