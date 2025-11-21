@@ -18,10 +18,9 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::Connection;
-use spin::{Mutex, MutexGuard};
 use time::UtcDateTime;
 
 use crate::crypto::hash::Hash;
@@ -183,24 +182,34 @@ impl SqliteStorage {
 impl Storage for SqliteStorage {
     #[inline]
     fn root_block(&self) -> Result<Option<Hash>, StorageError> {
-        root_block(&self.0.lock())
+        let lock = self.0.lock()
+            .map_err(|_| StorageError::from("failed to lock sqlite storage"))?;
+
+        root_block(&lock)
             .map_err(|err| Box::new(err) as StorageError)
     }
 
     #[inline]
     fn tail_block(&self) -> Result<Option<Hash>, StorageError> {
-        tail_block(&self.0.lock())
+        let lock = self.0.lock()
+            .map_err(|_| StorageError::from("failed to lock sqlite storage"))?;
+
+        tail_block(&lock)
             .map_err(|err| Box::new(err) as StorageError)
     }
 
     #[inline]
     fn has_block(&self, hash: &Hash) -> Result<bool, StorageError> {
-        has_block(&self.0.lock(), hash)
+        let lock = self.0.lock()
+            .map_err(|_| StorageError::from("failed to lock sqlite storage"))?;
+
+        has_block(&lock, hash)
             .map_err(|err| Box::new(err) as StorageError)
     }
 
     fn next_block(&self, hash: &Hash) -> Result<Option<Hash>, StorageError> {
-        let lock = self.0.lock();
+        let lock = self.0.lock()
+            .map_err(|_| StorageError::from("failed to lock sqlite storage"))?;
 
         let mut query = lock.prepare_cached("
             SELECT hash FROM v1_blocks WHERE prev_hash = ?1 LIMIT 1
@@ -218,7 +227,8 @@ impl Storage for SqliteStorage {
     }
 
     fn prev_block(&self, hash: &Hash) -> Result<Option<Hash>, StorageError> {
-        let lock = self.0.lock();
+        let lock = self.0.lock()
+            .map_err(|_| StorageError::from("failed to lock sqlite storage"))?;
 
         let mut query = lock.prepare_cached("
             SELECT prev_hash FROM v1_blocks WHERE hash = ?1 LIMIT 1
@@ -236,7 +246,8 @@ impl Storage for SqliteStorage {
     }
 
     fn read_block(&self, hash: &Hash) -> Result<Option<Block>, StorageError> {
-        let lock = self.0.lock();
+        let lock = self.0.lock()
+            .map_err(|_| StorageError::from("failed to lock sqlite storage"))?;
 
         let mut query = lock.prepare_cached("
             SELECT
@@ -472,7 +483,8 @@ impl Storage for SqliteStorage {
             Ok(false)
         }
 
-        let mut lock = self.0.lock();
+        let mut lock = self.0.lock()
+            .map_err(|_| StorageError::from("failed to lock sqlite storage"))?;
 
         let (is_valid, _) = block.verify()
             .map_err(|_| {
@@ -584,7 +596,8 @@ impl Storage for SqliteStorage {
     }
 
     fn is_message_referenced(&self, hash: &Hash) -> Result<bool, StorageError> {
-        let lock = self.0.lock();
+        let lock = self.0.lock()
+            .map_err(|_| StorageError::from("failed to lock sqlite storage"))?;
 
         let mut query = lock.prepare_cached("
             SELECT 1
@@ -601,7 +614,8 @@ impl Storage for SqliteStorage {
     }
 
     fn is_message_stored(&self, hash: &Hash) -> Result<bool, StorageError> {
-        let lock = self.0.lock();
+        let lock = self.0.lock()
+            .map_err(|_| StorageError::from("failed to lock sqlite storage"))?;
 
         let mut query = lock.prepare_cached("
             SELECT 1
@@ -618,7 +632,8 @@ impl Storage for SqliteStorage {
     }
 
     fn has_message(&self, hash: &Hash) -> Result<bool, StorageError> {
-        let lock = self.0.lock();
+        let lock = self.0.lock()
+            .map_err(|_| StorageError::from("failed to lock sqlite storage"))?;
 
         let mut query = lock.prepare_cached("
             SELECT 1
@@ -639,7 +654,10 @@ impl Storage for SqliteStorage {
         &self,
         hash: &Hash
     ) -> Result<Option<Hash>, StorageError> {
-        find_message(&self.0.lock(), hash)
+        let lock = self.0.lock()
+            .map_err(|_| StorageError::from("failed to lock sqlite storage"))?;
+
+        find_message(&lock, hash)
             .map_err(|err| Box::new(err) as StorageError)
     }
 
@@ -647,7 +665,8 @@ impl Storage for SqliteStorage {
         &self,
         hash: &Hash
     ) -> Result<Option<Message>, StorageError> {
-        let lock = self.0.lock();
+        let lock = self.0.lock()
+            .map_err(|_| StorageError::from("failed to lock sqlite storage"))?;
 
         let mut query = lock.prepare_cached("
             SELECT data, sign
@@ -676,7 +695,8 @@ impl Storage for SqliteStorage {
     }
 
     fn write_message(&self, message: &Message) -> Result<bool, StorageError> {
-        let lock = self.0.lock();
+        let lock = self.0.lock()
+            .map_err(|_| StorageError::from("failed to lock sqlite storage"))?;
 
         let mut query = lock.prepare_cached("
             INSERT INTO v1_messages (hash, data, sign)

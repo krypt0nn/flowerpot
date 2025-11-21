@@ -16,11 +16,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::sync::{Arc, Weak};
 use std::time::Duration;
 use std::collections::HashMap;
-
-use spin::{Mutex, RwLock};
+use std::sync::{Arc, Weak, Mutex, RwLock};
 
 use crate::crypto::base64;
 use crate::protocol::packets::Packet;
@@ -56,7 +54,8 @@ pub fn broadcast(
 
     let mut disconnected = Vec::new();
 
-    let lock = streams.read();
+    let lock = streams.read()
+        .expect("failed to lock streams table");
 
     for (peer_id, sender) in lock.iter() {
         if except.contains(peer_id) {
@@ -65,7 +64,10 @@ pub fn broadcast(
 
         match sender.upgrade() {
             Some(sender) => {
-                if sender.lock().send(packet.clone()).is_err() {
+                let mut lock = sender.lock()
+                    .expect("failed to lock packet streams");
+
+                if lock.send(packet.clone()).is_err() {
                     disconnected.push(*peer_id);
                 }
             }
@@ -77,7 +79,8 @@ pub fn broadcast(
     drop(lock);
 
     if !disconnected.is_empty() {
-        let mut lock = streams.write();
+        let mut lock = streams.write()
+            .expect("failed to lock streams table");
 
         for peer_id in disconnected {
             lock.remove(&peer_id);
@@ -88,8 +91,11 @@ pub fn broadcast(
 /// Handle connection.
 pub fn handle(state: NodeState) {
     // Ask remote node to share pending messages if we support their storing.
-    let mut stream = state.stream.lock();
-    let storages = state.handler.storages.lock();
+    let mut stream = state.stream.lock()
+        .expect("failed to lock packet stream");
+
+    let storages = state.handler.storages.lock()
+        .expect("failed to lock storages table");
 
     for address in storages.keys() {
         #[cfg(feature = "tracing")]
@@ -128,7 +134,8 @@ pub fn handle(state: NodeState) {
         // Allow other threads to access stream for some time.
         std::thread::sleep(THREAD_SLEEP_DURATION);
 
-        let mut stream = state.stream.lock();
+        let mut stream = state.stream.lock()
+            .expect("failed to lock packet stream");
 
         // Try to read packet from the remote endpoint.
         let Some(packet) = stream.try_recv().transpose() else {

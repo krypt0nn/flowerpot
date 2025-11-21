@@ -19,9 +19,7 @@
 use std::collections::HashMap;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
-use std::sync::{Arc, Weak};
-
-use spin::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Weak, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::crypto::base64;
 use crate::crypto::hash::Hash;
@@ -415,11 +413,14 @@ impl NodeHandler {
             handler: self.clone()
         };
 
+        let mut streams = self.streams.write()
+            .expect("failed to lock streams table");
+
         std::thread::spawn(move || {
             handlers::handle(state);
         });
 
-        self.streams.write().insert(peer_id, Arc::downgrade(&stream));
+        streams.insert(peer_id, Arc::downgrade(&stream));
     }
 
     /// Get table of available packet streams.
@@ -427,7 +428,7 @@ impl NodeHandler {
     pub fn streams(
         &self
     ) -> RwLockReadGuard<'_, HashMap<[u8; 32], Weak<Mutex<PacketStream>>>> {
-        self.streams.read()
+        self.streams.read().expect("failed to lock streams table")
     }
 
     /// Get mutable table of available packet streams.
@@ -435,7 +436,7 @@ impl NodeHandler {
     pub fn streams_mut(
         &self
     ) -> RwLockWriteGuard<'_, HashMap<[u8; 32], Weak<Mutex<PacketStream>>>> {
-        self.streams.write()
+        self.streams.write().expect("failed to lock streams table")
     }
 
     /// Get table of pending messages stored for a blockchain with provided
@@ -446,6 +447,7 @@ impl NodeHandler {
         callback: impl FnOnce(&HashMap<Hash, Message>) -> T
     ) -> Option<T> {
         self.pending_messages.read()
+            .expect("failed to lock pending messages table")
             .get(address.as_ref())
             .map(callback)
     }
@@ -458,6 +460,7 @@ impl NodeHandler {
         callback: impl FnOnce(&mut HashMap<Hash, Message>) -> T
     ) -> Option<T> {
         self.pending_messages.write()
+            .expect("failed to lock pending messages table")
             .get_mut(address.as_ref())
             .map(callback)
     }
@@ -470,6 +473,7 @@ impl NodeHandler {
         callback: impl FnOnce(&mut dyn Storage) -> T
     ) -> Option<T> {
         self.storages.lock()
+            .expect("failed to lock storages table")
             .get_mut(address.as_ref())
             .map(|storage| callback(storage.as_mut()))
     }
@@ -481,12 +485,16 @@ impl NodeHandler {
     fn send(&self, packet: Packet) {
         let mut disconnected = Vec::new();
 
-        let lock = self.streams.read();
+        let lock = self.streams.read()
+            .expect("failed to lock streams table");
 
         for (peer_id, sender) in lock.iter() {
             match sender.upgrade() {
                 Some(sender) => {
-                    if sender.lock().send(packet.clone()).is_err() {
+                    let mut lock = sender.lock()
+                        .expect("failed to lock packet stream");
+
+                    if lock.send(packet.clone()).is_err() {
                         disconnected.push(*peer_id);
                     }
                 }
@@ -498,7 +506,8 @@ impl NodeHandler {
         drop(lock);
 
         if !disconnected.is_empty() {
-            let mut lock = self.streams.write();
+            let mut lock = self.streams.write()
+                .expect("failed to lock streams table");
 
             for peer_id in disconnected {
                 lock.remove(&peer_id);
@@ -515,6 +524,7 @@ impl NodeHandler {
         let address: Address = address.into();
 
         let except = self.pending_messages.read()
+            .expect("failed to lock pending messages table")
             .get(&address)
             .map(|messages| {
                 messages.keys()
