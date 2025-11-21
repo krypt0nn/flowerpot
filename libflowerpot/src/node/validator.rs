@@ -16,6 +16,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use crate::crypto::hash::Hash;
 use crate::crypto::sign::SigningKey;
 use crate::address::Address;
 use crate::block::Block;
@@ -58,13 +59,7 @@ pub fn run(
 
         let tail_block = match tail_block {
             Ok(Some(tail_block)) => tail_block,
-
-            Ok(None) => {
-                #[cfg(feature = "tracing")]
-                tracing::error!("storage doesn't contain tail block hash");
-
-                break;
-            }
+            Ok(None) => Hash::ZERO,
 
             Err(err) => {
                 #[cfg(feature = "tracing")]
