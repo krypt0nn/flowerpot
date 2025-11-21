@@ -40,7 +40,7 @@ pub fn handle(
     tracing::debug!(
         local_id = base64::encode(stream.local_id()),
         peer_id = base64::encode(stream.peer_id()),
-        ?address,
+        address = address.to_base64(),
         message_hash = message.hash().to_base64(),
         ?message_size,
         "handle Message packet"
@@ -52,7 +52,7 @@ pub fn handle(
         tracing::warn!(
             local_id = base64::encode(stream.local_id()),
             peer_id = base64::encode(stream.peer_id()),
-            ?address,
+            address = address.to_base64(),
             message_hash = message.hash().to_base64(),
             ?message_size,
             "received message is too large"
@@ -70,7 +70,7 @@ pub fn handle(
                 ?err,
                 local_id = base64::encode(stream.local_id()),
                 peer_id = base64::encode(stream.peer_id()),
-                ?address,
+                address = address.to_base64(),
                 message_hash = message.hash().to_base64(),
                 ?message_size,
                 "failed to verify received message"
@@ -86,7 +86,7 @@ pub fn handle(
         tracing::warn!(
             local_id = base64::encode(stream.local_id()),
             peer_id = base64::encode(stream.peer_id()),
-            ?address,
+            address = address.to_base64(),
             verifying_key = verifying_key.to_base64(),
             message_hash = message.hash().to_base64(),
             ?message_size,
@@ -107,7 +107,7 @@ pub fn handle(
         tracing::trace!(
             local_id = base64::encode(stream.local_id()),
             peer_id = base64::encode(stream.peer_id()),
-            ?address,
+            address = address.to_base64(),
             verifying_key = verifying_key.to_base64(),
             message_hash = message.hash().to_base64(),
             ?message_size,
@@ -125,7 +125,7 @@ pub fn handle(
         tracing::debug!(
             local_id = base64::encode(stream.local_id()),
             peer_id = base64::encode(stream.peer_id()),
-            ?address,
+            address = address.to_base64(),
             verifying_key = verifying_key.to_base64(),
             message_hash = message.hash().to_base64(),
             ?message_size,
@@ -147,7 +147,7 @@ pub fn handle(
             tracing::trace!(
                 local_id = base64::encode(stream.local_id()),
                 peer_id = base64::encode(stream.peer_id()),
-                ?address,
+                address = address.to_base64(),
                 verifying_key = verifying_key.to_base64(),
                 message_hash = message.hash().to_base64(),
                 ?message_size,
@@ -163,7 +163,7 @@ pub fn handle(
                 ?err,
                 local_id = base64::encode(stream.local_id()),
                 peer_id = base64::encode(stream.peer_id()),
-                ?address,
+                address = address.to_base64(),
                 verifying_key = verifying_key.to_base64(),
                 message_hash = message.hash().to_base64(),
                 ?message_size,
@@ -180,7 +180,7 @@ pub fn handle(
     tracing::info!(
         local_id = base64::encode(stream.local_id()),
         peer_id = base64::encode(stream.peer_id()),
-        ?address,
+        address = address.to_base64(),
         verifying_key = verifying_key.to_base64(),
         message_hash = message.hash().to_base64(),
         ?message_size,

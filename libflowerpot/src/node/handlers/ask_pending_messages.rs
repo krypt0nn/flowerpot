@@ -38,8 +38,10 @@ pub fn handle(
     tracing::debug!(
         local_id = base64::encode(stream.local_id()),
         peer_id = base64::encode(stream.peer_id()),
-        ?address,
-        ?except,
+        address = address.to_base64(),
+        except = ?except.iter()
+            .map(|hash| hash.to_base64())
+            .collect::<Vec<String>>(),
         "handle AskPendingMessages packet"
     );
 
@@ -64,7 +66,7 @@ pub fn handle(
             ?err,
             local_id = base64::encode(stream.local_id()),
             peer_id = base64::encode(stream.peer_id()),
-            ?address,
+            address = address.to_base64(),
             "failed to send PendingMessages packet"
         );
 

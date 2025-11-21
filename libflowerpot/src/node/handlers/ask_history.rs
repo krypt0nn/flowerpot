@@ -40,8 +40,8 @@ pub fn handle(
     tracing::debug!(
         local_id = base64::encode(stream.local_id()),
         peer_id = base64::encode(stream.peer_id()),
-        ?address,
-        ?since_block,
+        address = address.to_base64(),
+        since_block = since_block.to_base64(),
         ?max_length,
         "handle AskHistory packet"
     );
@@ -76,8 +76,8 @@ pub fn handle(
         tracing::debug!(
             local_id = base64::encode(stream.local_id()),
             peer_id = base64::encode(stream.peer_id()),
-            ?address,
-            ?since_block,
+            address = address.to_base64(),
+            since_block = since_block.to_base64(),
             ?max_length,
             "history for this blockchain is not available"
         );
@@ -94,8 +94,8 @@ pub fn handle(
                 ?err,
                 local_id = base64::encode(stream.local_id()),
                 peer_id = base64::encode(stream.peer_id()),
-                ?address,
-                ?since_block,
+                address = address.to_base64(),
+                since_block = since_block.to_base64(),
                 ?max_length,
                 "failed to read blockchain history from a storage"
             );
@@ -115,8 +115,8 @@ pub fn handle(
             ?err,
             local_id = base64::encode(stream.local_id()),
             peer_id = base64::encode(stream.peer_id()),
-            ?address,
-            ?since_block,
+            address = address.to_base64(),
+            since_block = since_block.to_base64(),
             ?max_length,
             "failed to send History packet"
         );

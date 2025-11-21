@@ -39,7 +39,7 @@ pub fn handle(
     tracing::debug!(
         local_id = base64::encode(stream.local_id()),
         peer_id = base64::encode(stream.peer_id()),
-        ?address,
+        address = address.to_base64(),
         block_hash = block.hash().to_base64(),
         "handle Block packet"
     );
@@ -54,7 +54,7 @@ pub fn handle(
                 ?err,
                 local_id = base64::encode(stream.local_id()),
                 peer_id = base64::encode(stream.peer_id()),
-                ?address,
+                address = address.to_base64(),
                 block_hash = block.hash().to_base64(),
                 "failed to verify received block"
             );
@@ -69,7 +69,7 @@ pub fn handle(
         tracing::warn!(
             local_id = base64::encode(stream.local_id()),
             peer_id = base64::encode(stream.peer_id()),
-            ?address,
+            address = address.to_base64(),
             block_hash = block.hash().to_base64(),
             "received invalid block"
         );
@@ -81,7 +81,7 @@ pub fn handle(
     tracing::info!(
         local_id = base64::encode(stream.local_id()),
         peer_id = base64::encode(stream.peer_id()),
-        ?address,
+        address = address.to_base64(),
         block_hash = block.hash().to_base64(),
         "received valid block"
     );
@@ -101,7 +101,7 @@ pub fn handle(
                     tracing::info!(
                         ?local_id,
                         ?peer_id,
-                        ?address,
+                        address = address.to_base64(),
                         block_hash = block.hash().to_base64(),
                         "indexed block in tracker"
                     );
@@ -114,7 +114,7 @@ pub fn handle(
                     tracing::info!(
                         ?local_id,
                         ?peer_id,
-                        ?address,
+                        address = address.to_base64(),
                         block_hash = block.hash().to_base64(),
                         "block was already stored"
                     );
@@ -125,7 +125,7 @@ pub fn handle(
                     tracing::warn!(
                         ?local_id,
                         ?peer_id,
-                        ?address,
+                        address = address.to_base64(),
                         block_hash = block.hash().to_base64(),
                         ?result,
                         "block was not indexed in tracker"
@@ -138,7 +138,7 @@ pub fn handle(
                         ?err,
                         ?local_id,
                         ?peer_id,
-                        ?address,
+                        address = address.to_base64(),
                         block_hash = block.hash().to_base64(),
                         "failed to write block to the tracker"
                     );

@@ -38,8 +38,8 @@ pub fn handle(
     tracing::debug!(
         local_id = base64::encode(stream.local_id()),
         peer_id = base64::encode(stream.peer_id()),
-        ?address,
-        ?message,
+        address = address.to_base64(),
+        message = message.to_base64(),
         "handle AskMessage packet"
     );
 
@@ -64,8 +64,8 @@ pub fn handle(
                     ?err,
                     local_id = base64::encode(stream.local_id()),
                     peer_id = base64::encode(stream.peer_id()),
-                    ?address,
-                    ?message,
+                    address = address.to_base64(),
+                    message = message.to_base64(),
                     "failed to read message from a storage"
                 );
 
@@ -86,8 +86,8 @@ pub fn handle(
                 ?err,
                 local_id = base64::encode(stream.local_id()),
                 peer_id = base64::encode(stream.peer_id()),
-                ?address,
-                ?message,
+                address = address.to_base64(),
+                message = message.to_base64(),
                 "failed to send Message packet"
             );
 

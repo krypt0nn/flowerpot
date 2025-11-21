@@ -31,7 +31,7 @@ pub fn run(
 ) {
     if address.verifying_key() != &signing_key.verifying_key() {
         tracing::error!(
-            ?address,
+            address = address.to_base64(),
             address_key = address.verifying_key().to_base64(),
             validator_key = signing_key.verifying_key().to_base64(),
             "provided signing key cannot be used to issue new blocks to a blockchain with this address"
@@ -42,7 +42,7 @@ pub fn run(
 
     #[cfg(feature = "tracing")]
     tracing::info!(
-        ?address,
+        address = address.to_base64(),
         "starting blockchain validator thread"
     );
 
@@ -101,7 +101,7 @@ pub fn run(
 
         #[cfg(feature = "tracing")]
         tracing::debug!(
-            ?address,
+            address = address.to_base64(),
             tail_block = tail_block.to_base64(),
             messages = ?messages.iter()
                 .map(|(hash, _)| hash.to_base64())
@@ -157,7 +157,7 @@ pub fn run(
                 #[cfg(feature = "tracing")]
                 tracing::error!(
                     ?err,
-                    ?address,
+                    address = address.to_base64(),
                     tail_block = tail_block.to_base64(),
                     "failed to create new block"
                 );
@@ -177,7 +177,7 @@ pub fn run(
                 #[cfg(feature = "tracing")]
                 tracing::info!(
                     ?result,
-                    ?address,
+                    address = address.to_base64(),
                     tail_block = tail_block.to_base64(),
                     block_hash = block.hash().to_base64(),
                     "try to write newly created block to the storage"
@@ -188,7 +188,7 @@ pub fn run(
                 if result == StorageWriteResult::Success {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(
-                        ?address,
+                        address = address.to_base64(),
                         tail_block = tail_block.to_base64(),
                         block_hash = block.hash().to_base64(),
                         "share created block"
@@ -202,7 +202,7 @@ pub fn run(
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
                     ?err,
-                    ?address,
+                    address = address.to_base64(),
                     tail_block = tail_block.to_base64(),
                     block_hash = block.hash().to_base64(),
                     "failed to write newly created block to the tracker"

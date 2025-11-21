@@ -277,7 +277,7 @@ impl Node {
         for (address, storage) in self.storages.iter_mut() {
             #[cfg(feature = "tracing")]
             tracing::info!(
-                ?address,
+                address = address.to_base64(),
                 "synchronizing storage"
             );
 

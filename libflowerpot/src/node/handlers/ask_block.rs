@@ -38,7 +38,7 @@ pub fn handle(
     tracing::debug!(
         local_id = base64::encode(stream.local_id()),
         peer_id = base64::encode(stream.peer_id()),
-        ?address,
+        address = address.to_base64(),
         ?hash,
         "handle AskBlock packet"
     );
@@ -60,7 +60,7 @@ pub fn handle(
                     ?err,
                     local_id = base64::encode(stream.local_id()),
                     peer_id = base64::encode(stream.peer_id()),
-                    ?address,
+                    address = address.to_base64(),
                     ?hash,
                     "failed to send Block packet"
                 );
@@ -77,7 +77,7 @@ pub fn handle(
                 ?err,
                 local_id = base64::encode(stream.local_id()),
                 peer_id = base64::encode(stream.peer_id()),
-                ?address,
+                address = address.to_base64(),
                 ?hash,
                 "failed to read block from tracker"
             );
