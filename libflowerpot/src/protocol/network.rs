@@ -230,6 +230,13 @@ impl Default for PacketStreamOptions {
     }
 }
 
+impl AsRef<PacketStreamOptions> for PacketStreamOptions {
+    #[inline(always)]
+    fn as_ref(&self) -> &PacketStreamOptions {
+        self
+    }
+}
+
 #[derive(Default, Debug, Clone, Copy, PartialEq)]
 pub struct PacketStreamStats {
     /// Total amount of uploaded (written) bytes.
