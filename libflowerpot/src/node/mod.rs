@@ -413,14 +413,12 @@ impl NodeHandler {
             handler: self.clone()
         };
 
-        let mut streams = self.streams.write()
-            .expect("failed to lock streams table");
+        self.streams_mut()
+            .insert(peer_id, Arc::downgrade(&stream));
 
         std::thread::spawn(move || {
             handlers::handle(state);
         });
-
-        streams.insert(peer_id, Arc::downgrade(&stream));
     }
 
     /// Get table of available packet streams.
@@ -485,8 +483,7 @@ impl NodeHandler {
     fn send(&self, packet: Packet) {
         let mut disconnected = Vec::new();
 
-        let lock = self.streams.read()
-            .expect("failed to lock streams table");
+        let lock = self.streams();
 
         for (peer_id, sender) in lock.iter() {
             match sender.upgrade() {
@@ -506,8 +503,7 @@ impl NodeHandler {
         drop(lock);
 
         if !disconnected.is_empty() {
-            let mut lock = self.streams.write()
-                .expect("failed to lock streams table");
+            let mut lock = self.streams_mut();
 
             for peer_id in disconnected {
                 lock.remove(&peer_id);
