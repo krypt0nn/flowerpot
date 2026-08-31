@@ -700,6 +700,27 @@ impl PacketStream {
             // Otherwise if we don't have the whole packet yet we need to read
             // it from the stream.
             match self.stream.read(&mut buf) {
+                // If the remote endpoint closed the connection then read will
+                // endlessly return zero bytes, so it must be treated as an
+                // error instead of an empty read.
+                Ok(0) => {
+                    if read > 0 {
+                        let elapsed = now.elapsed().as_secs_f64();
+
+                        let download_rate = read as f64 / elapsed;
+
+                        self.stats.download_total += read;
+                        self.stats.download_rate = (download_rate * 2.0 + self.stats.download_rate) / 3.0;
+                    }
+
+                    return Err(PacketStreamError::Stream(
+                        std::io::Error::new(
+                            ErrorKind::UnexpectedEof,
+                            "connection closed by the remote endpoint"
+                        )
+                    ));
+                }
+
                 // If we've read some part of the packet.
                 Ok(n) => {
                     // Decrypt it if needed.

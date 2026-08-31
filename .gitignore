@@ -2,3 +2,5 @@
 /.direnv
 /Cargo.lock
 /test
+/*.md
+!/README.md
