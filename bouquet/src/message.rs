@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // bouquet
-// Copyright (C) 2025  Nikita Podvirnyi <krypt0nn@vk.ru>
+// Copyright (C) 2025 - 2026  Nikita Podvirnyi <krypt0nn@vk.ru>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -86,7 +86,7 @@ impl MessageCommands {
                         }
                     }
 
-                    None => SigningKey::random(&mut crate::safe_rng(seed))
+                    None => SigningKey::from_rng(&mut crate::safe_rng(seed))
                 };
 
                 let data = match data {
@@ -140,7 +140,7 @@ impl MessageCommands {
                     }
                 };
 
-                let secret_key = SecretKey::random(&mut crate::safe_rng(seed));
+                let secret_key = SecretKey::from_rng(&mut crate::safe_rng(seed));
 
                 let options = PacketStreamOptions {
                     encryption_algorithms: if no_encryption {

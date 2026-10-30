@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // bouquet
-// Copyright (C) 2025  Nikita Podvirnyi <krypt0nn@vk.ru>
+// Copyright (C) 2025 - 2026  Nikita Podvirnyi <krypt0nn@vk.ru>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -16,8 +16,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use rand_chacha::rand_core::RngCore;
 use clap::Subcommand;
+use rand_chacha::rand_core::Rng;
 
 use flowerpot::crypto::sign::{SigningKey, VerifyingKey};
 use flowerpot::address::Address;
@@ -62,7 +62,7 @@ impl AddressCommands {
                     }
 
                     None => {
-                        let signing_key = SigningKey::random(&mut rng);
+                        let signing_key = SigningKey::from_rng(&mut rng);
 
                         let verifying_key = signing_key.verifying_key();
 

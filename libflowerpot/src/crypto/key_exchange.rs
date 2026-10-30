@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // libflowerpot
-// Copyright (C) 2025  Nikita Podvirnyi <krypt0nn@vk.ru>
+// Copyright (C) 2025 - 2026  Nikita Podvirnyi <krypt0nn@vk.ru>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -15,6 +15,9 @@
 //
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+use k256::elliptic_curve::Generate;
+use getrandom::rand_core::SeedableRng;
 
 use super::base64;
 
@@ -36,10 +39,22 @@ impl SecretKey {
         170, 192, 145, 228,  73,   7, 150, 224
     ];
 
-    /// Generate new random secret key.
+    /// Generate new random secret key using provided RNG.
     #[inline]
-    pub fn random(rng: &mut impl k256::schnorr::CryptoRngCore) -> Self {
-        Self(k256::ecdh::EphemeralSecret::random(rng))
+    pub fn from_rng(rng: &mut impl k256::schnorr::CryptoRng) -> Self {
+        Self(k256::ecdh::EphemeralSecret::generate_from_rng(rng))
+    }
+
+    /// Generate new random secret key using system RNG. Return error if failed
+    /// to seed PRNG with system-provided entropy.
+    pub fn random() -> Result<Self, getrandom::Error> {
+        let mut seed = [0; 32];
+
+        getrandom::fill(&mut seed)?;
+
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed(seed);
+
+        Ok(Self::from_rng(&mut rng))
     }
 
     #[inline]
@@ -142,8 +157,8 @@ fn test() {
 
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(123);
 
-    let secret_1 = SecretKey::random(&mut rng);
-    let secret_2 = SecretKey::random(&mut rng);
+    let secret_1 = SecretKey::from_rng(&mut rng);
+    let secret_2 = SecretKey::from_rng(&mut rng);
 
     let public_1 = secret_1.public_key().to_base64();
     let public_2 = secret_2.public_key().to_base64();

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // libflowerpot
-// Copyright (C) 2025  Nikita Podvirnyi <krypt0nn@vk.ru>
+// Copyright (C) 2025 - 2026  Nikita Podvirnyi <krypt0nn@vk.ru>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -503,7 +503,7 @@ fn test() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut rand = rand_chacha::ChaCha20Rng::seed_from_u64(123);
 
-    let signing_key = SigningKey::random(&mut rand);
+    let signing_key = SigningKey::from_rng(&mut rand);
 
     let message_1 = Message::create(&signing_key, b"Message 1".as_slice())?;
     let message_2 = Message::create(&signing_key, b"Message 2".as_slice())?;

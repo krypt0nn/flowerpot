@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // bouquet
-// Copyright (C) 2025  Nikita Podvirnyi <krypt0nn@vk.ru>
+// Copyright (C) 2025 - 2026  Nikita Podvirnyi <krypt0nn@vk.ru>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -43,9 +43,11 @@ impl KeypairCommands {
     pub fn run(self) -> anyhow::Result<()> {
         match self {
             Self::Create { seed } => {
-                let signing_key = SigningKey::random(&mut super::safe_rng(seed));
+                let signing_key = SigningKey::from_rng(&mut super::safe_rng(seed));
 
-                std::io::stdout().write_all(signing_key.to_base64().as_bytes())?;
+                std::io::stdout().write_all(
+                    signing_key.to_base64().as_bytes()
+                )?;
             }
 
             Self::Export { signing_key } => {

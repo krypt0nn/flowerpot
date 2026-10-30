@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // bouquet
-// Copyright (C) 2025  Nikita Podvirnyi <krypt0nn@vk.ru>
+// Copyright (C) 2025 - 2026  Nikita Podvirnyi <krypt0nn@vk.ru>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -22,7 +22,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 use rand_chacha::ChaCha20Rng;
-use rand_chacha::rand_core::{RngCore, SeedableRng};
+use rand_chacha::rand_core::SeedableRng;
 
 mod keypair;
 mod address;
@@ -34,14 +34,19 @@ pub fn safe_rng(seed: Option<u64>) -> ChaCha20Rng {
     match seed {
         Some(seed) => ChaCha20Rng::seed_from_u64(seed),
         None => {
-            let mut rng = ChaCha20Rng::from_entropy();
+            let mut seed = [0; 32];
 
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs();
+                .as_nanos();
 
-            ChaCha20Rng::seed_from_u64(now ^ rng.next_u64())
+            seed[..16].copy_from_slice(&now.to_le_bytes());
+            seed[16..].copy_from_slice(&now.to_be_bytes());
+
+            let _ = getrandom::fill(&mut seed);
+
+            ChaCha20Rng::from_seed(seed)
         }
     }
 }

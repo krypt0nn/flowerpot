@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // libflowerpot
-// Copyright (C) 2025  Nikita Podvirnyi <krypt0nn@vk.ru>
+// Copyright (C) 2025 - 2026  Nikita Podvirnyi <krypt0nn@vk.ru>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -19,6 +19,8 @@
 pub use k256::ecdsa::Error as SignatureError;
 
 use k256::ecdsa::signature::hazmat::PrehashVerifier;
+use k256::elliptic_curve::Generate;
+use getrandom::rand_core::SeedableRng;
 
 use super::base64;
 use super::hash::Hash;
@@ -31,10 +33,22 @@ impl SigningKey {
     /// Bytes length of the signature signing key.
     pub const SIZE: usize = 32;
 
-    /// Generate new random signature signing key.
+    /// Generate new random signature signing key using provided RNG.
     #[inline]
-    pub fn random(rng: &mut impl k256::schnorr::CryptoRngCore) -> Self {
-        Self(k256::ecdsa::SigningKey::random(rng))
+    pub fn from_rng(rng: &mut impl k256::schnorr::CryptoRng) -> Self {
+        Self(k256::ecdsa::SigningKey::generate_from_rng(rng))
+    }
+
+    /// Generate new random signature signing key using system RNG. Return error
+    /// if failed to seed PRNG with system-provided entropy.
+    pub fn random() -> Result<Self, getrandom::Error> {
+        let mut seed = [0; 32];
+
+        getrandom::fill(&mut seed)?;
+
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed(seed);
+
+        Ok(Self::from_rng(&mut rng))
     }
 
     #[inline]
@@ -188,8 +202,9 @@ impl Signature {
         signing_key: impl AsRef<SigningKey>,
         hash: impl AsRef<Hash>
     ) -> Result<Self, SignatureError> {
-        let (sign, id) = signing_key.as_ref().0
-            .sign_prehash_recoverable(hash.as_ref().as_bytes())?;
+        let (sign, id) = signing_key.as_ref().0.sign_prehash_recoverable(
+            hash.as_ref().as_bytes()
+        );
 
         Ok(Self(sign, id))
     }
@@ -276,7 +291,7 @@ fn test() -> Result<(), SignatureError> {
 
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(123);
 
-    let signing_key = SigningKey::random(&mut rng);
+    let signing_key = SigningKey::from_rng(&mut rng);
     let verifying_key = signing_key.verifying_key();
 
     let signing_key = SigningKey::from_base64(signing_key.to_base64()).unwrap();
